@@ -32,7 +32,7 @@ export function isCharacterId(value: unknown): value is CharacterId {
 }
 
 /**
- * How far above the feet the collision box sits: the middle of the visible body,
+ * How far above the feet the collision circle sits: the middle of the visible body,
  * so walls stop a character at its torso rather than its toes.
  */
 export function collisionOffsetY(id: CharacterId): number {

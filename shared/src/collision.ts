@@ -1,6 +1,14 @@
-/** Half extents of a character's collision box. */
-export const BODY_HALF_WIDTH = 5;
-export const BODY_HALF_HEIGHT = 3;
+/** Radius of a character's circular collision body, in map pixels. */
+export const BODY_RADIUS = 4;
+
+/**
+ * When a move is blocked on both axes, try it rotated by these angles (each way,
+ * smallest first) so characters glide along diagonal walls and round corners.
+ */
+const GLIDE_ROTATIONS = [30, 45, 60, 75].map((deg) => {
+  const rad = (deg * Math.PI) / 180;
+  return { cos: Math.cos(rad), sin: Math.sin(rad) };
+});
 
 /**
  * Walkability grid for the map.
@@ -69,31 +77,51 @@ export class CollisionMap {
     return true;
   }
 
-  private isPointWalkable(px: number, py: number): boolean {
-    return this.isCellWalkable(Math.floor(px / this.cellSize), Math.floor(py / this.cellSize));
-  }
-
   /**
    * True when a character whose feet are at (x, y) fits on walkable ground.
-   * The collision box is centered `offsetY` pixels above the feet.
+   * The body is a circle of BODY_RADIUS centered `offsetY` pixels above the feet.
    */
   canStandAt(x: number, y: number, offsetY = 0): boolean {
-    y -= offsetY;
-    return (
-      this.isPointWalkable(x - BODY_HALF_WIDTH, y - BODY_HALF_HEIGHT) &&
-      this.isPointWalkable(x + BODY_HALF_WIDTH, y - BODY_HALF_HEIGHT) &&
-      this.isPointWalkable(x - BODY_HALF_WIDTH, y + BODY_HALF_HEIGHT) &&
-      this.isPointWalkable(x + BODY_HALF_WIDTH, y + BODY_HALF_HEIGHT)
-    );
+    const cy = y - offsetY;
+    const size = this.cellSize;
+    const minX = Math.floor((x - BODY_RADIUS) / size);
+    const maxX = Math.floor((x + BODY_RADIUS) / size);
+    const minY = Math.floor((cy - BODY_RADIUS) / size);
+    const maxY = Math.floor((cy + BODY_RADIUS) / size);
+    for (let gy = minY; gy <= maxY; gy++) {
+      for (let gx = minX; gx <= maxX; gx++) {
+        if (this.isCellWalkable(gx, gy)) continue;
+        // Distance from the circle center to the nearest point of this blocked cell.
+        const nx = Math.max(gx * size, Math.min(x, (gx + 1) * size));
+        const ny = Math.max(gy * size, Math.min(cy, (gy + 1) * size));
+        if ((x - nx) ** 2 + (cy - ny) ** 2 < BODY_RADIUS * BODY_RADIUS) return false;
+      }
+    }
+    return true;
   }
 
   /**
-   * Move by (dx, dy), resolving each axis separately so characters slide
-   * along walls instead of sticking to them.
+   * Move by (dx, dy) without entering blocked cells. Tries, in order: the full
+   * move, sliding along each axis, then the move rotated by GLIDE_ROTATIONS so
+   * characters glide along diagonal walls (e.g. stair rails) instead of snagging.
    */
   moveWithCollision(x: number, y: number, dx: number, dy: number, offsetY = 0): { x: number; y: number } {
-    if (dx !== 0 && this.canStandAt(x + dx, y, offsetY)) x += dx;
-    if (dy !== 0 && this.canStandAt(x, y + dy, offsetY)) y += dy;
+    if (dx === 0 && dy === 0) return { x, y };
+    if (this.canStandAt(x + dx, y + dy, offsetY)) return { x: x + dx, y: y + dy };
+
+    let nx = x;
+    let ny = y;
+    if (dx !== 0 && this.canStandAt(x + dx, y, offsetY)) nx += dx;
+    if (dy !== 0 && this.canStandAt(nx, y + dy, offsetY)) ny += dy;
+    if (nx !== x || ny !== y) return { x: nx, y: ny };
+
+    for (const { cos, sin } of GLIDE_ROTATIONS) {
+      for (const sign of [1, -1]) {
+        const rx = dx * cos - dy * sin * sign;
+        const ry = dx * sin * sign + dy * cos;
+        if (this.canStandAt(x + rx, y + ry, offsetY)) return { x: x + rx, y: y + ry };
+      }
+    }
     return { x, y };
   }
 }

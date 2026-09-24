@@ -1,6 +1,6 @@
 import { Application, Assets, Container, Graphics, Rectangle, Sprite, TextureStyle, type Spritesheet } from "pixi.js";
 import { CHARACTER_IDS, collisionOffsetY, type CharacterId, type Direction } from "../../../shared/src/characters.ts";
-import { BODY_HALF_HEIGHT, BODY_HALF_WIDTH, CollisionMap } from "../../../shared/src/collision.ts";
+import { BODY_RADIUS, CollisionMap } from "../../../shared/src/collision.ts";
 import { MAP_HEIGHT, MAP_WIDTH, MOVE_SPEED, TICK_RATE } from "../../../shared/src/constants.ts";
 import type { PlayerInfo, PlayerState } from "../../../shared/src/protocol.ts";
 import { Avatar } from "./avatar.ts";
@@ -36,7 +36,7 @@ export class Game {
   private readonly map: CollisionMap;
   private readonly callbacks: GameCallbacks;
   private editor: MapEditor | null = null;
-  /** Outline of the local player's collision box, shown with ?debug / ?edit. */
+  /** Outline of the local player's collision circle, shown with ?debug / ?edit. */
   private bodyBox: Graphics | null = null;
   private readonly world = new Container({ sortableChildren: false });
   private readonly entities = new Container({ sortableChildren: true });
@@ -100,7 +100,7 @@ export class Game {
       const collisionOverlay = new CollisionOverlay(map);
       game.world.addChild(collisionOverlay.sprite);
       game.bodyBox = new Graphics()
-        .rect(-BODY_HALF_WIDTH, -BODY_HALF_HEIGHT, BODY_HALF_WIDTH * 2, BODY_HALF_HEIGHT * 2)
+        .circle(0, 0, BODY_RADIUS)
         .stroke({ color: 0xffe38a, width: 1 });
       if (params.has("edit")) game.editor = new MapEditor(map, collisionOverlay, game.world, app.stage);
       Object.assign(window, { game });
