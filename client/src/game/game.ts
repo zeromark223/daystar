@@ -1,10 +1,12 @@
-import { Application, Assets, Container, Graphics, Rectangle, Sprite, TextureStyle, type Spritesheet } from "pixi.js";
+import { Application, Assets, Container, Rectangle, Sprite, TextureStyle, type Spritesheet } from "pixi.js";
 import { CHARACTER_IDS, type CharacterId, type Direction } from "../../../shared/src/characters.ts";
-import { collisionGrid, moveWithCollision } from "../../../shared/src/collision.ts";
+import { CollisionMap } from "../../../shared/src/collision.ts";
 import { MAP_HEIGHT, MAP_WIDTH, MOVE_SPEED, TICK_RATE } from "../../../shared/src/constants.ts";
 import type { PlayerInfo, PlayerState } from "../../../shared/src/protocol.ts";
 import { Avatar } from "./avatar.ts";
+import { CollisionOverlay } from "./collision-overlay.ts";
 import { KeyboardInput } from "./input.ts";
+import { MapEditor } from "./map-editor.ts";
 
 export interface GameCallbacks {
   sendMove(x: number, y: number, dir: Direction, moving: boolean): void;
@@ -31,7 +33,9 @@ function facing(vx: number, vy: number, current: Direction): Direction {
 export class Game {
   private readonly app: Application;
   private readonly sheets: Record<CharacterId, Spritesheet>;
+  private readonly map: CollisionMap;
   private readonly callbacks: GameCallbacks;
+  private editor: MapEditor | null = null;
   private readonly world = new Container({ sortableChildren: false });
   private readonly entities = new Container({ sortableChildren: true });
   private readonly overlay = new Container({ sortableChildren: true });
@@ -43,9 +47,15 @@ export class Game {
   private lastSent = { x: NaN, y: NaN, dir: "south" as Direction, moving: false };
   private lastSentAt = 0;
 
-  private constructor(app: Application, sheets: Record<CharacterId, Spritesheet>, callbacks: GameCallbacks) {
+  private constructor(
+    app: Application,
+    sheets: Record<CharacterId, Spritesheet>,
+    map: CollisionMap,
+    callbacks: GameCallbacks,
+  ) {
     this.app = app;
     this.sheets = sheets;
+    this.map = map;
     this.callbacks = callbacks;
   }
 
@@ -63,7 +73,11 @@ export class Game {
     });
     stage.appendChild(app.canvas);
 
-    const [mapTexture, ...sheetList] = await Promise.all([
+    const [collisionText, mapTexture, ...sheetList] = await Promise.all([
+      fetch("/api/collision").then((r) => {
+        if (!r.ok) throw new Error(`Could not load the collision map (HTTP ${r.status}).`);
+        return r.text();
+      }),
       Assets.load("/assets/map.png"),
       ...CHARACTER_IDS.map((id) => Assets.load<Spritesheet>(`/assets/characters/${id}.json`)),
     ]);
@@ -72,15 +86,21 @@ export class Game {
       Spritesheet
     >;
 
-    const game = new Game(app, sheets, callbacks);
+    const map = CollisionMap.parse(collisionText);
+    const game = new Game(app, sheets, map, callbacks);
     game.world.addChild(new Sprite(mapTexture));
-    if (new URLSearchParams(location.search).has("debug")) {
-      game.world.addChild(buildCollisionOverlay());
+    app.stage.addChild(game.world, game.overlay);
+    game.setupPointer();
+
+    // ?debug shows collision cells; ?edit also adds the Draw / Erase toolbar.
+    const params = new URLSearchParams(location.search);
+    if (params.has("debug") || params.has("edit")) {
+      const collisionOverlay = new CollisionOverlay(map);
+      game.world.addChild(collisionOverlay.sprite);
+      if (params.has("edit")) game.editor = new MapEditor(map, collisionOverlay, game.world, app.stage);
       Object.assign(window, { game });
     }
     game.world.addChild(game.entities);
-    app.stage.addChild(game.world, game.overlay);
-    game.setupPointer();
     game.resize();
     app.renderer.on("resize", () => game.resize());
     app.ticker.add((ticker) => game.update(ticker.deltaMS));
@@ -133,6 +153,7 @@ export class Game {
     this.app.stage.eventMode = "static";
     this.app.stage.hitArea = new Rectangle(0, 0, 1e6, 1e6);
     this.app.stage.on("pointertap", (e) => {
+      if (this.editor?.active) return;
       (document.activeElement as HTMLElement | null)?.blur();
       this.tapTarget = {
         x: (e.global.x - this.world.x) / this.zoom,
@@ -178,7 +199,7 @@ export class Game {
       const len = Math.hypot(vx, vy);
       let step = MOVE_SPEED * dt;
       if (this.tapTarget) step = Math.min(step, len);
-      const next = moveWithCollision(self.x, self.y, (vx / len) * step, (vy / len) * step);
+      const next = this.map.moveWithCollision(self.x, self.y, (vx / len) * step, (vy / len) * step);
       moving = next.x !== self.x || next.y !== self.y;
       if (!moving) this.tapTarget = null; // walked into a wall
       dir = facing(vx, vy, self.dir);
@@ -211,16 +232,4 @@ export class Game {
 
 function clamp(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, v));
-}
-
-/** Red tint over blocked cells; enabled with ?debug in the URL. */
-function buildCollisionOverlay(): Graphics {
-  const { cellSize, cols, rows, walkable } = collisionGrid;
-  const g = new Graphics();
-  for (let y = 0; y < rows; y++) {
-    for (let x = 0; x < cols; x++) {
-      if (!walkable[y * cols + x]) g.rect(x * cellSize, y * cellSize, cellSize, cellSize);
-    }
-  }
-  return g.fill({ color: 0xff3030, alpha: 0.35 });
 }

@@ -315,3 +315,68 @@ button:disabled {
     display: none;
   }
 }
+
+/* Collision editor (?edit) */
+
+.map-editor {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100vw - 32px);
+  padding: 6px 8px;
+  background: var(--panel);
+  border: 2px solid var(--outline);
+  border-radius: var(--radius);
+  font-size: 0.9rem;
+}
+
+.map-editor .title {
+  font-weight: 600;
+  margin-right: 4px;
+}
+
+.map-editor button {
+  padding: 4px 10px;
+  background: #6b5a48;
+}
+
+.map-editor button:hover {
+  background: #7d6a56;
+}
+
+.map-editor button[data-tool="draw"][aria-pressed="true"] {
+  background: #c2452d;
+}
+
+.map-editor button[data-tool="erase"][aria-pressed="true"] {
+  background: #2d8fc2;
+}
+
+.map-editor button[data-action="save"] {
+  background: var(--accent);
+}
+
+.map-editor select {
+  font: inherit;
+  border: 2px solid var(--outline);
+  border-radius: 6px;
+  background: var(--light);
+  color: var(--ink);
+}
+
+.map-editor .status {
+  color: #d9e89a;
+  min-width: 9em;
+}
+
+@media (max-width: 600px) {
+  .map-editor {
+    top: 64px;
+    left: 16px;
+    right: auto;
+  }
+}

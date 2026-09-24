@@ -1,5 +1,5 @@
 import type { WebSocket } from "ws";
-import { canStandAt } from "../../shared/src/collision.ts";
+import type { CollisionMap } from "../../shared/src/collision.ts";
 import {
   CHAT_HISTORY_SIZE,
   MAX_CHAT_LENGTH,
@@ -47,10 +47,12 @@ export class Room {
   private nextChatId = 1;
   private dirty = false;
   private ticker: NodeJS.Timeout | null = null;
+  private readonly map: CollisionMap;
   private readonly onEmpty: () => void;
 
-  constructor(id: string, onEmpty: () => void) {
+  constructor(id: string, map: CollisionMap, onEmpty: () => void) {
     this.id = id;
+    this.map = map;
     this.onEmpty = onEmpty;
   }
 
@@ -95,7 +97,7 @@ export class Room {
     }
     if (this.nextPlayerId > 0xffff) this.nextPlayerId = 1;
 
-    const spawn = findSpawn();
+    const spawn = findSpawn(this.map);
     const player: Player = {
       id: this.nextPlayerId++,
       socket,
@@ -135,7 +137,7 @@ export class Room {
     const maxDistance = MOVE_SPEED * elapsed + MOVE_SLACK;
     const distance = Math.hypot(move.x - player.x, move.y - player.y);
 
-    if (distance > maxDistance || !canStandAt(move.x, move.y)) {
+    if (distance > maxDistance || !this.map.canStandAt(move.x, move.y)) {
       send(player.socket, { t: "correction", x: player.x, y: player.y });
       return;
     }
@@ -197,13 +199,13 @@ function toInfo(p: Player): PlayerInfo {
   return { id: p.id, name: p.name, character: p.character, x: p.x, y: p.y, dir: p.dir, moving: p.moving };
 }
 
-function findSpawn(): { x: number; y: number } {
+function findSpawn(map: CollisionMap): { x: number; y: number } {
   for (let i = 0; i < 50; i++) {
     const angle = Math.random() * Math.PI * 2;
     const r = Math.random() * SPAWN_RADIUS;
     const x = Math.round(SPAWN_POINT.x + Math.cos(angle) * r);
     const y = Math.round(SPAWN_POINT.y + Math.sin(angle) * r);
-    if (canStandAt(x, y)) return { x, y };
+    if (map.canStandAt(x, y)) return { x, y };
   }
   return { ...SPAWN_POINT };
 }
