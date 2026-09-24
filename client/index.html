@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Cute Meeting</title>
+    <link rel="icon" href="/assets/characters/rabbit_white_portrait.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Pixelify+Sans:wght@400;600&display=swap" rel="stylesheet" />
+  </head>
+  <body>
+    <div id="stage"></div>
+
+    <section id="lobby" class="lobby">
+      <div class="card">
+        <h1>Cute Meeting</h1>
+        <p class="room-line">Room <code id="lobby-room"></code></p>
+        <form id="join-form">
+          <label for="name-input">Your name</label>
+          <input id="name-input" maxlength="20" autocomplete="nickname" placeholder="e.g. Mochi" required />
+          <span class="label">Pick a character</span>
+          <div id="character-grid" class="character-grid" role="radiogroup" aria-label="Character"></div>
+          <button type="submit" id="join-button">Join meeting</button>
+          <p id="join-error" class="error" role="alert"></p>
+        </form>
+      </div>
+    </section>
+
+    <section id="hud" class="hud" hidden>
+      <div class="room-chip">
+        <span id="hud-room"></span>
+        <span id="hud-count" class="count"></span>
+        <button id="copy-link" type="button">Copy invite link</button>
+      </div>
+      <aside class="chat" aria-label="Chat">
+        <ol id="chat-log" class="chat-log" aria-live="polite"></ol>
+        <form id="chat-form" class="chat-form">
+          <input id="chat-input" maxlength="280" autocomplete="off" placeholder="Press Enter to chat" />
+        </form>
+      </aside>
+      <p class="hint">WASD / arrow keys or tap to move · Enter to chat · Esc to stop typing</p>
+    </section>
+
+    <section id="disconnected" class="lobby" hidden>
+      <div class="card">
+        <h1>Connection lost</h1>
+        <p id="disconnected-reason">The connection to the server was closed.</p>
+        <button type="button" onclick="location.reload()">Rejoin</button>
+      </div>
+    </section>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
