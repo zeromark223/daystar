@@ -72,6 +72,9 @@ async function main(): Promise<void> {
         chat.addMessage(msg.message);
         game.showChat(msg.message.playerId, msg.message.text);
         break;
+      case "snapshot":
+        game.applySnapshot(msg.players);
+        break;
       case "correction":
         game.applyCorrection(msg.x, msg.y);
         break;
@@ -83,13 +86,9 @@ async function main(): Promise<void> {
   };
 
   await runLobby(roomId, async (choice) => {
-    const conn = await Connection.open(roomId, {
-      onMessage: handle,
-      onSnapshot: (players) => game?.applySnapshot(players),
-      onClose: () => showDisconnected(),
-    });
+    const conn = await Connection.open(roomId, handle, () => showDisconnected());
     game ??= await Game.create(document.getElementById("stage")!, {
-      sendMove: (x, y, dir, moving) => conn.sendMove(x, y, dir, moving),
+      sendMove: (x, y, dir, moving) => conn.send({ t: "move", x, y, dir, moving }),
     });
     chat = new ChatPanel((text) => conn.send({ t: "chat", text }));
     conn.send({ t: "join", name: choice.name, character: choice.character });

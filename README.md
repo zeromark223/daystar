@@ -6,8 +6,8 @@ ruin with everyone else in the room, and chat. Voice chat comes later.
 - **Client:** PixiJS v8 + Vite (TypeScript)
 - **Server:** Node 24 + `ws`, runs TypeScript directly (native type stripping) and
   serves the built client
-- **Transport:** WebSocket only — JSON text frames for events/chat, small binary
-  frames for positions
+- **Transport:** WebSocket only, binary frames throughout — a schema-driven encoder
+  (`shared/src/binary/schema.ts`) lays out every message; see `shared/src/protocol.ts`
 
 ## Develop
 
@@ -62,6 +62,9 @@ tools/          asset pipeline scripts (Python + Pillow)
 
 ## Networking
 
+- Every frame is binary: an opcode byte plus a body described by a schema
+  (`shared/src/binary/schema.ts`, a port of an older BinaryBuilder/BinaryParser).
+  Positions are UInt16 in 1/20 px steps, so a snapshot costs 7 bytes per player.
 - Client moves locally (instant response) and sends its position at 20 Hz.
 - Server validates speed and collision, sends a `correction` if a move is invalid,
   and broadcasts a binary snapshot at 20 Hz when anything changed.

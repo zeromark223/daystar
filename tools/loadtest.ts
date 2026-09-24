@@ -22,7 +22,7 @@ import WebSocket from "ws";
 import { CHARACTER_IDS, collisionOffsetY, type CharacterId, type Direction } from "../shared/src/characters.ts";
 import { CollisionMap } from "../shared/src/collision.ts";
 import { MOVE_SPEED, TICK_RATE } from "../shared/src/constants.ts";
-import { encodeMove } from "../shared/src/protocol.ts";
+import { decodeServerMessage, encodeClientMessage, quantize, SNAPSHOT_OPCODE } from "../shared/src/protocol.ts";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const HIST_MAX_MS = 5000;
@@ -122,33 +122,27 @@ function runWorker(): void {
       lastSnapshot: 0,
       joined: false,
     };
-    ws.on("open", () => ws.send(JSON.stringify({ t: "join", name: `bot${bots.length}`, character })));
-    ws.on("message", (data: Buffer, isBinary) => {
+    ws.on("open", () => ws.send(encodeClientMessage({ t: "join", name: `bot${bots.length}`, character })));
+    ws.on("message", (data: Buffer) => {
       counters.bytesIn += data.length;
       const now = performance.now();
-      if (isBinary) {
+      // Snapshots are only counted, not decoded, to keep bots cheap.
+      if (data[0] === SNAPSHOT_OPCODE) {
         counters.snapshots++;
         if (bot.lastSnapshot) gaps.add(now - bot.lastSnapshot);
         bot.lastSnapshot = now;
         return;
       }
-      const text = data.toString();
-      if (!bot.joined) {
-        const msg = JSON.parse(text);
-        if (msg.t !== "welcome") return;
-        const self = msg.players.find((p: { id: number }) => p.id === msg.selfId);
+      const msg = decodeServerMessage(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+      if (msg?.t === "welcome") {
+        const self = msg.players.find((p) => p.id === msg.selfId)!;
         bot.id = msg.selfId;
         bot.x = self.x;
         bot.y = self.y;
         bot.joined = true;
-        return;
-      }
-      // Only parse what we measure; chat from others is just counted as bytes.
-      if (text.startsWith('{"t":"chat"') && text.includes(`"playerId":${bot.id},`)) {
-        const sentAt = Number(JSON.parse(text).message.text.split(" ")[1]);
-        chat.add(Date.now() - sentAt);
-      } else if (text.startsWith('{"t":"correction"')) {
-        const msg = JSON.parse(text);
+      } else if (msg?.t === "chat" && msg.message.playerId === bot.id) {
+        chat.add(Date.now() - Number(msg.message.text.split(" ")[1]));
+      } else if (msg?.t === "correction") {
         bot.x = msg.x;
         bot.y = msg.y;
         counters.corrections++;
@@ -177,17 +171,19 @@ function runWorker(): void {
       }
       const d = DIRS[bot.heading];
       const offset = collisionOffsetY(bot.character);
-      const next = map.moveWithCollision(bot.x, bot.y, d.dx * stepPx, d.dy * stepPx, offset);
+      let next = map.moveWithCollision(bot.x, bot.y, d.dx * stepPx, d.dy * stepPx, offset);
+      const snapped = { x: quantize(next.x), y: quantize(next.y) };
+      next = map.canStandAt(snapped.x, snapped.y, offset) ? snapped : bot;
       if (next.x === bot.x && next.y === bot.y) bot.nextTurn = 0; // stuck: turn next tick
       bot.x = next.x;
       bot.y = next.y;
-      const move = encodeMove(bot.x, bot.y, d.dir, true);
+      const move = encodeClientMessage({ t: "move", x: bot.x, y: bot.y, dir: d.dir, moving: true });
       bot.ws.send(move);
       counters.bytesOut += move.byteLength;
       if (now >= bot.nextChat) {
-        const text = JSON.stringify({ t: "chat", text: `ping ${now}` });
-        bot.ws.send(text);
-        counters.bytesOut += text.length;
+        const chatFrame = encodeClientMessage({ t: "chat", text: `ping ${now}` });
+        bot.ws.send(chatFrame);
+        counters.bytesOut += chatFrame.byteLength;
         bot.nextChat = now + chatEveryMs * (0.5 + Math.random());
       }
     }

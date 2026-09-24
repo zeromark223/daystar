@@ -1,12 +1,21 @@
-import { DIRECTIONS, type CharacterId, type Direction } from "./characters.ts";
+import { decode, encode, Type, type Struct } from "./binary/schema.ts";
+import { CHARACTER_IDS, DIRECTIONS, type CharacterId, type Direction } from "./characters.ts";
 
-// JSON messages travel as text frames; high-frequency position data travels
-// as small binary frames (see encode/decode helpers below).
+// Every frame is binary: one opcode byte, then the message body laid out by
+// its schema (see ./binary/schema.ts).
 
 export interface PlayerInfo {
   id: number;
   name: string;
   character: CharacterId;
+  x: number;
+  y: number;
+  dir: Direction;
+  moving: boolean;
+}
+
+export interface PlayerState {
+  id: number;
   x: number;
   y: number;
   dir: Direction;
@@ -24,7 +33,8 @@ export interface ChatMessage {
 
 export type ClientMessage =
   | { t: "join"; name: string; character: CharacterId }
-  | { t: "chat"; text: string };
+  | { t: "chat"; text: string }
+  | { t: "move"; x: number; y: number; dir: Direction; moving: boolean };
 
 export type ServerMessage =
   | { t: "welcome"; selfId: number; players: PlayerInfo[]; chat: ChatMessage[] }
@@ -32,84 +42,205 @@ export type ServerMessage =
   | { t: "player_left"; id: number }
   | { t: "chat"; message: ChatMessage }
   | { t: "correction"; x: number; y: number }
-  | { t: "error"; message: string };
+  | { t: "error"; message: string }
+  | { t: "snapshot"; players: PlayerState[] };
 
-export interface PlayerState {
+// ------------------------------------------------------------------ positions
+
+/**
+ * Positions travel as UInt16 in 1/POSITION_SCALE px steps (max 3276 px, enough
+ * for the 1200 px map). The client snaps its own position to the same grid so
+ * what the server validates is exactly what the client simulated.
+ */
+export const POSITION_SCALE = 20;
+
+export function quantize(v: number): number {
+  return Math.round(v * POSITION_SCALE) / POSITION_SCALE;
+}
+
+const toWire = (v: number) => Math.max(0, Math.min(0xffff, Math.round(v * POSITION_SCALE)));
+const fromWire = (v: number) => v / POSITION_SCALE;
+
+/** Direction index in bits 0-1, moving flag in bit 2. */
+function packMotion(dir: Direction, moving: boolean): number {
+  return DIRECTIONS.indexOf(dir) | (moving ? 4 : 0);
+}
+
+function unpackMotion(bits: number): { dir: Direction; moving: boolean } {
+  return { dir: DIRECTIONS[bits & 3], moving: (bits & 4) !== 0 };
+}
+
+// ------------------------------------------------------------------ schemas
+
+const PlayerStateStruct: Struct = { id: Type.UInt16, x: Type.UInt16, y: Type.UInt16, motion: Type.UInt8 };
+const PlayerInfoStruct: Struct = { ...PlayerStateStruct, name: Type.String, character: Type.UInt8 };
+const ChatStruct: Struct = {
+  id: Type.UInt32,
+  playerId: Type.UInt16,
+  name: Type.String,
+  text: Type.String,
+  ts: Type.Double,
+};
+
+const Op = {
+  // client -> server
+  join: 1,
+  chat: 2,
+  move: 3,
+  // server -> client
+  welcome: 10,
+  player_joined: 11,
+  player_left: 12,
+  server_chat: 13,
+  correction: 14,
+  error: 15,
+  snapshot: 16,
+} as const;
+
+/** Opcode of server snapshots, for callers that only need to recognize them. */
+export const SNAPSHOT_OPCODE = Op.snapshot;
+
+const Schemas: Record<number, Struct> = {
+  [Op.join]: { name: Type.String, character: Type.UInt8 },
+  [Op.chat]: { text: Type.String },
+  [Op.move]: { x: Type.UInt16, y: Type.UInt16, motion: Type.UInt8 },
+  [Op.welcome]: {
+    selfId: Type.UInt16,
+    players: Type.Object16,
+    players_Struct: PlayerInfoStruct,
+    chat: Type.Object8,
+    chat_Struct: ChatStruct,
+  },
+  [Op.player_joined]: PlayerInfoStruct,
+  [Op.player_left]: { id: Type.UInt16 },
+  [Op.server_chat]: ChatStruct,
+  [Op.correction]: { x: Type.UInt16, y: Type.UInt16 },
+  [Op.error]: { message: Type.String },
+  [Op.snapshot]: { players: Type.Object16, players_Struct: PlayerStateStruct },
+};
+
+// ------------------------------------------------------------------ wire <-> message
+
+interface WireState {
   id: number;
   x: number;
   y: number;
-  dir: Direction;
-  moving: boolean;
+  motion: number;
 }
 
-const OP_MOVE = 1;
-const OP_SNAPSHOT = 2;
-
-const MOVE_SIZE = 1 + 4 + 4 + 1 + 1;
-const SNAPSHOT_ENTRY_SIZE = 2 + 4 + 4 + 1 + 1;
-
-function dirIndex(dir: Direction): number {
-  return DIRECTIONS.indexOf(dir);
+interface WireInfo extends WireState {
+  name: string;
+  character: number;
 }
 
-function dirFromIndex(i: number): Direction | undefined {
-  return DIRECTIONS[i];
+function stateToWire(p: PlayerState): WireState {
+  return { id: p.id, x: toWire(p.x), y: toWire(p.y), motion: packMotion(p.dir, p.moving) };
 }
 
-/** Client -> server: the local player's current position. */
-export function encodeMove(x: number, y: number, dir: Direction, moving: boolean): ArrayBuffer {
-  const buf = new ArrayBuffer(MOVE_SIZE);
-  const v = new DataView(buf);
-  v.setUint8(0, OP_MOVE);
-  v.setFloat32(1, x);
-  v.setFloat32(5, y);
-  v.setUint8(9, dirIndex(dir));
-  v.setUint8(10, moving ? 1 : 0);
-  return buf;
+function stateFromWire(w: WireState): PlayerState {
+  return { id: w.id, x: fromWire(w.x), y: fromWire(w.y), ...unpackMotion(w.motion) };
 }
 
-export function decodeMove(v: DataView): Omit<PlayerState, "id"> | null {
-  if (v.byteLength !== MOVE_SIZE || v.getUint8(0) !== OP_MOVE) return null;
-  const x = v.getFloat32(1);
-  const y = v.getFloat32(5);
-  const dir = dirFromIndex(v.getUint8(9));
-  if (!Number.isFinite(x) || !Number.isFinite(y) || !dir) return null;
-  return { x, y, dir, moving: v.getUint8(10) === 1 };
+function infoToWire(p: PlayerInfo): WireInfo {
+  return { ...stateToWire(p), name: p.name, character: CHARACTER_IDS.indexOf(p.character) };
 }
 
-/** Server -> client: positions of every player in the room. */
-export function encodeSnapshot(players: readonly PlayerState[]): Uint8Array {
-  const buf = new Uint8Array(3 + players.length * SNAPSHOT_ENTRY_SIZE);
-  const v = new DataView(buf.buffer);
-  v.setUint8(0, OP_SNAPSHOT);
-  v.setUint16(1, players.length);
-  let o = 3;
-  for (const p of players) {
-    v.setUint16(o, p.id);
-    v.setFloat32(o + 2, p.x);
-    v.setFloat32(o + 6, p.y);
-    v.setUint8(o + 10, dirIndex(p.dir));
-    v.setUint8(o + 11, p.moving ? 1 : 0);
-    o += SNAPSHOT_ENTRY_SIZE;
+function infoFromWire(w: WireInfo): PlayerInfo {
+  const character = CHARACTER_IDS[w.character];
+  if (!character) throw new RangeError("Unknown character");
+  return { ...stateFromWire(w), name: w.name, character };
+}
+
+export function encodeClientMessage(msg: ClientMessage): Uint8Array<ArrayBuffer> {
+  switch (msg.t) {
+    case "join":
+      return encode(Schemas[Op.join], { name: msg.name, character: CHARACTER_IDS.indexOf(msg.character) }, Op.join);
+    case "chat":
+      return encode(Schemas[Op.chat], msg, Op.chat);
+    case "move":
+      return encode(
+        Schemas[Op.move],
+        { x: toWire(msg.x), y: toWire(msg.y), motion: packMotion(msg.dir, msg.moving) },
+        Op.move,
+      );
   }
-  return buf;
 }
 
-export function decodeSnapshot(v: DataView): PlayerState[] | null {
-  if (v.byteLength < 3 || v.getUint8(0) !== OP_SNAPSHOT) return null;
-  const count = v.getUint16(1);
-  if (v.byteLength !== 3 + count * SNAPSHOT_ENTRY_SIZE) return null;
-  const out: PlayerState[] = [];
-  let o = 3;
-  for (let i = 0; i < count; i++) {
-    out.push({
-      id: v.getUint16(o),
-      x: v.getFloat32(o + 2),
-      y: v.getFloat32(o + 6),
-      dir: dirFromIndex(v.getUint8(o + 10)) ?? "south",
-      moving: v.getUint8(o + 11) === 1,
-    });
-    o += SNAPSHOT_ENTRY_SIZE;
+/** Returns null for malformed or unknown frames (client input is untrusted). */
+export function decodeClientMessage(bytes: Uint8Array): ClientMessage | null {
+  try {
+    const op = bytes[0];
+    switch (op) {
+      case Op.join: {
+        const m = decode<{ name: string; character: number }>(Schemas[op], bytes, 1);
+        const character = CHARACTER_IDS[m.character];
+        return character ? { t: "join", name: m.name, character } : null;
+      }
+      case Op.chat:
+        return { t: "chat", ...decode<{ text: string }>(Schemas[op], bytes, 1) };
+      case Op.move: {
+        const m = decode<{ x: number; y: number; motion: number }>(Schemas[op], bytes, 1);
+        if (m.motion > 7) return null;
+        return { t: "move", x: fromWire(m.x), y: fromWire(m.y), ...unpackMotion(m.motion) };
+      }
+      default:
+        return null;
+    }
+  } catch {
+    return null;
   }
-  return out;
+}
+
+export function encodeServerMessage(msg: ServerMessage): Uint8Array<ArrayBuffer> {
+  switch (msg.t) {
+    case "welcome":
+      return encode(
+        Schemas[Op.welcome],
+        { selfId: msg.selfId, players: msg.players.map(infoToWire), chat: msg.chat },
+        Op.welcome,
+      );
+    case "player_joined":
+      return encode(Schemas[Op.player_joined], infoToWire(msg.player), Op.player_joined);
+    case "player_left":
+      return encode(Schemas[Op.player_left], msg, Op.player_left);
+    case "chat":
+      return encode(Schemas[Op.server_chat], msg.message, Op.server_chat);
+    case "correction":
+      return encode(Schemas[Op.correction], { x: toWire(msg.x), y: toWire(msg.y) }, Op.correction);
+    case "error":
+      return encode(Schemas[Op.error], msg, Op.error);
+    case "snapshot":
+      return encode(Schemas[Op.snapshot], { players: msg.players.map(stateToWire) }, Op.snapshot);
+  }
+}
+
+export function decodeServerMessage(bytes: Uint8Array): ServerMessage | null {
+  try {
+    const op = bytes[0];
+    const schema = Schemas[op];
+    switch (op) {
+      case Op.welcome: {
+        const m = decode<{ selfId: number; players: WireInfo[]; chat: ChatMessage[] }>(schema, bytes, 1);
+        return { t: "welcome", selfId: m.selfId, players: m.players.map(infoFromWire), chat: m.chat };
+      }
+      case Op.player_joined:
+        return { t: "player_joined", player: infoFromWire(decode<WireInfo>(schema, bytes, 1)) };
+      case Op.player_left:
+        return { t: "player_left", ...decode<{ id: number }>(schema, bytes, 1) };
+      case Op.server_chat:
+        return { t: "chat", message: decode<ChatMessage>(schema, bytes, 1) };
+      case Op.correction: {
+        const m = decode<{ x: number; y: number }>(schema, bytes, 1);
+        return { t: "correction", x: fromWire(m.x), y: fromWire(m.y) };
+      }
+      case Op.error:
+        return { t: "error", ...decode<{ message: string }>(schema, bytes, 1) };
+      case Op.snapshot:
+        return { t: "snapshot", players: decode<{ players: WireState[] }>(schema, bytes, 1).players.map(stateFromWire) };
+      default:
+        return null;
+    }
+  } catch {
+    return null;
+  }
 }

@@ -2,7 +2,7 @@ import { Application, Assets, Container, Graphics, Rectangle, Sprite, TextureSty
 import { CHARACTER_IDS, collisionOffsetY, type CharacterId, type Direction } from "../../../shared/src/characters.ts";
 import { BODY_RADIUS, CollisionMap } from "../../../shared/src/collision.ts";
 import { MAP_HEIGHT, MAP_WIDTH, MOVE_SPEED, TICK_RATE } from "../../../shared/src/constants.ts";
-import type { PlayerInfo, PlayerState } from "../../../shared/src/protocol.ts";
+import { quantize, type PlayerInfo, type PlayerState } from "../../../shared/src/protocol.ts";
 import { Avatar } from "./avatar.ts";
 import { CollisionOverlay } from "./collision-overlay.ts";
 import { KeyboardInput } from "./input.ts";
@@ -205,13 +205,11 @@ export class Game {
       const len = Math.hypot(vx, vy);
       let step = MOVE_SPEED * dt;
       if (this.tapTarget) step = Math.min(step, len);
-      const next = this.map.moveWithCollision(
-        self.x,
-        self.y,
-        (vx / len) * step,
-        (vy / len) * step,
-        collisionOffsetY(self.character),
-      );
+      const offset = collisionOffsetY(self.character);
+      let next = this.map.moveWithCollision(self.x, self.y, (vx / len) * step, (vy / len) * step, offset);
+      // Snap to the wire grid so the server validates exactly this position.
+      const snapped = { x: quantize(next.x), y: quantize(next.y) };
+      next = this.map.canStandAt(snapped.x, snapped.y, offset) ? snapped : self;
       moving = next.x !== self.x || next.y !== self.y;
       if (!moving) this.tapTarget = null; // walked into a wall
       dir = facing(vx, vy, self.dir);

@@ -11,10 +11,9 @@ import {
 } from "../../shared/src/constants.ts";
 import { collisionOffsetY, isCharacterId, type CharacterId, type Direction } from "../../shared/src/characters.ts";
 import {
-  decodeMove,
-  encodeSnapshot,
+  decodeClientMessage,
+  encodeServerMessage,
   type ChatMessage,
-  type ClientMessage,
   type PlayerInfo,
   type ServerMessage,
 } from "../../shared/src/protocol.ts";
@@ -66,17 +65,13 @@ export class Room {
     this.connections++;
 
     socket.on("message", (data, isBinary) => {
-      if (isBinary) {
-        if (player) this.handleMove(player, data as Buffer);
-        return;
-      }
-      let msg: ClientMessage;
-      try {
-        msg = JSON.parse(data.toString());
-      } catch {
-        return;
-      }
-      if (msg.t === "join" && !player) {
+      if (!isBinary) return;
+      const buf = data as Buffer;
+      const msg = decodeClientMessage(new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength));
+      if (!msg) return;
+      if (msg.t === "move" && player) {
+        this.handleMove(player, msg);
+      } else if (msg.t === "join" && !player) {
         player = this.join(socket, msg.name, msg.character);
       } else if (msg.t === "chat" && player) {
         this.handleChat(player, msg.text);
@@ -132,10 +127,7 @@ export class Room {
     this.broadcast({ t: "player_left", id: player.id });
   }
 
-  private handleMove(player: Player, data: Buffer): void {
-    const move = decodeMove(new DataView(data.buffer, data.byteOffset, data.byteLength));
-    if (!move) return;
-
+  private handleMove(player: Player, move: { x: number; y: number; dir: Direction; moving: boolean }): void {
     const now = Date.now();
     const elapsed = Math.min((now - player.lastMoveAt) / 1000, 1);
     const maxDistance = MOVE_SPEED * elapsed + MOVE_SLACK;
@@ -185,18 +177,18 @@ export class Room {
   private tick(): void {
     if (!this.dirty) return;
     this.dirty = false;
-    const snapshot = encodeSnapshot([...this.players.values()]);
-    for (const p of this.players.values()) p.socket.send(snapshot);
+    this.broadcast({ t: "snapshot", players: [...this.players.values()] });
   }
 
+  /** Encode once, send to everyone in the room. */
   private broadcast(msg: ServerMessage): void {
-    const data = JSON.stringify(msg);
+    const data = encodeServerMessage(msg);
     for (const p of this.players.values()) p.socket.send(data);
   }
 }
 
 function send(socket: WebSocket, msg: ServerMessage): void {
-  socket.send(JSON.stringify(msg));
+  socket.send(encodeServerMessage(msg));
 }
 
 function toInfo(p: Player): PlayerInfo {
