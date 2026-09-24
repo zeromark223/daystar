@@ -9,7 +9,7 @@ import {
   SPAWN_RADIUS,
   TICK_RATE,
 } from "../../shared/src/constants.ts";
-import { isCharacterId, type CharacterId, type Direction } from "../../shared/src/characters.ts";
+import { collisionOffsetY, isCharacterId, type CharacterId, type Direction } from "../../shared/src/characters.ts";
 import {
   decodeMove,
   encodeSnapshot,
@@ -97,7 +97,7 @@ export class Room {
     }
     if (this.nextPlayerId > 0xffff) this.nextPlayerId = 1;
 
-    const spawn = findSpawn(this.map);
+    const spawn = findSpawn(this.map, collisionOffsetY(character));
     const player: Player = {
       id: this.nextPlayerId++,
       socket,
@@ -137,7 +137,7 @@ export class Room {
     const maxDistance = MOVE_SPEED * elapsed + MOVE_SLACK;
     const distance = Math.hypot(move.x - player.x, move.y - player.y);
 
-    if (distance > maxDistance || !this.map.canStandAt(move.x, move.y)) {
+    if (distance > maxDistance || !this.map.canStandAt(move.x, move.y, collisionOffsetY(player.character))) {
       send(player.socket, { t: "correction", x: player.x, y: player.y });
       return;
     }
@@ -199,13 +199,13 @@ function toInfo(p: Player): PlayerInfo {
   return { id: p.id, name: p.name, character: p.character, x: p.x, y: p.y, dir: p.dir, moving: p.moving };
 }
 
-function findSpawn(map: CollisionMap): { x: number; y: number } {
+function findSpawn(map: CollisionMap, offsetY: number): { x: number; y: number } {
   for (let i = 0; i < 50; i++) {
     const angle = Math.random() * Math.PI * 2;
     const r = Math.random() * SPAWN_RADIUS;
     const x = Math.round(SPAWN_POINT.x + Math.cos(angle) * r);
     const y = Math.round(SPAWN_POINT.y + Math.sin(angle) * r);
-    if (map.canStandAt(x, y)) return { x, y };
+    if (map.canStandAt(x, y, offsetY)) return { x, y };
   }
   return { ...SPAWN_POINT };
 }

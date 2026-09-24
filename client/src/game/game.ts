@@ -1,6 +1,6 @@
-import { Application, Assets, Container, Rectangle, Sprite, TextureStyle, type Spritesheet } from "pixi.js";
-import { CHARACTER_IDS, type CharacterId, type Direction } from "../../../shared/src/characters.ts";
-import { CollisionMap } from "../../../shared/src/collision.ts";
+import { Application, Assets, Container, Graphics, Rectangle, Sprite, TextureStyle, type Spritesheet } from "pixi.js";
+import { CHARACTER_IDS, collisionOffsetY, type CharacterId, type Direction } from "../../../shared/src/characters.ts";
+import { BODY_HALF_HEIGHT, BODY_HALF_WIDTH, CollisionMap } from "../../../shared/src/collision.ts";
 import { MAP_HEIGHT, MAP_WIDTH, MOVE_SPEED, TICK_RATE } from "../../../shared/src/constants.ts";
 import type { PlayerInfo, PlayerState } from "../../../shared/src/protocol.ts";
 import { Avatar } from "./avatar.ts";
@@ -36,6 +36,8 @@ export class Game {
   private readonly map: CollisionMap;
   private readonly callbacks: GameCallbacks;
   private editor: MapEditor | null = null;
+  /** Outline of the local player's collision box, shown with ?debug / ?edit. */
+  private bodyBox: Graphics | null = null;
   private readonly world = new Container({ sortableChildren: false });
   private readonly entities = new Container({ sortableChildren: true });
   private readonly overlay = new Container({ sortableChildren: true });
@@ -97,10 +99,14 @@ export class Game {
     if (params.has("debug") || params.has("edit")) {
       const collisionOverlay = new CollisionOverlay(map);
       game.world.addChild(collisionOverlay.sprite);
+      game.bodyBox = new Graphics()
+        .rect(-BODY_HALF_WIDTH, -BODY_HALF_HEIGHT, BODY_HALF_WIDTH * 2, BODY_HALF_HEIGHT * 2)
+        .stroke({ color: 0xffe38a, width: 1 });
       if (params.has("edit")) game.editor = new MapEditor(map, collisionOverlay, game.world, app.stage);
       Object.assign(window, { game });
     }
     game.world.addChild(game.entities);
+    if (game.bodyBox) game.world.addChild(game.bodyBox);
     game.resize();
     app.renderer.on("resize", () => game.resize());
     app.ticker.add((ticker) => game.update(ticker.deltaMS));
@@ -199,7 +205,13 @@ export class Game {
       const len = Math.hypot(vx, vy);
       let step = MOVE_SPEED * dt;
       if (this.tapTarget) step = Math.min(step, len);
-      const next = this.map.moveWithCollision(self.x, self.y, (vx / len) * step, (vy / len) * step);
+      const next = this.map.moveWithCollision(
+        self.x,
+        self.y,
+        (vx / len) * step,
+        (vy / len) * step,
+        collisionOffsetY(self.character),
+      );
       moving = next.x !== self.x || next.y !== self.y;
       if (!moving) this.tapTarget = null; // walked into a wall
       dir = facing(vx, vy, self.dir);
@@ -207,6 +219,7 @@ export class Game {
       self.y = next.y;
     }
     self.setMotion(dir, moving);
+    this.bodyBox?.position.set(self.x, self.y - collisionOffsetY(self.character));
 
     const s = this.lastSent;
     const changed = s.x !== self.x || s.y !== self.y || s.dir !== dir || s.moving !== moving;

@@ -1,6 +1,6 @@
-/** Half extents of the collision box around a character's feet. */
-const FOOT_HALF_WIDTH = 5;
-const FOOT_HALF_HEIGHT = 3;
+/** Half extents of a character's collision box. */
+export const BODY_HALF_WIDTH = 5;
+export const BODY_HALF_HEIGHT = 3;
 
 /**
  * Walkability grid for the map.
@@ -73,13 +73,17 @@ export class CollisionMap {
     return this.isCellWalkable(Math.floor(px / this.cellSize), Math.floor(py / this.cellSize));
   }
 
-  /** True when a character whose feet are at (x, y) fits on walkable ground. */
-  canStandAt(x: number, y: number): boolean {
+  /**
+   * True when a character whose feet are at (x, y) fits on walkable ground.
+   * The collision box is centered `offsetY` pixels above the feet.
+   */
+  canStandAt(x: number, y: number, offsetY = 0): boolean {
+    y -= offsetY;
     return (
-      this.isPointWalkable(x - FOOT_HALF_WIDTH, y - FOOT_HALF_HEIGHT) &&
-      this.isPointWalkable(x + FOOT_HALF_WIDTH, y - FOOT_HALF_HEIGHT) &&
-      this.isPointWalkable(x - FOOT_HALF_WIDTH, y + FOOT_HALF_HEIGHT) &&
-      this.isPointWalkable(x + FOOT_HALF_WIDTH, y + FOOT_HALF_HEIGHT)
+      this.isPointWalkable(x - BODY_HALF_WIDTH, y - BODY_HALF_HEIGHT) &&
+      this.isPointWalkable(x + BODY_HALF_WIDTH, y - BODY_HALF_HEIGHT) &&
+      this.isPointWalkable(x - BODY_HALF_WIDTH, y + BODY_HALF_HEIGHT) &&
+      this.isPointWalkable(x + BODY_HALF_WIDTH, y + BODY_HALF_HEIGHT)
     );
   }
 
@@ -87,9 +91,9 @@ export class CollisionMap {
    * Move by (dx, dy), resolving each axis separately so characters slide
    * along walls instead of sticking to them.
    */
-  moveWithCollision(x: number, y: number, dx: number, dy: number): { x: number; y: number } {
-    if (dx !== 0 && this.canStandAt(x + dx, y)) x += dx;
-    if (dy !== 0 && this.canStandAt(x, y + dy)) y += dy;
+  moveWithCollision(x: number, y: number, dx: number, dy: number, offsetY = 0): { x: number; y: number } {
+    if (dx !== 0 && this.canStandAt(x + dx, y, offsetY)) x += dx;
+    if (dy !== 0 && this.canStandAt(x, y + dy, offsetY)) y += dy;
     return { x, y };
   }
 }

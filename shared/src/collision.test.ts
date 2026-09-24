@@ -39,3 +39,23 @@ test("parse rejects malformed input", () => {
   assert.throws(() => CollisionMap.parse("cell=4\n..#\n.x#\n"));
   assert.throws(() => CollisionMap.parse("cell=4\n..#\n..\n"));
 });
+
+test("character heights match the generated spritesheets", async () => {
+  const { CHARACTERS, CHARACTER_IDS } = await import("./characters.ts");
+  for (const id of CHARACTER_IDS) {
+    const sheet = JSON.parse(
+      readFileSync(new URL(`../../client/public/assets/characters/${id}.json`, import.meta.url), "utf8"),
+    );
+    assert.equal(CHARACTERS[id].height, sheet.meta.height, id);
+  }
+});
+
+test("collision offset moves the box up from the feet", () => {
+  // A point just below a wall is fine for feet but blocked once the box is raised into the wall.
+  const x = SPAWN_POINT.x;
+  let y = SPAWN_POINT.y;
+  while (map.canStandAt(x, y - 1)) y--;
+  assert.ok(map.canStandAt(x, y));
+  assert.equal(map.canStandAt(x, y + 10, 10), map.canStandAt(x, y));
+  assert.equal(map.canStandAt(x, y, 10), false);
+});

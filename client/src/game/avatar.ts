@@ -34,7 +34,7 @@ export class Avatar {
   moving: boolean;
 
   private readonly sheet: Spritesheet;
-  private readonly character: CharacterId;
+  readonly character: CharacterId;
   private readonly body: AnimatedSprite;
   private readonly tag = new Container();
   private readonly label: Text;
