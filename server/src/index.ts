@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { rename, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { resolve } from "node:path";
+import { monitorEventLoopDelay, performance } from "node:perf_hooks";
 import { WebSocketServer, type WebSocket } from "ws";
 import { CollisionMap } from "../../shared/src/collision.ts";
 import { ROOM_ID_PATTERN, WS_PATH } from "../../shared/src/constants.ts";
@@ -115,6 +116,33 @@ setInterval(() => {
     ws.ping();
   }
 }, HEARTBEAT_MS);
+
+// LOG_STATS=<seconds> prints load figures as JSON lines (used by tools/loadtest.ts).
+const STATS_SECONDS = Number(process.env.LOG_STATS ?? 0);
+if (STATS_SECONDS > 0) {
+  const loopDelay = monitorEventLoopDelay({ resolution: 10 });
+  loopDelay.enable();
+  let lastElu = performance.eventLoopUtilization();
+  setInterval(() => {
+    const elu = performance.eventLoopUtilization(lastElu);
+    lastElu = performance.eventLoopUtilization();
+    let players = 0;
+    for (const room of rooms.values()) players += room.playerCount;
+    console.log(
+      JSON.stringify({
+        stats: true,
+        rooms: rooms.size,
+        players,
+        sockets: wss.clients.size,
+        elu: Number(elu.utilization.toFixed(3)),
+        loopP99Ms: Number((loopDelay.percentile(99) / 1e6).toFixed(1)),
+        loopMaxMs: Number((loopDelay.max / 1e6).toFixed(1)),
+        rssMb: Math.round(process.memoryUsage().rss / 1e6),
+      }),
+    );
+    loopDelay.reset();
+  }, STATS_SECONDS * 1000);
+}
 
 server.listen(PORT, HOST, () => {
   console.log(`cute-meeting listening on http://${HOST}:${PORT} (map editor ${MAP_EDITOR ? "on" : "off"})`);

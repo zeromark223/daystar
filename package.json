@@ -14,7 +14,8 @@
     "start": "node server/src/index.ts",
     "typecheck": "tsc -p client && tsc -p server",
     "test": "node --test \"shared/**/*.test.ts\" \"server/**/*.test.ts\"",
-    "assets": "python3 tools/build_sprites.py"
+    "assets": "python3 tools/build_sprites.py",
+    "loadtest": "node tools/loadtest.ts"
   },
   "dependencies": {
     "ws": "^8.21.3"

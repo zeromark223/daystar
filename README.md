@@ -69,6 +69,17 @@ tools/          asset pipeline scripts (Python + Pillow)
 - Rooms live in memory and disappear when the last socket closes; each keeps the
   last 100 chat messages.
 
+## Load testing
+
+```bash
+npm run loadtest -- --steps 500,1000,2000 --room-size 20
+```
+
+Spawns the server with `LOG_STATS=1`, ramps up bot players that walk non-stop and
+chat, and prints per step: server CPU, event loop utilization and delay, snapshot
+arrival gaps, chat round-trip and bandwidth. `--room-size 0` puts everyone in one
+room. See the header of `tools/loadtest.ts` for all options.
+
 ## Deploy (Coolify)
 
 Build from the `Dockerfile`. The container listens on `PORT` (default 3000) and

@@ -40,6 +40,10 @@ interface Player {
 export class Room {
   readonly id: string;
   private readonly players = new Map<number, Player>();
+
+  get playerCount(): number {
+    return this.players.size;
+  }
   private readonly chat: ChatMessage[] = [];
   /** Open sockets, including ones that have not joined yet. */
   private connections = 0;
