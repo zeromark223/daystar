@@ -16,7 +16,13 @@ import WebSocket from "ws";
 import { CHARACTER_IDS, collisionOffsetY, type CharacterId, type Direction } from "../shared/src/characters.ts";
 import { CollisionMap } from "../shared/src/collision.ts";
 import { MOVE_SPEED, ROOM_ID_PATTERN, TICK_RATE, WS_PATH } from "../shared/src/constants.ts";
-import { decodeServerMessage, encodeClientMessage, quantize, SNAPSHOT_OPCODE } from "../shared/src/protocol.ts";
+import {
+  decodeServerMessage,
+  encodeClientMessage,
+  POSITION_SCALE,
+  quantize,
+  SNAPSHOT_OPCODE,
+} from "../shared/src/protocol.ts";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const HIST_MAX_MS = 5000;
@@ -61,6 +67,8 @@ interface WorkerReport {
   bytesOut: number;
   gaps: [number, number][];
   chat: [number, number][];
+  /** Move sent -> own position seen in a snapshot. */
+  move: [number, number][];
   corrections: number;
   closes: number;
   errors: number;
@@ -90,6 +98,34 @@ interface Bot {
   nextChat: number;
   lastSnapshot: number;
   joined: boolean;
+  /** Walking or standing, and until when (see --moving). */
+  walking: boolean;
+  phaseUntil: number;
+  /** Recently sent positions (wire units) awaiting their echo in a snapshot. */
+  pending: { xw: number; yw: number; t: number }[];
+}
+
+/** Snapshot body: UInt16 count, then per player id, x, y (UInt16 LE) and motion (UInt8). */
+const SNAPSHOT_ENTRY = 7;
+
+/** Position of `id` in a raw snapshot frame, in wire units, without a full decode. */
+function findInSnapshot(data: Buffer, id: number): { xw: number; yw: number } | null {
+  const count = data.readUInt16LE(1);
+  for (let i = 0, o = 3; i < count; i++, o += SNAPSHOT_ENTRY) {
+    if (data.readUInt16LE(o) === id) return { xw: data.readUInt16LE(o + 2), yw: data.readUInt16LE(o + 4) };
+  }
+  return null;
+}
+
+const toWire = (v: number) => Math.round(v * POSITION_SCALE);
+
+/** Average walk burst; idle stretches are sized so walking takes `ratio` of the time. */
+const WALK_MS = 3000;
+function walkMs(): number {
+  return WALK_MS * (1 / 3 + (Math.random() * 4) / 3); // 1-5 s
+}
+function idleMs(ratio: number): number {
+  return ((WALK_MS * (1 - ratio)) / ratio) * (0.5 + Math.random());
 }
 
 function runWorker(): void {
@@ -97,8 +133,10 @@ function runWorker(): void {
   const bots: Bot[] = [];
   let url = "";
   let chatEveryMs = 30_000;
+  let movingRatio = 1;
   let gaps = new Histogram();
   let chat = new Histogram();
+  let move = new Histogram();
   let counters = { snapshots: 0, bytesIn: 0, bytesOut: 0, corrections: 0, closes: 0, errors: 0 };
 
   function addBot(room: string): void {
@@ -115,16 +153,35 @@ function runWorker(): void {
       nextChat: Date.now() + Math.random() * chatEveryMs,
       lastSnapshot: 0,
       joined: false,
+      walking: true,
+      phaseUntil: 0,
+      pending: [],
     };
+    // Start at a random point of the walk/idle cycle so the room mixes both.
+    if (movingRatio <= 0 || movingRatio >= 1) {
+      bot.walking = movingRatio > 0;
+      bot.phaseUntil = Infinity;
+    } else {
+      bot.walking = Math.random() < movingRatio;
+      bot.phaseUntil = Date.now() + Math.random() * (bot.walking ? walkMs() : idleMs(movingRatio));
+    }
     ws.on("open", () => ws.send(encodeClientMessage({ t: "join", name: `bot${bots.length}`, character })));
     ws.on("message", (data: Buffer) => {
       counters.bytesIn += data.length;
       const now = performance.now();
-      // Snapshots are only counted, not decoded, to keep bots cheap.
+      // Snapshots are only scanned for our own entry, not decoded, to keep bots cheap.
       if (data[0] === SNAPSHOT_OPCODE) {
         counters.snapshots++;
         if (bot.lastSnapshot) gaps.add(now - bot.lastSnapshot);
         bot.lastSnapshot = now;
+        const own = bot.pending.length ? findInSnapshot(data, bot.id) : null;
+        if (own) {
+          const i = bot.pending.findLastIndex((p) => p.xw === own.xw && p.yw === own.yw);
+          if (i >= 0) {
+            move.add(now - bot.pending[i].t);
+            bot.pending.splice(0, i + 1);
+          }
+        }
         return;
       }
       const msg = decodeServerMessage(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
@@ -159,6 +216,23 @@ function runWorker(): void {
     for (let i = phase; i < bots.length; i += PHASES) {
       const bot = bots[i];
       if (!bot.joined || bot.ws.readyState !== WebSocket.OPEN) continue;
+      if (now >= bot.nextChat) {
+        const chatFrame = encodeClientMessage({ t: "chat", text: `ping ${now}` });
+        bot.ws.send(chatFrame);
+        counters.bytesOut += chatFrame.byteLength;
+        bot.nextChat = now + chatEveryMs * (0.5 + Math.random());
+      }
+      if (now >= bot.phaseUntil) {
+        bot.walking = !bot.walking;
+        bot.phaseUntil = now + (bot.walking ? walkMs() : idleMs(movingRatio));
+        if (!bot.walking) {
+          // Like the real client: one "stopped" update, then silence.
+          const stop = encodeClientMessage({ t: "move", x: bot.x, y: bot.y, dir: DIRS[bot.heading].dir, moving: false });
+          bot.ws.send(stop);
+          counters.bytesOut += stop.byteLength;
+        }
+      }
+      if (!bot.walking) continue;
       if (now >= bot.nextTurn) {
         bot.heading = Math.floor(Math.random() * DIRS.length);
         bot.nextTurn = now + 1000 + Math.random() * 2000;
@@ -171,15 +245,11 @@ function runWorker(): void {
       if (next.x === bot.x && next.y === bot.y) bot.nextTurn = 0; // stuck: turn next tick
       bot.x = next.x;
       bot.y = next.y;
-      const move = encodeClientMessage({ t: "move", x: bot.x, y: bot.y, dir: d.dir, moving: true });
-      bot.ws.send(move);
-      counters.bytesOut += move.byteLength;
-      if (now >= bot.nextChat) {
-        const chatFrame = encodeClientMessage({ t: "chat", text: `ping ${now}` });
-        bot.ws.send(chatFrame);
-        counters.bytesOut += chatFrame.byteLength;
-        bot.nextChat = now + chatEveryMs * (0.5 + Math.random());
-      }
+      const frame = encodeClientMessage({ t: "move", x: bot.x, y: bot.y, dir: d.dir, moving: true });
+      bot.ws.send(frame);
+      counters.bytesOut += frame.byteLength;
+      bot.pending.push({ xw: toWire(bot.x), yw: toWire(bot.y), t: performance.now() });
+      if (bot.pending.length > 20) bot.pending.shift(); // e.g. moves rejected by the server
     }
     phase = (phase + 1) % PHASES;
   }, 1000 / TICK_RATE / PHASES);
@@ -190,17 +260,21 @@ function runWorker(): void {
       ...counters,
       gaps: gaps.entries(),
       chat: chat.entries(),
+      move: move.entries(),
     };
     process.send!(report);
     gaps = new Histogram();
     chat = new Histogram();
+    move = new Histogram();
     counters = { snapshots: 0, bytesIn: 0, bytesOut: 0, corrections: 0, closes: 0, errors: 0 };
   }, 1000);
 
-  process.on("message", (msg: { cmd: "config"; url: string; chatEveryMs: number } | { cmd: "add"; room: string }) => {
+  type Command = { cmd: "config"; url: string; chatEveryMs: number; movingRatio: number } | { cmd: "add"; room: string };
+  process.on("message", (msg: Command) => {
     if (msg.cmd === "config") {
       url = msg.url;
       chatEveryMs = msg.chatEveryMs;
+      movingRatio = msg.movingRatio;
     } else {
       addBot(msg.room);
     }
@@ -234,6 +308,8 @@ const USAGE = `Usage: npm run loadtest -- [options]
   --ramp <n>           new connections per second                (default 100)
   --workers <n>        bot processes                             (default 6)
   --chat-every <s>     seconds between chat messages per bot     (default 30)
+  --moving <0..1>      share of time each bot spends walking; the rest it stands
+                       still and sends nothing (default 1 = everyone always walking)
   --target <url>       test a running server instead of spawning one,
                        e.g. https://meet.example.com
   --health-token <s>   token for the server's /api/health, if it sets HEALTH_TOKEN
@@ -254,6 +330,7 @@ interface Options {
   ramp: number;
   workers: number;
   chatEveryMs: number;
+  movingRatio: number;
   port: number;
   roomPrefix: string;
   keepGoing: boolean;
@@ -269,6 +346,7 @@ const OPTION_NAMES = [
   "ramp",
   "workers",
   "chat-every",
+  "moving",
   "target",
   "health-token",
   "port",
@@ -328,6 +406,7 @@ function parseOptions(): Options {
         ramp: { type: "string", default: "100" },
         workers: { type: "string", default: "6" },
         "chat-every": { type: "string", default: "30" },
+        moving: { type: "string", default: "1" },
         target: { type: "string" },
         "health-token": { type: "string", default: "" },
         port: { type: "string", default: "3300" },
@@ -355,6 +434,11 @@ function parseOptions(): Options {
     if (!Number.isInteger(n) || n < min) fail(`--${name} must be an integer >= ${min}, got "${raw}"`);
     return n;
   };
+  const ratio = (name: string, raw: string): number => {
+    const n = Number(raw);
+    if (raw.trim() === "" || !(n >= 0 && n <= 1)) fail(`--${name} must be a number from 0 to 1, got "${raw}"`);
+    return n;
+  };
   const steps = values.steps.split(",").map((s) => int("steps", s.trim(), 1));
   if (steps.some((n, i) => i > 0 && n <= steps[i - 1])) fail("--steps must be increasing");
   if (!ROOM_ID_PATTERN.test(`${values["room-prefix"]}-all`)) fail("--room-prefix may only use a-z, 0-9 and -");
@@ -366,6 +450,7 @@ function parseOptions(): Options {
     ramp: int("ramp", values.ramp, 1),
     workers: int("workers", values.workers, 1),
     chatEveryMs: int("chat-every", values["chat-every"], 1) * 1000,
+    movingRatio: ratio("moving", values.moving),
     port: int("port", values.port, 1),
     roomPrefix: values["room-prefix"],
     keepGoing: values["keep-going"],
@@ -464,6 +549,7 @@ async function runOrchestrator(): Promise<void> {
     fail((err as Error).message);
   }
   console.log(opts.target ? `Target ${wsUrl}` : `Spawned server on port ${opts.port}`);
+  console.log(`Bots walk ${Math.round(opts.movingRatio * 100)}% of the time`);
   console.log(`Rooms: /r/${roomSize > 0 ? `${roomPrefix}-0 .. ${roomPrefix}-${Math.ceil(steps.at(-1)! / roomSize) - 1}` : `${roomPrefix}-all`}`);
 
   const workers: ChildProcess[] = [];
@@ -471,7 +557,7 @@ async function runOrchestrator(): Promise<void> {
   const connected = new Map<ChildProcess, number>();
   for (let i = 0; i < workerCount; i++) {
     const w = fork(import.meta.filename, ["--worker"], { stdio: "inherit" });
-    w.send({ cmd: "config", url: wsUrl, chatEveryMs });
+    w.send({ cmd: "config", url: wsUrl, chatEveryMs, movingRatio: opts.movingRatio });
     w.on("message", (r: WorkerReport) => {
       window.push(r);
       connected.set(w, r.connected);
@@ -482,7 +568,7 @@ async function runOrchestrator(): Promise<void> {
   const roomFor = (i: number) => (roomSize > 0 ? `${roomPrefix}-${Math.floor(i / roomSize)}` : `${roomPrefix}-all`);
   let total = 0;
   console.log(
-    "bots | rooms | srv players | srv CPU | ELU  | loop p99 | RSS MB | snap gap p50/p99/max ms | chat p50/p99 ms | in MB/s | corr | drops | verdict",
+    "bots | rooms | srv players | srv CPU | ELU  | loop p99 | RSS MB | move p50/p99 ms | snap gap p50/p99/max ms | chat p50/p99 ms | in MB/s | corr | drops | verdict",
   );
 
   for (const target of steps) {
@@ -521,6 +607,7 @@ async function runOrchestrator(): Promise<void> {
 
     const gaps = new Histogram();
     const chat = new Histogram();
+    const move = new Histogram();
     let bytesIn = 0;
     let corrections = 0;
     let drops = 0;
@@ -528,6 +615,7 @@ async function runOrchestrator(): Promise<void> {
     for (const r of window) {
       gaps.merge(r.gaps);
       chat.merge(r.chat);
+      move.merge(r.move);
       bytesIn += r.bytesIn;
       corrections += r.corrections;
       drops += r.closes;
@@ -545,7 +633,10 @@ async function runOrchestrator(): Promise<void> {
     const chatP99 = chat.percentile(0.99);
     const problems = [];
     if (joined < target) problems.push(`only ${joined} joined`);
-    if (!(gapP99 <= 100)) problems.push("snapshots late");
+    const moveP99 = move.percentile(0.99);
+    if (move.total > 0 && moveP99 > 150) problems.push("moves slow");
+    // With idle bots, long snapshot gaps are expected (nothing to send), so only judge them when all walk.
+    if (opts.movingRatio >= 1 && !(gapP99 <= 100)) problems.push("snapshots late");
     if (chat.total > 0 && chatP99 > 250) problems.push("chat slow");
     if (drops > 0) problems.push("disconnects");
     if (socketErrors > 0) problems.push(`${socketErrors} socket errors`);
@@ -560,6 +651,7 @@ async function runOrchestrator(): Promise<void> {
       show(elu, () => elu.toFixed(2)).padStart(4),
       show(loopP99, () => loopP99.toFixed(1)).padStart(8),
       String(latest?.rssMb ?? "-").padStart(6),
+      (move.total ? `${move.percentile(0.5)}/${moveP99}` : "-").padStart(15),
       `${gaps.percentile(0.5)}/${gapP99}/${gaps.percentile(1)}`.padStart(23),
       (chat.total ? `${chat.percentile(0.5)}/${chatP99}` : "-").padStart(15),
       (bytesIn / elapsed / 1e6).toFixed(1).padStart(7),

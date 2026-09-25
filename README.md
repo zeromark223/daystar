@@ -97,6 +97,12 @@ npm run loadtest -- --last --hold 60     # same, with one option changed
 
 Bots use rooms named `<room-prefix>-all` / `<room-prefix>-0..n` (default `load`).
 
+By default every bot walks non-stop (worst case). `--moving 0.2` makes each bot walk
+20% of the time and stand still (sending nothing) otherwise, closer to a real meeting.
+`move p50/p99` is the time from a bot sending a position to seeing it echoed back in
+a snapshot, which is the lag other players see; it stays meaningful with idle bots,
+unlike snapshot gaps (a room where nobody moves gets no snapshots at all).
+
 ## Deploy (Coolify)
 
 Build from the `Dockerfile`. The container listens on `PORT` (default 3000) and
