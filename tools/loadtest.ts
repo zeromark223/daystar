@@ -9,7 +9,7 @@
  * Run with --help for the options (USAGE below).
  */
 import { fork, spawn, type ChildProcess } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { resolve } from "node:path";
 import WebSocket from "ws";
@@ -209,29 +209,43 @@ function runWorker(): void {
 
 // ---------------------------------------------------------------- orchestrator
 
-interface ServerStats {
+/** One second of server load, as served by the server's GET /api/health. */
+interface StatsSample {
+  t: number;
   rooms: number;
   players: number;
+  cpu: number;
   elu: number;
   loopP99Ms: number;
-  loopMaxMs: number;
   rssMb: number;
+}
+
+interface HealthReport {
+  now: number;
+  latest: StatsSample | null;
+  samples: StatsSample[];
 }
 
 const USAGE = `Usage: npm run loadtest -- [options]
 
-  --steps <n,n,...>   total bot counts to ramp through         (default 50,100,200)
-  --room-size <n>     bots per room; 0 = everyone in one room   (default 0)
-  --hold <s>          seconds at each step; 2nd half measured   (default 20)
-  --ramp <n>          new connections per second                (default 100)
-  --workers <n>       bot processes                             (default 6)
-  --chat-every <s>    seconds between chat messages per bot     (default 30)
-  --target <url>      test a running server instead of spawning one,
-                      e.g. https://meet.example.com (server CPU/loop columns show "-")
-  --port <n>          port for the spawned server               (default 3300)
-  --room-prefix <s>   rooms are <prefix>-all or <prefix>-0, -1, ... (default load)
-  --keep-going        continue ramping after a failed step
-  -h, --help          show this help`;
+  --steps <n,n,...>    total bot counts to ramp through         (default 50,100,200)
+  --room-size <n>      bots per room; 0 = everyone in one room   (default 0)
+  --hold <s>           seconds at each step; 2nd half measured   (default 20)
+  --ramp <n>           new connections per second                (default 100)
+  --workers <n>        bot processes                             (default 6)
+  --chat-every <s>     seconds between chat messages per bot     (default 30)
+  --target <url>       test a running server instead of spawning one,
+                       e.g. https://meet.example.com
+  --health-token <s>   token for the server's /api/health, if it sets HEALTH_TOKEN
+  --port <n>           port for the spawned server               (default 3300)
+  --room-prefix <s>    rooms are <prefix>-all or <prefix>-0, -1, ... (default load)
+  --keep-going         continue ramping after a failed step
+  --last               reuse the options of the previous run; options given with it
+                       override them, e.g. --last --hold 60
+  -h, --help           show this help`;
+
+/** Options of the last successful parse, for --last. Git-ignored. */
+const LAST_FILE = resolve(ROOT, ".loadtest-last.json");
 
 interface Options {
   steps: number[];
@@ -243,15 +257,36 @@ interface Options {
   port: number;
   roomPrefix: string;
   keepGoing: boolean;
-  /** WebSocket URL of a remote server, or null to spawn a local one. */
+  healthToken: string;
+  /** Remote server, or null to spawn a local one. */
   target: { ws: string; http: string } | null;
 }
 
-const OPTION_NAMES = ["steps", "room-size", "hold", "ramp", "workers", "chat-every", "target", "port", "room-prefix", "keep-going"];
+const OPTION_NAMES = [
+  "steps",
+  "room-size",
+  "hold",
+  "ramp",
+  "workers",
+  "chat-every",
+  "target",
+  "health-token",
+  "port",
+  "room-prefix",
+  "keep-going",
+  "last",
+];
 
 function fail(message: string): never {
   console.error(`loadtest: ${message}\n\n${USAGE}`);
   process.exit(2);
+}
+
+/** Command line for display, with the health token masked. */
+function describe(argv: string[]): string {
+  return argv
+    .map((a, i) => (argv[i - 1] === "--health-token" ? "***" : a.replace(/^(--health-token=).*/, "$1***")))
+    .join(" ");
 }
 
 function parseOptions(): Options {
@@ -266,9 +301,24 @@ function parseOptions(): Options {
     fail(`npm consumed --${swallowed.join(", --")}. Put "--" before the options: npm run loadtest -- --steps 100`);
   }
 
+  let argv = process.argv.slice(2);
+  if (argv.includes("--last")) {
+    let saved: string[];
+    try {
+      saved = JSON.parse(readFileSync(LAST_FILE, "utf8")).argv;
+    } catch {
+      fail(`--last: no previous run saved (${LAST_FILE})`);
+    }
+    // Later occurrences win in parseArgs, so explicit options override the saved ones.
+    argv = [...saved, ...argv.filter((a) => a !== "--last")];
+  }
+
   let values;
+  let tokens;
   try {
-    ({ values } = parseArgs({
+    ({ values, tokens } = parseArgs({
+      args: argv,
+      tokens: true,
       strict: true,
       allowPositionals: false,
       options: {
@@ -279,6 +329,7 @@ function parseOptions(): Options {
         workers: { type: "string", default: "6" },
         "chat-every": { type: "string", default: "30" },
         target: { type: "string" },
+        "health-token": { type: "string", default: "" },
         port: { type: "string", default: "3300" },
         "room-prefix": { type: "string", default: "load" },
         "keep-going": { type: "boolean", default: false },
@@ -292,6 +343,12 @@ function parseOptions(): Options {
     console.log(USAGE);
     process.exit(0);
   }
+  // Canonical form: each given option once, with its final value.
+  const given = new Map<string, string | undefined>();
+  for (const t of tokens) if (t.kind === "option") given.set(t.name, t.value);
+  const reusedLast = process.argv.includes("--last");
+  argv = [...given].flatMap(([name, value]) => (value === undefined ? [`--${name}`] : [`--${name}`, value]));
+  if (reusedLast) console.log(`Re-running: npm run loadtest -- ${describe(argv)}`);
 
   const int = (name: string, raw: string, min: number): number => {
     const n = Number(raw);
@@ -302,7 +359,7 @@ function parseOptions(): Options {
   if (steps.some((n, i) => i > 0 && n <= steps[i - 1])) fail("--steps must be increasing");
   if (!ROOM_ID_PATTERN.test(`${values["room-prefix"]}-all`)) fail("--room-prefix may only use a-z, 0-9 and -");
 
-  return {
+  const options: Options = {
     steps,
     roomSize: int("room-size", values["room-size"], 0),
     hold: int("hold", values.hold, 2),
@@ -312,8 +369,14 @@ function parseOptions(): Options {
     port: int("port", values.port, 1),
     roomPrefix: values["room-prefix"],
     keepGoing: values["keep-going"],
+    healthToken: values["health-token"],
     target: values.target === undefined ? null : parseTarget(values.target),
   };
+  // The server keeps 5 minutes of samples; a longer window would be cut short.
+  if (options.hold / 2 > 290) fail("--hold must be at most 580 seconds");
+
+  writeFileSync(LAST_FILE, JSON.stringify({ argv, savedAt: new Date().toISOString() }, null, 2) + "\n");
+  return options;
 }
 
 /** Accepts http(s):// or ws(s):// URLs; any path (e.g. a room link) is ignored. */
@@ -324,18 +387,51 @@ function parseTarget(raw: string): { ws: string; http: string } {
   } catch {
     fail(`--target is not a valid URL: "${raw}"`);
   }
-  const secure = url.protocol === "https:" || url.protocol === "wss:";
   if (!["http:", "https:", "ws:", "wss:"].includes(url.protocol)) fail(`--target must be http(s) or ws(s), got ${url.protocol}`);
+  const secure = url.protocol === "https:" || url.protocol === "wss:";
   return {
     ws: `${secure ? "wss" : "ws"}://${url.host}${WS_PATH}`,
     http: `${secure ? "https" : "http"}://${url.host}`,
   };
 }
 
-/** CPU seconds (user + system) consumed so far by a process. */
-function cpuSeconds(pid: number): number {
-  const fields = readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1].split(" ");
-  return (Number(fields[11]) + Number(fields[12])) / 100;
+class HealthError extends Error {}
+
+/** Reads the server's GET /api/health. */
+class HealthClient {
+  private readonly url: string;
+  private readonly headers: Record<string, string>;
+
+  constructor(baseUrl: string, token: string) {
+    this.url = `${baseUrl}/api/health`;
+    this.headers = token ? { authorization: `Bearer ${token}` } : {};
+  }
+
+  async fetch(since = 0): Promise<HealthReport> {
+    let res: Response;
+    try {
+      res = await fetch(`${this.url}?since=${since}`, { headers: this.headers, signal: AbortSignal.timeout(10_000) });
+    } catch (err) {
+      throw new HealthError(`${this.url} is not reachable: ${(err as Error).message}`);
+    }
+    if (res.status === 401) throw new HealthError(`${this.url} needs a token: pass --health-token (server HEALTH_TOKEN)`);
+    if (!res.ok) throw new HealthError(`${this.url} returned HTTP ${res.status}`);
+    return (await res.json()) as HealthReport;
+  }
+
+  /** Poll until the server answers (a freshly spawned one needs a moment). */
+  async waitReady(timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      try {
+        await this.fetch(Date.now());
+        return;
+      } catch (err) {
+        if (Date.now() > deadline || !(err as Error).message.includes("not reachable")) throw err;
+        await sleep(250);
+      }
+    }
+  }
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -345,38 +441,34 @@ async function runOrchestrator(): Promise<void> {
   const { steps, roomSize, hold, ramp, chatEveryMs, roomPrefix } = opts;
   const workerCount = opts.workers;
 
-  // Either spawn a local server (with stats) or check that the remote one is up.
+  // Either spawn a local server or use the remote one; both report through /api/health.
   let server: ChildProcess | null = null;
-  let serverStats: ServerStats[] = [];
   let wsUrl: string;
+  let httpUrl: string;
   if (opts.target) {
-    wsUrl = opts.target.ws;
-    try {
-      const res = await fetch(`${opts.target.http}/healthz`, { signal: AbortSignal.timeout(10_000) });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    } catch (err) {
-      fail(`${opts.target.http}/healthz is not reachable: ${(err as Error).message}`);
-    }
-    console.log(`Target ${wsUrl} (server-side columns are not available for remote targets)`);
+    ({ ws: wsUrl, http: httpUrl } = opts.target);
   } else {
     wsUrl = `ws://127.0.0.1:${opts.port}${WS_PATH}`;
+    httpUrl = `http://127.0.0.1:${opts.port}`;
     server = spawn(process.execPath, ["server/src/index.ts"], {
       cwd: ROOT,
-      env: { ...process.env, PORT: String(opts.port), HOST: "0.0.0.0", LOG_STATS: "1", NODE_ENV: "production" },
-      stdio: ["ignore", "pipe", "inherit"],
+      env: { ...process.env, PORT: String(opts.port), HOST: "0.0.0.0", HEALTH_TOKEN: opts.healthToken, NODE_ENV: "production" },
+      stdio: ["ignore", "ignore", "inherit"],
     });
-    server.stdout!.setEncoding("utf8").on("data", (chunk: string) => {
-      for (const line of chunk.split("\n")) {
-        if (line.startsWith('{"stats"')) serverStats.push(JSON.parse(line));
-      }
-    });
-    await sleep(1000);
-    console.log(`Spawned server on port ${opts.port}, rooms /r/${roomPrefix}-...`);
   }
+  const health = new HealthClient(httpUrl, opts.healthToken);
+  try {
+    await health.waitReady(opts.target ? 0 : 10_000);
+  } catch (err) {
+    server?.kill();
+    fail((err as Error).message);
+  }
+  console.log(opts.target ? `Target ${wsUrl}` : `Spawned server on port ${opts.port}`);
+  console.log(`Rooms: /r/${roomSize > 0 ? `${roomPrefix}-0 .. ${roomPrefix}-${Math.ceil(steps.at(-1)! / roomSize) - 1}` : `${roomPrefix}-all`}`);
 
   const workers: ChildProcess[] = [];
   let window: WorkerReport[] = [];
-  let connected = new Map<ChildProcess, number>();
+  const connected = new Map<ChildProcess, number>();
   for (let i = 0; i < workerCount; i++) {
     const w = fork(import.meta.filename, ["--worker"], { stdio: "inherit" });
     w.send({ cmd: "config", url: wsUrl, chatEveryMs });
@@ -389,9 +481,9 @@ async function runOrchestrator(): Promise<void> {
 
   const roomFor = (i: number) => (roomSize > 0 ? `${roomPrefix}-${Math.floor(i / roomSize)}` : `${roomPrefix}-all`);
   let total = 0;
-  const header =
-    "bots | rooms | srv CPU | ELU  | loop p99 | RSS MB | snap gap p50/p99/max ms | chat p50/p99 ms | in MB/s | corr | drops | verdict";
-  console.log(header);
+  console.log(
+    "bots | rooms | srv players | srv CPU | ELU  | loop p99 | RSS MB | snap gap p50/p99/max ms | chat p50/p99 ms | in MB/s | corr | drops | verdict",
+  );
 
   for (const target of steps) {
     // Ramp up at a fixed connection rate.
@@ -402,14 +494,30 @@ async function runOrchestrator(): Promise<void> {
     }
     await sleep((hold / 2) * 1000);
 
-    // Measure the second half of the hold.
+    // Measure the second half of the hold: bot reports plus the server's own samples.
     window = [];
-    serverStats = [];
-    const cpuStart = server ? cpuSeconds(server.pid!) : 0;
+    let serverFrom: number | null = null;
+    let healthProblem = "";
+    try {
+      serverFrom = (await health.fetch(Date.now())).now;
+    } catch (err) {
+      healthProblem = (err as Error).message;
+    }
     const t0 = Date.now();
     await sleep((hold / 2) * 1000);
     const elapsed = (Date.now() - t0) / 1000;
-    const cpu = server ? (cpuSeconds(server.pid!) - cpuStart) / elapsed : NaN;
+    let samples: StatsSample[] = [];
+    let latest: StatsSample | null = null;
+    if (serverFrom !== null) {
+      try {
+        const report = await health.fetch(serverFrom);
+        samples = report.samples;
+        latest = report.latest;
+      } catch (err) {
+        healthProblem = (err as Error).message;
+      }
+    }
+    if (healthProblem) console.warn(`  (server stats unavailable: ${healthProblem})`);
 
     const gaps = new Histogram();
     const chat = new Histogram();
@@ -418,19 +526,20 @@ async function runOrchestrator(): Promise<void> {
     let drops = 0;
     let socketErrors = 0;
     for (const r of window) {
-      socketErrors += r.errors;
       gaps.merge(r.gaps);
       chat.merge(r.chat);
       bytesIn += r.bytesIn;
       corrections += r.corrections;
       drops += r.closes;
+      socketErrors += r.errors;
     }
     const joined = [...connected.values()].reduce((a, b) => a + b, 0);
-    const avg = (key: keyof ServerStats) => serverStats.reduce((a, s) => a + s[key], 0) / (serverStats.length || 1);
-    const loopP99 = serverStats.length ? Math.max(...serverStats.map((s) => s.loopP99Ms)) : NaN;
-    const last = serverStats.at(-1);
-    const rooms = roomSize > 0 ? Math.ceil(target / roomSize) : 1;
-    const show = (v: number, text: string) => (Number.isNaN(v) ? "-" : text);
+    const mean = (key: keyof StatsSample) => samples.reduce((a, s) => a + s[key], 0) / samples.length;
+    const have = samples.length > 0;
+    const cpu = have ? mean("cpu") : NaN;
+    const elu = have ? mean("elu") : NaN;
+    const loopP99 = have ? Math.max(...samples.map((s) => s.loopP99Ms)) : NaN;
+    const show = (v: number, text: () => string) => (Number.isNaN(v) ? "-" : text());
 
     const gapP99 = gaps.percentile(0.99);
     const chatP99 = chat.percentile(0.99);
@@ -445,13 +554,14 @@ async function runOrchestrator(): Promise<void> {
 
     const row = [
       String(target).padStart(4),
-      String(rooms).padStart(5),
-      show(cpu, `${(cpu * 100).toFixed(0)}%`).padStart(7),
-      show(loopP99, avg("elu").toFixed(2)).padStart(4),
-      show(loopP99, loopP99.toFixed(1)).padStart(8),
-      String(last?.rssMb ?? "-").padStart(6),
+      String(roomSize > 0 ? Math.ceil(target / roomSize) : 1).padStart(5),
+      String(latest?.players ?? "-").padStart(11),
+      show(cpu, () => `${(cpu * 100).toFixed(0)}%`).padStart(7),
+      show(elu, () => elu.toFixed(2)).padStart(4),
+      show(loopP99, () => loopP99.toFixed(1)).padStart(8),
+      String(latest?.rssMb ?? "-").padStart(6),
       `${gaps.percentile(0.5)}/${gapP99}/${gaps.percentile(1)}`.padStart(23),
-      `${chat.percentile(0.5)}/${chatP99}`.padStart(15),
+      (chat.total ? `${chat.percentile(0.5)}/${chatP99}` : "-").padStart(15),
       (bytesIn / elapsed / 1e6).toFixed(1).padStart(7),
       String(corrections).padStart(4),
       String(drops).padStart(5),

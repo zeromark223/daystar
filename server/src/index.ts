@@ -2,11 +2,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { rename, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { resolve } from "node:path";
-import { monitorEventLoopDelay, performance } from "node:perf_hooks";
+import { timingSafeEqual } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
 import { CollisionMap } from "../../shared/src/collision.ts";
 import { ROOM_ID_PATTERN, WS_PATH } from "../../shared/src/constants.ts";
 import { Room } from "./room.ts";
+import { StatsSampler } from "./stats.ts";
 import { createStaticHandler } from "./static.ts";
 
 const PORT = Number(process.env.PORT ?? 3000);
@@ -21,9 +22,38 @@ const COLLISION_FILE = existsSync(COLLISION_SOURCE) ? COLLISION_SOURCE : resolve
 // Saving collision edits (?edit in the client) rewrites a source file, so it is dev-only by default.
 const MAP_EDITOR = process.env.MAP_EDITOR ? process.env.MAP_EDITOR === "1" : process.env.NODE_ENV !== "production";
 
+// GET /api/health requires "Authorization: Bearer <HEALTH_TOKEN>" (or ?token=) when set.
+const HEALTH_TOKEN = process.env.HEALTH_TOKEN ?? "";
+
 const collision = CollisionMap.parse(readFileSync(COLLISION_FILE, "utf8"));
 const rooms = new Map<string, Room>();
 const serveStatic = createStaticHandler(CLIENT_DIR);
+
+const stats = new StatsSampler(
+  () => {
+    let players = 0;
+    for (const room of rooms.values()) players += room.playerCount;
+    return { rooms: rooms.size, players, sockets: wss.clients.size };
+  },
+  // LOG_STATS=1 also prints every sample as a JSON line.
+  process.env.LOG_STATS === "1" ? (s) => console.log(JSON.stringify(s)) : undefined,
+);
+
+function handleHealth(req: IncomingMessage, res: ServerResponse): void {
+  const url = new URL(req.url ?? "/", "http://localhost");
+  if (HEALTH_TOKEN) {
+    const given = req.headers.authorization?.replace(/^Bearer\s+/i, "") ?? url.searchParams.get("token") ?? "";
+    const a = Buffer.from(given);
+    const b = Buffer.from(HEALTH_TOKEN);
+    if (a.length !== b.length || !timingSafeEqual(a, b)) {
+      res.writeHead(401, { "content-type": "text/plain" }).end("Unauthorized");
+      return;
+    }
+  }
+  const since = Number(url.searchParams.get("since") ?? 0) || 0;
+  res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+  res.end(JSON.stringify(stats.report(since)));
+}
 
 async function handleCollision(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (req.method === "GET") {
@@ -66,6 +96,10 @@ async function handleCollision(req: IncomingMessage, res: ServerResponse): Promi
 const server = createServer((req, res) => {
   if (req.url === "/healthz") {
     res.writeHead(200, { "content-type": "text/plain" }).end("ok");
+    return;
+  }
+  if (req.url?.split("?")[0] === "/api/health") {
+    handleHealth(req, res);
     return;
   }
   if (req.url === "/api/collision") {
@@ -116,33 +150,6 @@ setInterval(() => {
     ws.ping();
   }
 }, HEARTBEAT_MS);
-
-// LOG_STATS=<seconds> prints load figures as JSON lines (used by tools/loadtest.ts).
-const STATS_SECONDS = Number(process.env.LOG_STATS ?? 0);
-if (STATS_SECONDS > 0) {
-  const loopDelay = monitorEventLoopDelay({ resolution: 10 });
-  loopDelay.enable();
-  let lastElu = performance.eventLoopUtilization();
-  setInterval(() => {
-    const elu = performance.eventLoopUtilization(lastElu);
-    lastElu = performance.eventLoopUtilization();
-    let players = 0;
-    for (const room of rooms.values()) players += room.playerCount;
-    console.log(
-      JSON.stringify({
-        stats: true,
-        rooms: rooms.size,
-        players,
-        sockets: wss.clients.size,
-        elu: Number(elu.utilization.toFixed(3)),
-        loopP99Ms: Number((loopDelay.percentile(99) / 1e6).toFixed(1)),
-        loopMaxMs: Number((loopDelay.max / 1e6).toFixed(1)),
-        rssMb: Math.round(process.memoryUsage().rss / 1e6),
-      }),
-    );
-    loopDelay.reset();
-  }, STATS_SECONDS * 1000);
-}
 
 server.listen(PORT, HOST, () => {
   console.log(`cute-meeting listening on http://${HOST}:${PORT} (map editor ${MAP_EDITOR ? "on" : "off"})`);

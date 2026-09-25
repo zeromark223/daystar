@@ -78,22 +78,28 @@ tools/          asset pipeline scripts (Python + Pillow)
 npm run loadtest -- --steps 500,1000,2000 --room-size 20
 ```
 
-Spawns the server with `LOG_STATS=1`, ramps up bot players that walk non-stop and
-chat, and prints per step: server CPU, event loop utilization and delay, snapshot
-arrival gaps, chat round-trip and bandwidth. `--room-size 0` puts everyone in one
+Spawns a server, ramps up bot players that walk non-stop and chat, and prints per
+step: server players, CPU, event loop utilization and delay (read from the server's
+`/api/health`), snapshot arrival gaps, chat round-trip and bandwidth. `--room-size 0` puts everyone in one
 room. `npm run loadtest -- --help` lists all options; note the `--` after the script
 name, without it npm swallows the flags (the tool detects this and stops).
 
-To test a deployed server from this machine, point it at the public URL; only the
-client-side columns (snapshot gaps, chat, bandwidth) are reported then:
+To test a deployed server from this machine, point it at the public URL. Server
+columns come from its `/api/health`; if the server sets `HEALTH_TOKEN`, pass it:
 
 ```bash
-npm run loadtest -- --target https://meet.example.com --steps 200,500,1000 --room-size 20
+npm run loadtest -- --target https://meet.example.com --health-token $TOKEN --steps 200,500,1000 --room-size 20
+npm run loadtest -- --last               # same options again
+npm run loadtest -- --last --hold 60     # same, with one option changed
 ```
+
+`--last` reads `.loadtest-last.json` (git-ignored; it stores the token in plain text).
 
 Bots use rooms named `<room-prefix>-all` / `<room-prefix>-0..n` (default `load`).
 
 ## Deploy (Coolify)
 
 Build from the `Dockerfile`. The container listens on `PORT` (default 3000) and
-exposes `GET /healthz`. WebSockets go through the normal HTTP proxy on `/ws`.
+exposes `GET /healthz` (plain liveness) and `GET /api/health` (JSON load stats: rooms,
+players, CPU, event loop, memory, last 5 minutes of 1 s samples). Set `HEALTH_TOKEN`
+to require `Authorization: Bearer <token>` on `/api/health` in production. WebSockets go through the normal HTTP proxy on `/ws`.
