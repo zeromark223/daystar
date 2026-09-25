@@ -48,7 +48,8 @@ export class Room {
   private connections = 0;
   private nextPlayerId = 1;
   private nextChatId = 1;
-  private dirty = false;
+  /** Players whose position or motion changed since the last snapshot. */
+  private readonly changed = new Set<Player>();
   private ticker: NodeJS.Timeout | null = null;
   private readonly map: CollisionMap;
   private readonly onEmpty: () => void;
@@ -124,6 +125,7 @@ export class Room {
 
   private leave(player: Player): void {
     this.players.delete(player.id);
+    this.changed.delete(player);
     this.broadcast({ t: "player_left", id: player.id });
   }
 
@@ -143,7 +145,7 @@ export class Room {
     player.dir = move.dir;
     player.moving = move.moving;
     player.lastMoveAt = now;
-    this.dirty = true;
+    this.changed.add(player);
   }
 
   private handleChat(player: Player, rawText: unknown): void {
@@ -174,10 +176,16 @@ export class Room {
     this.ticker = null;
   }
 
+  /**
+   * Send only the players that changed; idle players cost nothing. The stream
+   * is reliable and ordered, and "welcome" carries everyone's full state, so
+   * clients can keep the last known state of anyone missing from a snapshot.
+   */
   private tick(): void {
-    if (!this.dirty) return;
-    this.dirty = false;
-    this.broadcast({ t: "snapshot", players: [...this.players.values()] });
+    if (this.changed.size === 0) return;
+    const players = [...this.changed];
+    this.changed.clear();
+    this.broadcast({ t: "snapshot", players });
   }
 
   /** Encode once, send to everyone in the room. */

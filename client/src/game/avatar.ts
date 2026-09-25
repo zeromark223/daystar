@@ -6,10 +6,13 @@ import {
   type CharacterId,
   type Direction,
 } from "../../../shared/src/characters.ts";
+import { TICK_RATE } from "../../../shared/src/constants.ts";
 import type { PlayerInfo } from "../../../shared/src/protocol.ts";
 
 const BUBBLE_MS = 6000;
 const BUBBLE_MAX_WIDTH = 200;
+/** A gap longer than this between samples means the player was idle. */
+const SAMPLE_GAP_MS = 150;
 /** Remote players are drawn this far in the past so there are two samples to blend. */
 export const INTERPOLATION_DELAY_MS = 100;
 
@@ -103,6 +106,11 @@ export class Avatar {
   }
 
   pushSample(t: number, s: { x: number; y: number; dir: Direction; moving: boolean }): void {
+    // Snapshots skip idle players, so after a pause the previous sample can be
+    // seconds old. Re-anchor it one tick back so the move starts from rest
+    // instead of being blended across the whole pause.
+    const last = this.samples.at(-1);
+    if (last && t - last.t > SAMPLE_GAP_MS) this.samples.push({ ...last, t: t - 1000 / TICK_RATE });
     this.samples.push({ t, x: s.x, y: s.y, dir: s.dir, moving: s.moving });
     if (this.samples.length > 30) this.samples.shift();
   }
