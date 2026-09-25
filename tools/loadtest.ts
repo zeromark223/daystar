@@ -1,27 +1,21 @@
 /**
- * Load test: spawns the server, then ramps up bot players in steps and reports
- * whether each step stays healthy.
+ * Load test: ramps up bot players in steps and reports whether each step
+ * stays healthy. Bots join, walk non-stop (worst case: everyone moving) using
+ * the real collision map, send positions at the client rate and chat now and then.
  *
- *   node tools/loadtest.ts --steps 100,200,400 --room-size 20
+ *   npm run loadtest -- --steps 100,200,400 --room-size 20
+ *   npm run loadtest -- --target https://meet.example.com --steps 200,500
  *
- * Bots join, walk non-stop (worst case: everyone moving) using the real
- * collision map, send positions at the client rate and chat now and then.
- * Options:
- *   --steps       comma-separated total bot counts to ramp through
- *   --room-size   bots per room; 0 puts everyone in one room (default 0)
- *   --hold        seconds to stay at each step (default 20; last half is measured)
- *   --ramp        new connections per second (default 100)
- *   --workers     bot processes (default 6)
- *   --chat-every  seconds between chat messages per bot (default 30)
- *   --port        server port (default 3300)
+ * Run with --help for the options (USAGE below).
  */
 import { fork, spawn, type ChildProcess } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { parseArgs } from "node:util";
 import { resolve } from "node:path";
 import WebSocket from "ws";
 import { CHARACTER_IDS, collisionOffsetY, type CharacterId, type Direction } from "../shared/src/characters.ts";
 import { CollisionMap } from "../shared/src/collision.ts";
-import { MOVE_SPEED, TICK_RATE } from "../shared/src/constants.ts";
+import { MOVE_SPEED, ROOM_ID_PATTERN, TICK_RATE, WS_PATH } from "../shared/src/constants.ts";
 import { decodeServerMessage, encodeClientMessage, quantize, SNAPSHOT_OPCODE } from "../shared/src/protocol.ts";
 
 const ROOT = resolve(import.meta.dirname, "..");
@@ -224,9 +218,118 @@ interface ServerStats {
   rssMb: number;
 }
 
-function arg(name: string, fallback: string): string {
-  const i = process.argv.indexOf(`--${name}`);
-  return i >= 0 ? process.argv[i + 1] : fallback;
+const USAGE = `Usage: npm run loadtest -- [options]
+
+  --steps <n,n,...>   total bot counts to ramp through         (default 50,100,200)
+  --room-size <n>     bots per room; 0 = everyone in one room   (default 0)
+  --hold <s>          seconds at each step; 2nd half measured   (default 20)
+  --ramp <n>          new connections per second                (default 100)
+  --workers <n>       bot processes                             (default 6)
+  --chat-every <s>    seconds between chat messages per bot     (default 30)
+  --target <url>      test a running server instead of spawning one,
+                      e.g. https://meet.example.com (server CPU/loop columns show "-")
+  --port <n>          port for the spawned server               (default 3300)
+  --room-prefix <s>   rooms are <prefix>-all or <prefix>-0, -1, ... (default load)
+  --keep-going        continue ramping after a failed step
+  -h, --help          show this help`;
+
+interface Options {
+  steps: number[];
+  roomSize: number;
+  hold: number;
+  ramp: number;
+  workers: number;
+  chatEveryMs: number;
+  port: number;
+  roomPrefix: string;
+  keepGoing: boolean;
+  /** WebSocket URL of a remote server, or null to spawn a local one. */
+  target: { ws: string; http: string } | null;
+}
+
+const OPTION_NAMES = ["steps", "room-size", "hold", "ramp", "workers", "chat-every", "target", "port", "room-prefix", "keep-going"];
+
+function fail(message: string): never {
+  console.error(`loadtest: ${message}\n\n${USAGE}`);
+  process.exit(2);
+}
+
+function parseOptions(): Options {
+  // `npm run loadtest --steps 5` (no "--") makes npm eat the flags and only
+  // leave npm_config_* variables behind; refuse instead of silently using defaults.
+  const swallowed = OPTION_NAMES.filter(
+    (n) =>
+      process.env[`npm_config_${n.replace(/-/g, "_")}`] !== undefined &&
+      !process.argv.some((a) => a === `--${n}` || a.startsWith(`--${n}=`)),
+  );
+  if (swallowed.length > 0) {
+    fail(`npm consumed --${swallowed.join(", --")}. Put "--" before the options: npm run loadtest -- --steps 100`);
+  }
+
+  let values;
+  try {
+    ({ values } = parseArgs({
+      strict: true,
+      allowPositionals: false,
+      options: {
+        steps: { type: "string", default: "50,100,200" },
+        "room-size": { type: "string", default: "0" },
+        hold: { type: "string", default: "20" },
+        ramp: { type: "string", default: "100" },
+        workers: { type: "string", default: "6" },
+        "chat-every": { type: "string", default: "30" },
+        target: { type: "string" },
+        port: { type: "string", default: "3300" },
+        "room-prefix": { type: "string", default: "load" },
+        "keep-going": { type: "boolean", default: false },
+        help: { type: "boolean", short: "h", default: false },
+      },
+    }));
+  } catch (err) {
+    fail((err as Error).message);
+  }
+  if (values.help) {
+    console.log(USAGE);
+    process.exit(0);
+  }
+
+  const int = (name: string, raw: string, min: number): number => {
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n < min) fail(`--${name} must be an integer >= ${min}, got "${raw}"`);
+    return n;
+  };
+  const steps = values.steps.split(",").map((s) => int("steps", s.trim(), 1));
+  if (steps.some((n, i) => i > 0 && n <= steps[i - 1])) fail("--steps must be increasing");
+  if (!ROOM_ID_PATTERN.test(`${values["room-prefix"]}-all`)) fail("--room-prefix may only use a-z, 0-9 and -");
+
+  return {
+    steps,
+    roomSize: int("room-size", values["room-size"], 0),
+    hold: int("hold", values.hold, 2),
+    ramp: int("ramp", values.ramp, 1),
+    workers: int("workers", values.workers, 1),
+    chatEveryMs: int("chat-every", values["chat-every"], 1) * 1000,
+    port: int("port", values.port, 1),
+    roomPrefix: values["room-prefix"],
+    keepGoing: values["keep-going"],
+    target: values.target === undefined ? null : parseTarget(values.target),
+  };
+}
+
+/** Accepts http(s):// or ws(s):// URLs; any path (e.g. a room link) is ignored. */
+function parseTarget(raw: string): { ws: string; http: string } {
+  let url: URL;
+  try {
+    url = new URL(raw.includes("://") ? raw : `https://${raw}`);
+  } catch {
+    fail(`--target is not a valid URL: "${raw}"`);
+  }
+  const secure = url.protocol === "https:" || url.protocol === "wss:";
+  if (!["http:", "https:", "ws:", "wss:"].includes(url.protocol)) fail(`--target must be http(s) or ws(s), got ${url.protocol}`);
+  return {
+    ws: `${secure ? "wss" : "ws"}://${url.host}${WS_PATH}`,
+    http: `${secure ? "https" : "http"}://${url.host}`,
+  };
 }
 
 /** CPU seconds (user + system) consumed so far by a process. */
@@ -238,33 +341,45 @@ function cpuSeconds(pid: number): number {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function runOrchestrator(): Promise<void> {
-  const steps = arg("steps", "50,100,200").split(",").map(Number);
-  const roomSize = Number(arg("room-size", "0"));
-  const hold = Number(arg("hold", "20"));
-  const ramp = Number(arg("ramp", "100"));
-  const workerCount = Number(arg("workers", "6"));
-  const chatEveryMs = Number(arg("chat-every", "30")) * 1000;
-  const port = Number(arg("port", "3300"));
+  const opts = parseOptions();
+  const { steps, roomSize, hold, ramp, chatEveryMs, roomPrefix } = opts;
+  const workerCount = opts.workers;
 
-  const server = spawn(process.execPath, ["server/src/index.ts"], {
-    cwd: ROOT,
-    env: { ...process.env, PORT: String(port), LOG_STATS: "1", NODE_ENV: "production" },
-    stdio: ["ignore", "pipe", "inherit"],
-  });
+  // Either spawn a local server (with stats) or check that the remote one is up.
+  let server: ChildProcess | null = null;
   let serverStats: ServerStats[] = [];
-  server.stdout!.setEncoding("utf8").on("data", (chunk: string) => {
-    for (const line of chunk.split("\n")) {
-      if (line.startsWith('{"stats"')) serverStats.push(JSON.parse(line));
+  let wsUrl: string;
+  if (opts.target) {
+    wsUrl = opts.target.ws;
+    try {
+      const res = await fetch(`${opts.target.http}/healthz`, { signal: AbortSignal.timeout(10_000) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    } catch (err) {
+      fail(`${opts.target.http}/healthz is not reachable: ${(err as Error).message}`);
     }
-  });
-  await sleep(1000);
+    console.log(`Target ${wsUrl} (server-side columns are not available for remote targets)`);
+  } else {
+    wsUrl = `ws://127.0.0.1:${opts.port}${WS_PATH}`;
+    server = spawn(process.execPath, ["server/src/index.ts"], {
+      cwd: ROOT,
+      env: { ...process.env, PORT: String(opts.port), HOST: "0.0.0.0", LOG_STATS: "1", NODE_ENV: "production" },
+      stdio: ["ignore", "pipe", "inherit"],
+    });
+    server.stdout!.setEncoding("utf8").on("data", (chunk: string) => {
+      for (const line of chunk.split("\n")) {
+        if (line.startsWith('{"stats"')) serverStats.push(JSON.parse(line));
+      }
+    });
+    await sleep(1000);
+    console.log(`Spawned server on port ${opts.port}, rooms /r/${roomPrefix}-...`);
+  }
 
   const workers: ChildProcess[] = [];
   let window: WorkerReport[] = [];
   let connected = new Map<ChildProcess, number>();
   for (let i = 0; i < workerCount; i++) {
     const w = fork(import.meta.filename, ["--worker"], { stdio: "inherit" });
-    w.send({ cmd: "config", url: `ws://127.0.0.1:${port}/ws`, chatEveryMs });
+    w.send({ cmd: "config", url: wsUrl, chatEveryMs });
     w.on("message", (r: WorkerReport) => {
       window.push(r);
       connected.set(w, r.connected);
@@ -272,7 +387,7 @@ async function runOrchestrator(): Promise<void> {
     workers.push(w);
   }
 
-  const roomFor = (i: number) => (roomSize > 0 ? `load-${Math.floor(i / roomSize)}` : "load-all");
+  const roomFor = (i: number) => (roomSize > 0 ? `${roomPrefix}-${Math.floor(i / roomSize)}` : `${roomPrefix}-all`);
   let total = 0;
   const header =
     "bots | rooms | srv CPU | ELU  | loop p99 | RSS MB | snap gap p50/p99/max ms | chat p50/p99 ms | in MB/s | corr | drops | verdict";
@@ -290,18 +405,20 @@ async function runOrchestrator(): Promise<void> {
     // Measure the second half of the hold.
     window = [];
     serverStats = [];
-    const cpuStart = cpuSeconds(server.pid!);
+    const cpuStart = server ? cpuSeconds(server.pid!) : 0;
     const t0 = Date.now();
     await sleep((hold / 2) * 1000);
     const elapsed = (Date.now() - t0) / 1000;
-    const cpu = (cpuSeconds(server.pid!) - cpuStart) / elapsed;
+    const cpu = server ? (cpuSeconds(server.pid!) - cpuStart) / elapsed : NaN;
 
     const gaps = new Histogram();
     const chat = new Histogram();
     let bytesIn = 0;
     let corrections = 0;
     let drops = 0;
+    let socketErrors = 0;
     for (const r of window) {
+      socketErrors += r.errors;
       gaps.merge(r.gaps);
       chat.merge(r.chat);
       bytesIn += r.bytesIn;
@@ -310,8 +427,10 @@ async function runOrchestrator(): Promise<void> {
     }
     const joined = [...connected.values()].reduce((a, b) => a + b, 0);
     const avg = (key: keyof ServerStats) => serverStats.reduce((a, s) => a + s[key], 0) / (serverStats.length || 1);
-    const loopP99 = Math.max(...serverStats.map((s) => s.loopP99Ms), 0);
+    const loopP99 = serverStats.length ? Math.max(...serverStats.map((s) => s.loopP99Ms)) : NaN;
     const last = serverStats.at(-1);
+    const rooms = roomSize > 0 ? Math.ceil(target / roomSize) : 1;
+    const show = (v: number, text: string) => (Number.isNaN(v) ? "-" : text);
 
     const gapP99 = gaps.percentile(0.99);
     const chatP99 = chat.percentile(0.99);
@@ -320,16 +439,17 @@ async function runOrchestrator(): Promise<void> {
     if (!(gapP99 <= 100)) problems.push("snapshots late");
     if (chat.total > 0 && chatP99 > 250) problems.push("chat slow");
     if (drops > 0) problems.push("disconnects");
+    if (socketErrors > 0) problems.push(`${socketErrors} socket errors`);
     if (loopP99 > 50) problems.push("event loop lag");
     const verdict = problems.length ? `FAIL (${problems.join(", ")})` : "ok";
 
     const row = [
       String(target).padStart(4),
-      String(last?.rooms ?? "?").padStart(5),
-      `${(cpu * 100).toFixed(0)}%`.padStart(7),
-      avg("elu").toFixed(2).padStart(4),
-      `${loopP99.toFixed(1)}`.padStart(8),
-      String(last?.rssMb ?? "?").padStart(6),
+      String(rooms).padStart(5),
+      show(cpu, `${(cpu * 100).toFixed(0)}%`).padStart(7),
+      show(loopP99, avg("elu").toFixed(2)).padStart(4),
+      show(loopP99, loopP99.toFixed(1)).padStart(8),
+      String(last?.rssMb ?? "-").padStart(6),
       `${gaps.percentile(0.5)}/${gapP99}/${gaps.percentile(1)}`.padStart(23),
       `${chat.percentile(0.5)}/${chatP99}`.padStart(15),
       (bytesIn / elapsed / 1e6).toFixed(1).padStart(7),
@@ -338,11 +458,11 @@ async function runOrchestrator(): Promise<void> {
       verdict,
     ].join(" | ");
     console.log(row);
-    if (problems.length && !process.argv.includes("--keep-going")) break;
+    if (problems.length && !opts.keepGoing) break;
   }
 
   for (const w of workers) w.kill();
-  server.kill();
+  server?.kill();
   process.exit(0);
 }
 

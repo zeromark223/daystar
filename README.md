@@ -81,7 +81,17 @@ npm run loadtest -- --steps 500,1000,2000 --room-size 20
 Spawns the server with `LOG_STATS=1`, ramps up bot players that walk non-stop and
 chat, and prints per step: server CPU, event loop utilization and delay, snapshot
 arrival gaps, chat round-trip and bandwidth. `--room-size 0` puts everyone in one
-room. See the header of `tools/loadtest.ts` for all options.
+room. `npm run loadtest -- --help` lists all options; note the `--` after the script
+name, without it npm swallows the flags (the tool detects this and stops).
+
+To test a deployed server from this machine, point it at the public URL; only the
+client-side columns (snapshot gaps, chat, bandwidth) are reported then:
+
+```bash
+npm run loadtest -- --target https://meet.example.com --steps 200,500,1000 --room-size 20
+```
+
+Bots use rooms named `<room-prefix>-all` / `<room-prefix>-0..n` (default `load`).
 
 ## Deploy (Coolify)
 
