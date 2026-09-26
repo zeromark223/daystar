@@ -1,7 +1,7 @@
 import { CHARACTERS, CHARACTER_IDS, type CharacterId } from "../../../shared/src/characters.ts";
 
-const NAME_KEY = "cute-meeting:name";
-const CHARACTER_KEY = "cute-meeting:character";
+const NAME_KEY = "daystar:name";
+const CHARACTER_KEY = "daystar:character";
 
 interface SheetData {
   animations: Record<string, string[]>;

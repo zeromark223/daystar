@@ -281,4 +281,4 @@ Bun.serve<LinkData>({
   },
 });
 
-console.log(`cute-meeting agent on http://${HOST}:${PORT} (${runtime})`);
+console.log(`daystar agent on http://${HOST}:${PORT} (${runtime})`);

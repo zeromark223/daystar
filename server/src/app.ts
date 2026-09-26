@@ -48,8 +48,8 @@ export const stats = new StatsSampler(
 
 export const startupMessage = () =>
   cluster
-    ? `cute-meeting server ${cluster.server} on http://${HOST}:${PORT} (${stats.report().runtime}, cluster, public ${cluster.publicUrl})`
-    : `cute-meeting on http://${HOST}:${PORT} (${stats.report().runtime}, standalone, map editor ${MAP_EDITOR ? "on" : "off"})`;
+    ? `daystar server ${cluster.server} on http://${HOST}:${PORT} (${stats.report().runtime}, cluster, public ${cluster.publicUrl})`
+    : `daystar on http://${HOST}:${PORT} (${stats.report().runtime}, standalone, map editor ${MAP_EDITOR ? "on" : "off"})`;
 
 /**
  * Runtimes with native pub/sub (Bun) register how to publish to a room's

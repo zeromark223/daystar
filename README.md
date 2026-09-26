@@ -1,4 +1,4 @@
-# Cute Meeting
+# Daystar
 
 A tiny meeting app that plays like a game: pick an animal, walk around a pixel-art
 ruin with everyone else in the room, and chat. Voice chat comes later.
@@ -122,3 +122,7 @@ Build from the `Dockerfile` (Bun). The container listens on `PORT` (default 3000
 exposes `GET /healthz` (plain liveness) and `GET /api/health` (JSON load stats: rooms,
 players, CPU, event loop, memory, last 5 minutes of 1 s samples). Set `HEALTH_TOKEN`
 to require `Authorization: Bearer <token>` on `/api/health` in production. WebSockets go through the normal HTTP proxy on `/ws`.
+
+## License
+
+Code is released under the [MIT License](LICENSE).

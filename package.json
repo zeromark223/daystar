@@ -1,6 +1,8 @@
 {
-  "name": "cute-meeting",
+  "name": "daystar",
   "version": "0.1.0",
+  "description": "A pixel-art meeting space you walk around in: pick an animal, move freely, chat.",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "engines": {
