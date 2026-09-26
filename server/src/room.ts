@@ -26,7 +26,18 @@ const CHAT_WINDOW_MS = 5000;
 export interface Peer {
   send(data: Uint8Array): void;
   close(): void;
+  /**
+   * Join the room's broadcast channel. Only needed when the room has a
+   * `publish` function (Bun topics); called once the player has joined.
+   */
+  subscribe?(): void;
 }
+
+/**
+ * Sends one frame to every subscribed peer of a room in a single call
+ * (Bun's server.publish fans out natively). Without it the room loops over peers.
+ */
+export type Publish = (data: Uint8Array) => void;
 
 /** Events the runtime adapter forwards to the room for one peer. */
 export interface PeerEvents {
@@ -61,10 +72,13 @@ export class Room {
   private readonly map: CollisionMap;
   private readonly onEmpty: () => void;
 
-  constructor(id: string, map: CollisionMap, onEmpty: () => void) {
+  private readonly publish: Publish | null;
+
+  constructor(id: string, map: CollisionMap, onEmpty: () => void, publish: Publish | null = null) {
     this.id = id;
     this.map = map;
     this.onEmpty = onEmpty;
+    this.publish = publish;
   }
 
   get playerCount(): number {
@@ -131,6 +145,11 @@ export class Room {
       chat: this.chat,
     });
     this.broadcast({ t: "player_joined", player: toInfo(player) });
+    // Subscribe after the announcement so the newcomer does not receive its own join.
+    if (this.publish) {
+      if (!peer.subscribe) throw new Error("Room uses publish but the peer cannot subscribe");
+      peer.subscribe();
+    }
     this.players.set(player.id, player);
     this.startTicker();
     return player;
@@ -201,10 +220,12 @@ export class Room {
     this.broadcast({ t: "snapshot", players });
   }
 
-  /** Encode once, send to everyone in the room. */
+  /** Encode once, send to every joined player. */
   private broadcast(msg: ServerMessage): void {
+    if (this.players.size === 0) return;
     const data = encodeServerMessage(msg);
-    for (const p of this.players.values()) p.peer.send(data);
+    if (this.publish) this.publish(data);
+    else for (const p of this.players.values()) p.peer.send(data);
   }
 }
 

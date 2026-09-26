@@ -18,6 +18,10 @@ const map = CollisionMap.parse(
 class FakeSocket {
   received: ServerMessage[] = [];
   events!: PeerEvents;
+  subscribed = false;
+  subscribe(): void {
+    this.subscribed = true;
+  }
   send(data: Uint8Array): void {
     this.received.push(decodeServerMessage(data)!);
   }
@@ -34,11 +38,26 @@ class FakeSocket {
   }
 }
 
-function setup() {
-  const room = new Room("test", map, () => {});
+/** Fake Bun topic: fans a frame out to every subscribed socket, counting calls. */
+function fakeTopic() {
+  const sockets: FakeSocket[] = [];
+  const topic = {
+    publishes: 0,
+    sockets,
+    publish: (data: Uint8Array) => {
+      topic.publishes++;
+      for (const s of sockets) if (s.subscribed) s.send(data);
+    },
+  };
+  return topic;
+}
+
+function setup(topic?: ReturnType<typeof fakeTopic>) {
+  const room = new Room("test", map, () => {}, topic?.publish ?? null);
   const tick = () => (room as unknown as { tick(): void }).tick();
   const sockets = ["Ann", "Ben", "Cat"].map((name) => {
     const s = new FakeSocket();
+    topic?.sockets.push(s);
     s.events = room.accept(s);
     s.deliver({ t: "join", name, character: "rabbit_white" });
     return s;
@@ -47,7 +66,7 @@ function setup() {
   const self = welcome.t === "welcome" ? welcome.players.find((p) => p.id === welcome.selfId)! : null!;
   for (const s of sockets) s.take();
   const done = () => sockets.forEach((s) => s.close());
-  return { tick, sockets, self, done };
+  return { room, tick, sockets, self, done };
 }
 
 test("snapshots carry only players that moved", () => {
@@ -84,5 +103,33 @@ test("a player who stops is sent once more with moving=false", () => {
   tick();
   const last = sockets[1].take().filter((m) => m.t === "snapshot").at(-1);
   assert.ok(last?.t === "snapshot" && last.players.length === 1 && last.players[0].moving === false);
+  done();
+});
+
+test("with publish, broadcasts go out once per frame to joined players only", () => {
+  const topic = fakeTopic();
+  const { tick, sockets, self, done } = setup(topic);
+  assert.ok(sockets.every((s) => s.subscribed));
+  const before = topic.publishes;
+  sockets[0].deliver({ t: "move", x: self.x + 1, y: self.y, dir: "east", moving: true });
+  tick();
+  assert.equal(topic.publishes, before + 1);
+  for (const s of sockets) assert.equal(s.take().filter((m) => m.t === "snapshot").length, 1);
+  done();
+});
+
+test("with publish, a newcomer gets welcome but not its own join", () => {
+  const topic = fakeTopic();
+  const { room, sockets, done } = setup(topic);
+  const late = new FakeSocket();
+  topic.sockets.push(late);
+  late.events = room.accept(late);
+  late.deliver({ t: "join", name: "Dan", character: "deer" });
+  assert.deepEqual(
+    late.take().map((m) => m.t),
+    ["welcome"],
+  );
+  for (const s of sockets) assert.deepEqual(s.take().map((m) => m.t), ["player_joined"]);
+  late.close();
   done();
 });

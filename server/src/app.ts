@@ -3,7 +3,7 @@ import { rename, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { CollisionMap } from "../../shared/src/collision.ts";
 import { ROOM_ID_PATTERN, WS_PATH } from "../../shared/src/constants.ts";
-import { Room, type Peer, type PeerEvents } from "./room.ts";
+import { Room, type Peer, type PeerEvents, type Publish } from "./room.ts";
 import { StatsSampler } from "./stats.ts";
 import { createStaticHandler } from "./static.ts";
 
@@ -50,6 +50,15 @@ const stats = new StatsSampler(
 export const startupMessage = () =>
   `cute-meeting on http://${HOST}:${PORT} (${stats.report().runtime}, map editor ${MAP_EDITOR ? "on" : "off"})`;
 
+/**
+ * Runtimes with native pub/sub (Bun) register how to publish to a room's
+ * channel; their peers must then implement Peer.subscribe for the same channel.
+ */
+let publisherFor: ((roomId: string) => Publish) | null = null;
+export function usePublisher(factory: (roomId: string) => Publish): void {
+  publisherFor = factory;
+}
+
 /** Room id for a WebSocket upgrade URL (/ws?room=<id>), or null if invalid. */
 export function roomIdFor(url: URL): string | null {
   const roomId = url.searchParams.get("room") ?? "";
@@ -60,7 +69,7 @@ export function roomIdFor(url: URL): string | null {
 export function connect(roomId: string, peer: Peer): PeerEvents {
   let room = rooms.get(roomId);
   if (!room) {
-    room = new Room(roomId, collision, () => rooms.delete(roomId));
+    room = new Room(roomId, collision, () => rooms.delete(roomId), publisherFor?.(roomId) ?? null);
     rooms.set(roomId, room);
   }
   sockets++;
