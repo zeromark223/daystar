@@ -1,0 +1,688 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cute Meeting Architecture</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --bg: #f2f2f3;
+        --ink: #1d1f20;
+        --ink-soft: #4a525b;
+        --line: #416180;
+        --line-soft: #5980a6;
+        --hair: #c7d0da;
+        --tag-bg: #eef6ff;
+        --tag-border: #b9d3ec;
+        --dark: #1d2d3d;
+        --dark-ink: #e9eef4;
+        --dark-soft: #a9bdd1;
+        --font-heading: "Barlow Condensed", "Arial Narrow", sans-serif;
+        --font-body: "Barlow", system-ui, sans-serif;
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        background: var(--bg);
+        color: var(--ink);
+        font-family: var(--font-body);
+      }
+      /* The figure is a fixed-width drawing; narrow screens scroll it sideways. */
+      .scroll {
+        overflow-x: auto;
+      }
+      .page {
+        width: 1560px;
+        padding: 48px 40px 56px;
+        margin: 0 auto;
+      }
+
+      /* ---------- header ---------- */
+      .eyebrow {
+        font-family: var(--font-heading);
+        font-size: 12px;
+        font-weight: 500;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--line);
+      }
+      header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-end;
+        padding-bottom: 24px;
+        border-bottom: 1px solid var(--hair);
+      }
+      h1 {
+        font-family: var(--font-heading);
+        font-weight: 700;
+        font-size: 46px;
+        letter-spacing: -0.01em;
+        margin: 10px 0 8px;
+      }
+      .lede {
+        max-width: 700px;
+        color: var(--ink-soft);
+        font-size: 15px;
+        line-height: 1.55;
+      }
+      .legend {
+        display: grid;
+        grid-template-columns: auto auto;
+        gap: 10px 28px;
+        font-family: var(--font-heading);
+        font-size: 11px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--ink-soft);
+      }
+      .legend span {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .legend i {
+        display: inline-block;
+        width: 34px;
+      }
+      .legend .key-solid {
+        border-top: 2px solid var(--line);
+      }
+      .legend .key-dashed {
+        border-top: 2px dashed var(--line);
+      }
+      .legend .key-zone {
+        height: 9px;
+        border: 1px dashed var(--line-soft);
+      }
+      .legend .key-block {
+        height: 9px;
+        background: var(--dark);
+      }
+
+      /* ---------- diagram ---------- */
+      .diagram {
+        position: relative;
+        width: 1480px;
+        height: 900px;
+        margin-top: 40px;
+      }
+      .zone {
+        position: absolute;
+        top: 0;
+        height: 900px;
+        border: 1px dashed var(--line-soft);
+      }
+      .zone > .zone-label {
+        position: absolute;
+        top: -8px;
+        left: 18px;
+        padding: 0 8px;
+        background: var(--bg);
+        font-family: var(--font-heading);
+        font-size: 13px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--line);
+        line-height: 16px;
+      }
+      .zone.future {
+        border-color: #9fb0c1;
+      }
+      .zone.future > .zone-label {
+        color: #7f93a7;
+      }
+
+      .card {
+        position: absolute;
+        background: var(--bg);
+        border: 1px solid var(--hair);
+        padding: 22px 22px 20px;
+      }
+      /* Crosshair marks on the corners, as on a drafting sheet. */
+      .card > .x {
+        position: absolute;
+        width: 13px;
+        height: 13px;
+      }
+      .card > .x::before,
+      .card > .x::after {
+        content: "";
+        position: absolute;
+        background: #6c7f93;
+      }
+      .card > .x::before {
+        left: 6px;
+        top: 0;
+        width: 1px;
+        height: 13px;
+      }
+      .card > .x::after {
+        top: 6px;
+        left: 0;
+        width: 13px;
+        height: 1px;
+      }
+      .card > .tl { left: -7px; top: -7px; }
+      .card > .tr { right: -7px; top: -7px; }
+      .card > .bl { left: -7px; bottom: -7px; }
+      .card > .br { right: -7px; bottom: -7px; }
+
+      .card .top {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 12px;
+      }
+      .card .kicker {
+        font-family: var(--font-heading);
+        font-size: 11.5px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--line-soft);
+        line-height: 1.4;
+      }
+      .card h2 {
+        font-family: var(--font-heading);
+        font-weight: 600;
+        font-size: 29px;
+        margin: 8px 0 8px;
+        letter-spacing: -0.005em;
+      }
+      .card p,
+      .card li {
+        font-size: 14px;
+        line-height: 1.5;
+        color: var(--ink-soft);
+      }
+      .card ul {
+        list-style: none;
+      }
+      .card li + li {
+        margin-top: 2px;
+      }
+      .card strong {
+        color: var(--ink);
+        font-weight: 600;
+      }
+      .tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      .tag {
+        font-size: 12px;
+        padding: 3px 9px;
+        background: var(--tag-bg);
+        border: 1px solid var(--tag-border);
+        color: var(--line);
+        white-space: nowrap;
+      }
+      .card .foot {
+        position: absolute;
+        left: 22px;
+        right: 22px;
+        bottom: 18px;
+      }
+
+      .card.dark {
+        background: var(--dark);
+        border-color: var(--dark);
+        box-shadow: 0 10px 24px rgba(29, 45, 61, 0.18);
+      }
+      .card.dark h2 {
+        color: #fff;
+      }
+      .card.dark .kicker {
+        color: var(--dark-soft);
+      }
+      .card.dark p,
+      .card.dark li {
+        color: var(--dark-ink);
+      }
+      .card.dark strong {
+        color: #fff;
+      }
+      .card.dark .tag {
+        background: #3b5876;
+        border-color: #3b5876;
+        color: #e9f2fb;
+      }
+      .card.dark > .x::before,
+      .card.dark > .x::after {
+        background: #8aa3bb;
+      }
+      .card.ghost {
+        border-color: #d3dae2;
+      }
+      .card.soft {
+        border: 1px dashed #b3c1cf;
+        padding: 18px 20px;
+      }
+      .card.soft h3 {
+        font-family: var(--font-heading);
+        font-weight: 600;
+        font-size: 21px;
+        margin: 6px 0 6px;
+        color: #3b4550;
+      }
+      .card.soft p {
+        font-size: 13.5px;
+        color: #5d6771;
+      }
+      .card .inline-title {
+        font-family: var(--font-heading);
+        font-size: 21px;
+        font-weight: 600;
+        color: var(--ink);
+      }
+
+      .badge {
+        position: absolute;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        font-size: 13px;
+        color: var(--ink-soft);
+      }
+      .badge .tag {
+        background: transparent;
+        border-color: var(--line-soft);
+      }
+
+      svg.wires {
+        position: absolute;
+        inset: 0;
+        overflow: visible;
+        pointer-events: none;
+      }
+      .wire {
+        fill: none;
+        stroke: var(--line);
+        stroke-width: 1.6;
+      }
+      .wire.control {
+        stroke-dasharray: 5 4;
+      }
+      .wire-label {
+        position: absolute;
+        font-family: var(--font-heading);
+        font-size: 11.5px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: #2b2b2d;
+        line-height: 1.35;
+        background: var(--bg);
+        padding: 1px 4px;
+        white-space: nowrap;
+      }
+      .step {
+        display: inline-grid;
+        place-items: center;
+        width: 17px;
+        height: 17px;
+        margin-right: 5px;
+        border-radius: 50%;
+        background: var(--line);
+        color: #fff;
+        font-size: 10.5px;
+        letter-spacing: 0;
+        vertical-align: 1px;
+      }
+
+      /* ---------- footer rows ---------- */
+      .row {
+        display: grid;
+        margin-top: 44px;
+        border-top: 1px solid var(--hair);
+      }
+      .row.three {
+        grid-template-columns: repeat(3, 1fr);
+      }
+      .row.four {
+        grid-template-columns: repeat(4, 1fr);
+      }
+      .row.five {
+        grid-template-columns: repeat(5, 1fr);
+      }
+      .cell {
+        padding: 22px 26px 0 0;
+      }
+      .cell + .cell {
+        padding-left: 26px;
+        border-left: 1px solid var(--hair);
+      }
+      .cell h3 {
+        font-family: var(--font-heading);
+        font-weight: 600;
+        font-size: 22px;
+        margin: 8px 0 6px;
+      }
+      .cell p {
+        font-size: 14px;
+        line-height: 1.55;
+        color: var(--ink-soft);
+      }
+      .big {
+        font-family: var(--font-heading);
+        font-weight: 700;
+        font-size: 40px;
+        line-height: 1;
+        margin: 10px 0 6px;
+        color: var(--dark);
+      }
+      .big small {
+        font-size: 18px;
+        font-weight: 600;
+        color: var(--line);
+      }
+      .note {
+        margin-top: 28px;
+        font-size: 12.5px;
+        color: #6b747d;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="scroll">
+      <div class="page">
+        <header>
+          <div>
+            <div class="eyebrow">System architecture — Fig. 01</div>
+            <h1>Cute Meeting</h1>
+            <p class="lede">
+              A pixel-art meeting space you walk around in. Browsers ask one <strong>agent</strong> where to
+              play, then talk to a <strong>game server</strong> over a live connection; game servers mirror
+              shared rooms to each other so people on different servers still see one another.
+            </p>
+          </div>
+          <div class="legend" aria-label="Legend">
+            <span><i class="key-solid"></i>Data</span>
+            <span><i class="key-dashed"></i>Control</span>
+            <span><i class="key-zone"></i>Zone</span>
+            <span><i class="key-block"></i>Control center</span>
+          </div>
+        </header>
+
+        <div class="diagram">
+          <!-- Zones -->
+          <div class="zone" style="left: 0; width: 380px">
+            <span class="zone-label">● Users — browser</span>
+          </div>
+          <div class="zone" style="left: 450px; width: 650px">
+            <span class="zone-label">Platform — one container (Bun)</span>
+          </div>
+          <div class="zone future" style="left: 1160px; width: 320px">
+            <span class="zone-label">Planned — not built yet</span>
+          </div>
+
+          <!-- Browser -->
+          <div class="card" style="left: 30px; top: 56px; width: 320px; height: 430px">
+            <div class="top">
+              <div class="kicker">Web app · any browser</div>
+              <span class="tag">talk.ptnn.dev</span>
+            </div>
+            <h2>Game Client</h2>
+            <ul>
+              <li>Lobby: pick a name and an animal</li>
+              <li>Pixel map drawn with PixiJS (WebGL)</li>
+              <li><strong>Your own moves show instantly</strong>; the server double-checks them</li>
+              <li>Other players are smoothed 100 ms behind so motion looks fluid</li>
+              <li>Chat panel plus speech bubbles above heads</li>
+              <li>Moves to another server by itself when asked, or when its server disappears</li>
+            </ul>
+            <div class="foot tags">
+              <span class="tag">PixiJS</span>
+              <span class="tag">WebSocket</span>
+              <span class="tag">Binary messages</span>
+            </div>
+          </div>
+
+          <!-- Hosting edge -->
+          <div class="card" style="left: 30px; top: 580px; width: 320px; height: 250px">
+            <div class="top">
+              <div class="kicker">Hosting · in front of everything</div>
+            </div>
+            <h2>Cloudflare → Coolify</h2>
+            <ul>
+              <li>Encrypts every connection (HTTPS / secure WebSocket)</li>
+              <li><strong>talk.ptnn.dev</strong> reaches the agent</li>
+              <li><strong>talk-s1 … s4.ptnn.dev</strong> reach the game servers</li>
+            </ul>
+            <div class="foot tags">
+              <span class="tag">TLS</span>
+              <span class="tag">Docker</span>
+            </div>
+          </div>
+
+          <!-- Agent (control center) -->
+          <div class="card dark" style="left: 480px; top: 56px; width: 590px; height: 272px">
+            <div class="top">
+              <div class="kicker">Control center · single instance · port 3000</div>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a9bdd1" stroke-width="2" aria-hidden="true">
+                <circle cx="12" cy="12" r="9" />
+                <path d="M12 7v5l3 2" />
+              </svg>
+            </div>
+            <h2>Agent</h2>
+            <ul>
+              <li>Serves the web app and answers <strong>"where should I play?"</strong></li>
+              <li>Keeps a room on one server, spilling onto another only when it gets busy</li>
+              <li>Hands out a signed <strong>ticket</strong> (valid 30 s) and gives every player a room-unique id</li>
+              <li>Watches load every second and asks busy servers to move some players</li>
+              <li>Only one agent today: <strong>if it stops, nobody new can join</strong></li>
+            </ul>
+            <div class="foot tags">
+              <span class="tag">Placement</span>
+              <span class="tag">Tickets</span>
+              <span class="tag">Load watch</span>
+            </div>
+          </div>
+
+          <!-- Game servers: stacked to show there are several -->
+          <div class="card ghost" style="left: 496px; top: 396px; width: 330px; height: 300px"></div>
+          <div class="card ghost" style="left: 488px; top: 388px; width: 330px; height: 300px"></div>
+          <div class="card" style="left: 480px; top: 380px; width: 330px; height: 300px">
+            <div class="top">
+              <div class="kicker">Game server · s1 … s4 · ports 3001–3004</div>
+            </div>
+            <h2>Game Server</h2>
+            <ul>
+              <li>Holds each room's players and the map's walls</li>
+              <li>Checks every move: not too fast, not into a wall</li>
+              <li>Sends each room an update <strong>20 times a second</strong>, only for players who moved</li>
+              <li>One call reaches everyone in a room (Bun pub/sub)</li>
+            </ul>
+            <div class="foot tags">
+              <span class="tag">Bun</span>
+              <span class="tag">20 Hz</span>
+              <span class="tag">Ticket check</span>
+            </div>
+          </div>
+          <div class="badge" style="left: 480px; top: 710px">
+            <span class="tag">Replicated ×4</span>identical code
+          </div>
+
+          <!-- Mesh -->
+          <div class="card" style="left: 880px; top: 380px; width: 190px; height: 300px">
+            <div class="kicker">Server ↔ server</div>
+            <h2>Mesh</h2>
+            <ul>
+              <li>Every pair of servers is directly linked</li>
+              <li>Mirrors rooms that span servers</li>
+              <li>Passes a player over during a move</li>
+            </ul>
+          </div>
+
+          <!-- Supervisor -->
+          <div class="card" style="left: 480px; top: 784px; width: 590px; height: 86px; padding-top: 16px">
+            <div class="kicker">Process manager · container entry point</div>
+            <p style="margin-top: 6px">
+              <span class="inline-title">Supervisor</span>
+              &nbsp;starts the agent and the four servers, and restarts any that crash.
+            </p>
+          </div>
+
+          <!-- Planned -->
+          <div class="card soft" style="left: 1180px; top: 56px; width: 280px; height: 170px">
+            <div class="kicker">Storage</div>
+            <h3>Chat history service</h3>
+            <p>Today a server keeps no chat history. A separate database service will store it.</p>
+          </div>
+          <div class="card soft" style="left: 1180px; top: 256px; width: 280px; height: 170px">
+            <div class="kicker">Messaging</div>
+            <h3>Message bus</h3>
+            <p>Redis Streams or Kafka instead of direct server links, once there are more servers or machines.</p>
+          </div>
+          <div class="card soft" style="left: 1180px; top: 456px; width: 280px; height: 170px">
+            <div class="kicker">Availability</div>
+            <h3>Several agents</h3>
+            <p>More than one agent behind a load balancer, so the agent is no longer a single point of failure.</p>
+          </div>
+          <div class="card soft" style="left: 1180px; top: 656px; width: 280px; height: 170px">
+            <div class="kicker">Bandwidth</div>
+            <h3>Area of interest</h3>
+            <p>Send each player only the people near them, cutting traffic in very large rooms.</p>
+          </div>
+
+          <!-- Wires -->
+          <svg class="wires" width="1480" height="900" viewBox="0 0 1480 900" aria-hidden="true">
+            <defs>
+              <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M0 0 L10 5 L0 10 z" fill="#416180" />
+              </marker>
+            </defs>
+            <!-- 1: ask the agent, get a ticket back -->
+            <path class="wire control" d="M350 118 H478" marker-end="url(#arrow)" />
+            <path class="wire control" d="M480 178 H352" marker-end="url(#arrow)" />
+            <!-- 2: play on a game server -->
+            <path class="wire" d="M352 410 H478" marker-start="url(#arrow)" marker-end="url(#arrow)" />
+            <!-- 3: please move -->
+            <path class="wire control" d="M480 460 H352" marker-end="url(#arrow)" />
+            <!-- agent <-> servers -->
+            <path class="wire control" d="M560 378 V330" marker-end="url(#arrow)" />
+            <path class="wire control" d="M730 330 V378" marker-end="url(#arrow)" />
+            <!-- servers <-> mesh -->
+            <path class="wire" d="M828 530 H878" marker-start="url(#arrow)" marker-end="url(#arrow)" />
+            <!-- supervisor starts every process -->
+            <path class="wire control" d="M760 782 V700" marker-end="url(#arrow)" />
+          </svg>
+          <div class="wire-label" style="left: 360px; top: 92px"><span class="step">1</span>Where do I play?</div>
+          <div class="wire-label" style="left: 362px; top: 184px">Ticket + address</div>
+          <div class="wire-label" style="left: 360px; top: 386px"><span class="step">2</span>Play · live</div>
+          <div class="wire-label" style="left: 360px; top: 467px"><span class="step">3</span>Please move</div>
+          <div class="wire-label" style="left: 568px; top: 344px">Joins · leaves · load</div>
+          <div class="wire-label" style="left: 738px; top: 344px">Move orders</div>
+          <div class="wire-label" style="left: 830px; top: 502px">Sync</div>
+          <div class="wire-label" style="left: 770px; top: 734px">Starts · restarts every process</div>
+        </div>
+
+        <!-- Invariants -->
+        <div class="row three">
+          <div class="cell">
+            <div class="eyebrow">Invariant 01</div>
+            <h3>The server is the referee</h3>
+            <p>
+              Your screen moves you right away, but every position is checked against walking speed and
+              walls. A move that does not add up is corrected back.
+            </p>
+          </div>
+          <div class="cell">
+            <div class="eyebrow">Invariant 02</div>
+            <h3>Only what changed is sent</h3>
+            <p>
+              Twenty times a second a room sends just the players who moved, packed in 7 bytes each. People
+              standing still cost nothing.
+            </p>
+          </div>
+          <div class="cell">
+            <div class="eyebrow">Invariant 03</div>
+            <h3>No ticket, no entry</h3>
+            <p>
+              A game server only accepts a connection that carries a ticket the agent signed for that exact
+              server and room, used within 30 seconds.
+            </p>
+          </div>
+        </div>
+
+        <!-- Key numbers -->
+        <div class="row four">
+          <div class="cell">
+            <div class="eyebrow">Update rate</div>
+            <div class="big">20<small> / second</small></div>
+            <p>Room updates; your own movement is sent at the same pace while you walk.</p>
+          </div>
+          <div class="cell">
+            <div class="eyebrow">Per moving player</div>
+            <div class="big">7<small> bytes</small></div>
+            <p>Position and facing in each update, instead of 12 bytes before the binary protocol.</p>
+          </div>
+          <div class="cell">
+            <div class="eyebrow">One server process</div>
+            <div class="big">~5,000<small> players</small></div>
+            <p>Measured in rooms of 1,000 with 20% of people walking, keeping delays under 50 ms.</p>
+          </div>
+          <div class="cell">
+            <div class="eyebrow">Bandwidth</div>
+            <div class="big">~1<small> Gbps</small></div>
+            <p>Outgoing traffic for those 5,000 players; the network, not the CPU, is the next limit.</p>
+          </div>
+        </div>
+
+        <!-- Glossary -->
+        <div class="row five">
+          <div class="cell">
+            <div class="eyebrow">Word</div>
+            <h3>Room</h3>
+            <p>One shared map at <code>/r/&lt;name&gt;</code>. Everyone with the same link is together.</p>
+          </div>
+          <div class="cell">
+            <div class="eyebrow">Word</div>
+            <h3>Tick</h3>
+            <p>A server heartbeat, 20 per second, when a room sends out what changed.</p>
+          </div>
+          <div class="cell">
+            <div class="eyebrow">Word</div>
+            <h3>Ticket</h3>
+            <p>A short-lived pass from the agent naming your room, your server and your player id.</p>
+          </div>
+          <div class="cell">
+            <div class="eyebrow">Word</div>
+            <h3>Mesh</h3>
+            <p>The direct links between game servers that keep a shared room identical on each of them.</p>
+          </div>
+          <div class="cell">
+            <div class="eyebrow">Word</div>
+            <h3>Migration</h3>
+            <p>Moving a player to a less busy server without them leaving the room or losing their spot.</p>
+          </div>
+        </div>
+
+        <p class="note">
+          Cluster version (branch <code>scale-out</code>). Without cluster settings the same image runs as a single
+          game server that also plays the agent's role. Numbers measured on a development machine; see
+          <code>docs/cluster.md</code> for the technical design.
+        </p>
+      </div>
+    </div>
+    <script>
+      // Crosshair marks on every card corner.
+      for (const card of document.querySelectorAll(".card")) {
+        for (const corner of ["tl", "tr", "bl", "br"]) {
+          const mark = document.createElement("span");
+          mark.className = `x ${corner}`;
+          card.appendChild(mark);
+        }
+      }
+    </script>
+  </body>
+</html>

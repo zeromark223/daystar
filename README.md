@@ -45,7 +45,8 @@ bun run build && bun start   # production mode on :3000
 `bun run cluster` starts an agent (`:3000`) and 4 game servers (`:3001`–`:3004`);
 clients ask the agent where to connect, rooms can span servers, and overloaded
 servers hand players over. Design, configuration and Coolify setup:
-[docs/cluster.md](docs/cluster.md). The Docker image runs standalone unless
+[docs/cluster.md](docs/cluster.md). A one-page overview for non-developers:
+[docs/architecture/index.html](docs/architecture/index.html) (open it in a browser). The Docker image runs standalone unless
 `CLUSTER_SERVERS` is set.
 
 ## Layout
