@@ -1,6 +1,6 @@
 # Cluster design
 
-Status: agreed design, not implemented yet. Branch: `scale-out` (fallback: `master`).
+Status: implemented on branch `scale-out` (fallback: `master`); milestones 1-4 done.
 
 ## Goal
 
@@ -158,8 +158,9 @@ client has a single code path.
    with P's state and marks P as moved, so closing P's old socket later sends no
    `player_left`. If s2 already replicates R it uses its replica immediately.
 5. s2 announces P as locally owned to interested peers; clients just see P keep moving.
-6. If s1 is unreachable, s2 spawns P at the room spawn point. If the client never
-   arrives, s1 drops P after 30 s and sends `player_left` as usual.
+6. If s1 is unreachable (or does not answer within 1.5 s), s2 spawns P at the room spawn
+   point. If the client never moves, s1 simply keeps P (no kick) and may ask it again
+   after 30 s.
 
 ## Configuration
 

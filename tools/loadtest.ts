@@ -72,6 +72,10 @@ interface WorkerReport {
   corrections: number;
   closes: number;
   errors: number;
+  /** Bots that moved to another server when asked (cluster). */
+  migrations: number;
+  /** Bots that rejoined after their socket dropped. */
+  rejoins: number;
 }
 
 // ---------------------------------------------------------------- worker
@@ -89,6 +93,12 @@ const DIRS: { dx: number; dy: number; dir: Direction }[] = [
 
 interface Bot {
   ws: WebSocket;
+  room: string;
+  /** Cluster ticket for /api/migrate (null standalone). */
+  ticket: string | null;
+  name: string;
+  /** A migration or rejoin is in flight. */
+  switching: boolean;
   character: CharacterId;
   id: number;
   x: number;
@@ -138,23 +148,24 @@ function runWorker(): void {
   let gaps = new Histogram();
   let chat = new Histogram();
   let move = new Histogram();
-  let counters = { snapshots: 0, bytesIn: 0, bytesOut: 0, corrections: 0, closes: 0, errors: 0 };
+  let counters = { snapshots: 0, bytesIn: 0, bytesOut: 0, corrections: 0, closes: 0, errors: 0, migrations: 0, rejoins: 0 };
 
-  /** Like the web client: ask /api/join where to connect (retries a few times). */
-  async function joinUrl(room: string): Promise<string | null> {
+  /** Like the web client: ask the agent (or server) where to connect; retries a few times. */
+  async function place(path: string, body: object): Promise<{ url: string; ticket: string | null } | null> {
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const res = await fetch(`${baseUrl}/api/join`, {
+        const res = await fetch(`${baseUrl}${path}`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ room }),
+          body: JSON.stringify(body),
         });
         if (res.ok) {
-          const { wsUrl } = (await res.json()) as { wsUrl: string };
-          if (!wsUrl.startsWith("/")) return wsUrl;
+          const { wsUrl, ticket } = (await res.json()) as { wsUrl: string; ticket?: string };
           const base = new URL(baseUrl);
-          return `${base.protocol === "https:" ? "wss:" : "ws:"}//${base.host}${wsUrl}`;
+          const url = wsUrl.startsWith("/") ? `${base.protocol === "https:" ? "wss:" : "ws:"}//${base.host}${wsUrl}` : wsUrl;
+          return { url, ticket: ticket ?? null };
         }
+        if (res.status === 409) return null; // not asked to migrate (any more)
       } catch {
         // retried below
       }
@@ -165,13 +176,14 @@ function runWorker(): void {
   }
 
   async function addBot(room: string): Promise<void> {
-    const url = await joinUrl(room);
-    if (!url) return;
-    const ws = new WebSocket(url);
-    ws.binaryType = "arraybuffer";
+    const placed = await place("/api/join", { room });
+    if (!placed) return;
     const character = CHARACTER_IDS[Math.floor(Math.random() * CHARACTER_IDS.length)];
     const bot: Bot = {
-      ws,
+      ws: null!,
+      room,
+      ticket: placed.ticket,
+      name: `bot${bots.length}`,
       character,
       id: -1,
       x: 0,
@@ -181,6 +193,7 @@ function runWorker(): void {
       nextChat: Date.now() + Math.random() * chatEveryMs,
       lastSnapshot: 0,
       joined: false,
+      switching: false,
       walking: true,
       phaseUntil: 0,
       pending: [],
@@ -193,11 +206,23 @@ function runWorker(): void {
       bot.walking = Math.random() < movingRatio;
       bot.phaseUntil = Date.now() + Math.random() * (bot.walking ? walkMs() : idleMs(movingRatio));
     }
-    ws.addEventListener("open", () =>
-      ws.send(encodeClientMessage({ t: "join", name: `bot${bots.length}`, character })),
-    );
+    connect(bot, placed.url);
+    bots.push(bot);
+  }
+
+  /** Open a socket for the bot and make it the current one (join, then drop the old socket). */
+  function connect(bot: Bot, url: string): void {
+    const old = bot.ws as WebSocket | null;
+    const ws = new WebSocket(url);
+    ws.binaryType = "arraybuffer";
+    bot.ws = ws;
+    bot.pending = [];
+    ws.addEventListener("open", () => {
+      ws.send(encodeClientMessage({ t: "join", name: bot.name, character: bot.character }));
+      if (old && old !== ws) old.close();
+    });
     ws.addEventListener("message", (event) => {
-      if (!(event.data instanceof ArrayBuffer)) return;
+      if (bot.ws !== ws || !(event.data instanceof ArrayBuffer)) return;
       const bytes = new Uint8Array(event.data);
       counters.bytesIn += bytes.byteLength;
       const now = performance.now();
@@ -229,14 +254,41 @@ function runWorker(): void {
         bot.x = msg.x;
         bot.y = msg.y;
         counters.corrections++;
+      } else if (msg?.t === "migrate") {
+        void migrate(bot);
       }
     });
     ws.addEventListener("close", () => {
-      if (bot.joined) counters.closes++;
+      if (bot.ws !== ws) return; // replaced on purpose
       bot.joined = false;
+      counters.closes++;
+      void rejoin(bot);
     });
     ws.addEventListener("error", () => counters.errors++);
-    bots.push(bot);
+  }
+
+  /** The server shed load: like the client, get a ticket elsewhere and switch. */
+  async function migrate(bot: Bot): Promise<void> {
+    if (bot.switching || !bot.ticket) return;
+    bot.switching = true;
+    const placed = await place("/api/migrate", { ticket: bot.ticket });
+    bot.switching = false;
+    if (!placed) return;
+    bot.ticket = placed.ticket;
+    counters.migrations++;
+    connect(bot, placed.url);
+  }
+
+  /** The socket dropped: rejoin the room through the agent, as the client does. */
+  async function rejoin(bot: Bot): Promise<void> {
+    if (bot.switching) return;
+    bot.switching = true;
+    const placed = await place("/api/join", { room: bot.room });
+    bot.switching = false;
+    if (!placed) return;
+    bot.ticket = placed.ticket;
+    counters.rejoins++;
+    connect(bot, placed.url);
   }
 
   // Each bot sends once per tick; bots are spread over 5 phases to avoid bursts.
@@ -299,7 +351,7 @@ function runWorker(): void {
     gaps = new Histogram();
     chat = new Histogram();
     move = new Histogram();
-    counters = { snapshots: 0, bytesIn: 0, bytesOut: 0, corrections: 0, closes: 0, errors: 0 };
+    counters = { snapshots: 0, bytesIn: 0, bytesOut: 0, corrections: 0, closes: 0, errors: 0, migrations: 0, rejoins: 0 };
   }, 1000);
 
   type Command = { cmd: "config"; baseUrl: string; chatEveryMs: number; movingRatio: number } | { cmd: "add"; room: string };
@@ -603,7 +655,7 @@ async function runOrchestrator(): Promise<void> {
   const roomFor = (i: number) => (roomSize > 0 ? `${roomPrefix}-${Math.floor(i / roomSize)}` : `${roomPrefix}-all`);
   let total = 0;
   console.log(
-    "bots | rooms | srv players | srv CPU | loop p99 | tick p99 | gc/s | gc max ms | RSS MB | move p50/p99 ms | snap gap p50/p99/max ms | chat p50/p99 ms | in MB/s | corr | drops | verdict",
+    "bots | rooms | srv players | srv CPU | loop p99 | tick p99 | gc/s | gc max ms | RSS MB | move p50/p99 ms | snap gap p50/p99/max ms | chat p50/p99 ms | in MB/s | corr | drops | migr | rejoin | verdict",
   );
 
   for (const target of steps) {
@@ -648,7 +700,11 @@ async function runOrchestrator(): Promise<void> {
     let corrections = 0;
     let drops = 0;
     let socketErrors = 0;
+    let migrations = 0;
+    let rejoins = 0;
     for (const r of window) {
+      migrations += r.migrations;
+      rejoins += r.rejoins;
       gaps.merge(r.gaps);
       chat.merge(r.chat);
       move.merge(r.move);
@@ -699,6 +755,8 @@ async function runOrchestrator(): Promise<void> {
       (bytesIn / elapsed / 1e6).toFixed(1).padStart(7),
       String(corrections).padStart(4),
       String(drops).padStart(5),
+      String(migrations).padStart(4),
+      String(rejoins).padStart(6),
       verdict,
     ].join(" | ");
     console.log(row);

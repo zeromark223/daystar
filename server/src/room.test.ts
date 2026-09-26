@@ -222,3 +222,56 @@ test("a repeated remote join refreshes state instead of announcing twice", () =>
     ["player_joined"],
   );
 });
+
+// ------------------------------------------------------------ migration
+
+test("pickMigrants asks random local players once and never replicas", () => {
+  const { room, sockets, done } = setup();
+  room.remoteJoined(2, remoteInfo);
+  const picked = room.pickMigrants(2);
+  assert.equal(picked.length, 2);
+  assert.ok(!picked.includes(42));
+  const asked = sockets.filter((s) => s.take().some((m) => m.t === "migrate")).length;
+  assert.equal(asked, 2);
+  // The two already asked are not picked again; only one local player is left.
+  assert.equal(room.pickMigrants(5).length, 1);
+  done();
+});
+
+test("handOff turns a local player into a replica silently; its old socket is ignored", () => {
+  const { room, tick, sockets, self, done } = setup();
+  const [leaving, other] = sockets;
+  const info = room.handOff(self.id, 2);
+  assert.equal(info?.id, self.id);
+  assert.equal(room.playerCount, 2);
+  // The old socket keeps talking and then closes: nobody hears about it.
+  leaving.deliver({ t: "move", x: self.x + 1, y: self.y, dir: "east", moving: true });
+  tick();
+  leaving.close();
+  assert.deepEqual(other.take(), []);
+  // Moves now come from the new owner.
+  room.remoteMoves(2, [{ id: self.id, x: 600, y: 600, dir: "west", moving: true }]);
+  tick();
+  assert.ok(other.take().some((m) => m.t === "snapshot"));
+  assert.equal(room.handOff(self.id, 3), null);
+  done();
+});
+
+test("a migrating player joins where it was, without a second join announcement", async () => {
+  const { room, sockets, done } = setup();
+  room.remoteJoined(2, remoteInfo);
+  for (const s of sockets) s.take(); // the replica's own (legitimate) join
+  const moved = new FakeSocket();
+  const resume = Promise.resolve({ ...remoteInfo, x: 560, y: 610, dir: "west" as const });
+  moved.events = room.accept(moved, 42, resume);
+  moved.deliver({ t: "join", name: "Zed", character: "deer" });
+  await resume;
+  await Promise.resolve();
+  const welcome = moved.take().find((m) => m.t === "welcome");
+  const me = welcome?.t === "welcome" ? welcome.players.find((p) => p.id === 42) : undefined;
+  assert.deepEqual(me && [me.x, me.y, me.dir], [560, 610, "west"]);
+  for (const s of sockets) assert.ok(!s.take().some((m) => m.t === "player_joined"));
+  assert.equal(room.playerCount, 4);
+  moved.close();
+  done();
+});

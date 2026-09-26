@@ -30,6 +30,8 @@ type SocketData =
       roomId: string;
       /** From the ticket in cluster mode; the room allocates one otherwise. */
       playerId?: number;
+      /** Migration ticket: the server the player is leaving. */
+      from?: number;
       events?: PeerEvents;
     }
   | { kind: "mesh"; server: number; events?: { message(data: Uint8Array): void; close(): void } };
@@ -47,7 +49,7 @@ function admit(url: URL, roomId: string): SocketData | Response {
   if (!ticket || ticket.server !== cluster.server || ticket.room !== roomId) {
     return new Response("Invalid or expired ticket", { status: 401 });
   }
-  return { kind: "client", roomId, playerId: ticket.player };
+  return { kind: "client", roomId, playerId: ticket.player, from: ticket.from };
 }
 
 const server = Bun.serve<SocketData>({
@@ -81,6 +83,11 @@ const server = Bun.serve<SocketData>({
         data.events = mesh!.attach(data.server, { send: (d) => void ws.send(d), close: () => ws.close() });
         return;
       }
+      // A migrating player: fetch its state from the server it is leaving.
+      const resume =
+        mesh && data.from !== undefined && data.playerId !== undefined
+          ? mesh.takeover(data.from, data.roomId, data.playerId)
+          : undefined;
       data.events = connect(
         data.roomId,
         {
@@ -89,6 +96,7 @@ const server = Bun.serve<SocketData>({
           subscribe: () => ws.subscribe(topic(data.roomId)),
         },
         data.playerId,
+        resume,
       );
     },
     message(ws, message) {
@@ -112,9 +120,15 @@ usePublisher((roomId) => {
 });
 
 if (cluster) {
-  const agent = new AgentLink(cluster, localPlayers, (msg) => {
-    if (msg.t === "peers") mesh!.setPeers(msg.peers);
-    // Move orders (migration) arrive in milestone 4.
+  const agent: AgentLink = new AgentLink(cluster, localPlayers, (msg) => {
+    if (msg.t === "peers") {
+      mesh!.setPeers(msg.peers);
+    } else if (msg.t === "move") {
+      // Shed load: ask some players of the room to reconnect through the agent.
+      for (const player of hostedRooms.get(msg.room)?.pickMigrants(msg.count) ?? []) {
+        agent.send({ t: "migrating", room: msg.room, player });
+      }
+    }
   });
   usePlayerHooks({
     joined: (room, player) => agent.send({ t: "joined", room, player }),

@@ -5,45 +5,80 @@ import {
   type ServerMessage,
 } from "../../shared/src/protocol.ts";
 
+export interface ConnectionHandlers {
+  onMessage(msg: ServerMessage, from: Connection): void;
+  /** The socket closed without us asking (server or network gone). */
+  onLost(conn: Connection): void;
+}
+
+interface Placement {
+  wsUrl: string;
+  /** Cluster ticket (null standalone), kept for /api/migrate. */
+  ticket: string | null;
+}
+
+async function post(path: string, body: object): Promise<Placement> {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  }).catch(() => null);
+  if (!res?.ok) throw new Error(res?.status === 503 ? "No game server is available right now." : "Could not reach the server.");
+  const { wsUrl, ticket } = (await res.json()) as { wsUrl: string; ticket?: string };
+  return { wsUrl, ticket: ticket ?? null };
+}
+
 export class Connection {
   private readonly ws: WebSocket;
+  readonly ticket: string | null;
+  private closing = false;
 
-  private constructor(ws: WebSocket, onMessage: (msg: ServerMessage) => void, onClose: () => void) {
+  private constructor(ws: WebSocket, ticket: string | null, handlers: ConnectionHandlers) {
     this.ws = ws;
+    this.ticket = ticket;
     ws.addEventListener("message", (event) => {
       if (!(event.data instanceof ArrayBuffer)) return;
       const msg = decodeServerMessage(new Uint8Array(event.data));
-      if (msg) onMessage(msg);
+      if (msg) handlers.onMessage(msg, this);
     });
-    ws.addEventListener("close", onClose);
+    ws.addEventListener("close", () => {
+      if (!this.closing) handlers.onLost(this);
+    });
     // Leave promptly on navigation instead of waiting for the server heartbeat.
-    window.addEventListener("pagehide", () => ws.close());
+    window.addEventListener("pagehide", () => this.close());
   }
 
   /**
    * Ask where to connect (the agent in a cluster, the server itself when
-   * standalone), then resolve once the socket is open; handlers only start
-   * firing after that.
+   * standalone), then resolve once the socket is open.
    */
-  static async open(roomId: string, onMessage: (msg: ServerMessage) => void, onClose: () => void): Promise<Connection> {
-    const res = await fetch("/api/join", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ room: roomId }),
-    }).catch(() => null);
-    if (!res?.ok) throw new Error(res?.status === 503 ? "No game server is available right now." : "Could not reach the server.");
-    const { wsUrl } = (await res.json()) as { wsUrl: string };
+  static async open(roomId: string, handlers: ConnectionHandlers): Promise<Connection> {
+    return Connection.connect(await post("/api/join", { room: roomId }), handlers);
+  }
+
+  /** Cluster: our server asked us to move; get a ticket for another server. */
+  static async migrate(ticket: string, handlers: ConnectionHandlers): Promise<Connection> {
+    return Connection.connect(await post("/api/migrate", { ticket }), handlers);
+  }
+
+  private static connect({ wsUrl, ticket }: Placement, handlers: ConnectionHandlers): Promise<Connection> {
     // Standalone servers answer with a path on this host; the agent with a full URL.
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(wsUrl.startsWith("/") ? `${protocol}//${location.host}${wsUrl}` : wsUrl);
     ws.binaryType = "arraybuffer";
     return new Promise((resolve, reject) => {
-      ws.addEventListener("open", () => resolve(new Connection(ws, onMessage, onClose)), { once: true });
+      ws.addEventListener("open", () => resolve(new Connection(ws, ticket, handlers)), { once: true });
       ws.addEventListener("error", () => reject(new Error("Could not reach the server.")), { once: true });
     });
   }
 
   send(msg: ClientMessage): void {
     if (this.ws.readyState === WebSocket.OPEN) this.ws.send(encodeClientMessage(msg));
+  }
+
+  /** Close on purpose (migration, leaving); not reported as lost. */
+  close(): void {
+    this.closing = true;
+    this.ws.close();
   }
 }

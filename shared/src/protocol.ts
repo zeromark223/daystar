@@ -43,7 +43,9 @@ export type ServerMessage =
   | { t: "chat"; message: ChatMessage }
   | { t: "correction"; x: number; y: number }
   | { t: "error"; message: string }
-  | { t: "snapshot"; players: PlayerState[] };
+  | { t: "snapshot"; players: PlayerState[] }
+  /** Cluster: reconnect elsewhere (ask the agent's /api/migrate); the server is shedding load. */
+  | { t: "migrate" };
 
 // ------------------------------------------------------------------ positions
 
@@ -95,6 +97,7 @@ const Op = {
   correction: 14,
   error: 15,
   snapshot: 16,
+  migrate: 17,
 } as const;
 
 /** Opcode of server snapshots, for callers that only need to recognize them. */
@@ -117,6 +120,7 @@ const Schemas: Record<number, Struct> = {
   [Op.correction]: { x: Type.UInt16, y: Type.UInt16 },
   [Op.error]: { message: Type.String },
   [Op.snapshot]: { players: Type.Object16, players_Struct: PlayerStateStruct },
+  [Op.migrate]: {},
 };
 
 // ------------------------------------------------------------------ wire <-> message
@@ -211,6 +215,8 @@ export function encodeServerMessage(msg: ServerMessage): Uint8Array<ArrayBuffer>
       return encode(Schemas[Op.error], msg, Op.error);
     case "snapshot":
       return encode(Schemas[Op.snapshot], { players: msg.players.map(stateToWire) }, Op.snapshot);
+    case "migrate":
+      return encode(Schemas[Op.migrate], {}, Op.migrate);
   }
 }
 
@@ -237,6 +243,9 @@ export function decodeServerMessage(bytes: Uint8Array): ServerMessage | null {
         return { t: "error", ...decode<{ message: string }>(schema, bytes, 1) };
       case Op.snapshot:
         return { t: "snapshot", players: decode<{ players: WireState[] }>(schema, bytes, 1).players.map(stateFromWire) };
+      case Op.migrate:
+        decode(schema, bytes, 1);
+        return { t: "migrate" };
       default:
         return null;
     }

@@ -75,3 +75,20 @@ test("load counts connected and reserved seats", () => {
   reg.joined(1, "r2", 1);
   assert.equal(reg.views()[0].players, 2);
 });
+
+test("only players their server asked to move may migrate, once", () => {
+  const reg = cluster(2);
+  const a = reg.seat("r1", { reservedUntil: 30_000, allowSpan: true }, 0)!;
+  reg.joined(a.server.server, "r1", a.player);
+  assert.equal(reg.takeMigration(a.server.server, "r1", a.player, 0), false);
+  reg.markMigrating(a.server.server, "r1", a.player, 0);
+  assert.equal(reg.takeMigration(a.server.server, "r1", a.player, 1000), true);
+  assert.equal(reg.takeMigration(a.server.server, "r1", a.player, 1000), false);
+  // Keeping the id, the seat moves to another server.
+  const moved = reg.seat("r1", { reservedUntil: 40_000, allowSpan: true, exclude: new Set([a.server.server]), player: a.player }, 1000)!;
+  assert.equal(moved.player, a.player);
+  assert.notEqual(moved.server.server, a.server.server);
+  // The old server's late "left" does not free the moved seat.
+  reg.left(a.server.server, "r1", a.player, 2000);
+  assert.equal(reg.seatOf("r1", a.player), moved.server.server);
+});

@@ -20,6 +20,8 @@ export type ServerToAgent =
   | ({ t: "register"; players: { room: string; player: number }[] } & ServerInfo)
   | { t: "joined"; room: string; player: number }
   | { t: "left"; room: string; player: number }
+  /** The server asked this player to migrate (after a move order); lets /api/migrate accept it. */
+  | { t: "migrating"; room: string; player: number }
   | { t: "stats"; sample: StatsSample };
 
 export type AgentToServer =

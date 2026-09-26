@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { rename, writeFile } from "node:fs/promises";
 import { CollisionMap } from "../../shared/src/collision.ts";
 import { ROOM_ID_PATTERN, WS_PATH } from "../../shared/src/constants.ts";
+import type { PlayerInfo } from "../../shared/src/protocol.ts";
 import { readServerClusterConfig } from "./cluster/config.ts";
 import { readJoinRequest, readLimited, rejectWithoutHealthToken } from "./http.ts";
 import { CLIENT_DIR, COLLISION_FILE } from "./paths.ts";
@@ -92,8 +93,11 @@ export function roomIdFor(url: URL): string | null {
   return ROOM_ID_PATTERN.test(roomId) ? roomId : null;
 }
 
-/** Attach an upgraded connection to its room; `playerId` comes from a cluster ticket. */
-export function connect(roomId: string, peer: Peer, playerId?: number): PeerEvents {
+/**
+ * Attach an upgraded connection to its room; `playerId` comes from a cluster
+ * ticket, `resume` from the previous server when the player is migrating.
+ */
+export function connect(roomId: string, peer: Peer, playerId?: number, resume?: Promise<PlayerInfo | null>): PeerEvents {
   let room = rooms.get(roomId);
   if (!room) {
     room = new Room(roomId, {
@@ -113,7 +117,7 @@ export function connect(roomId: string, peer: Peer, playerId?: number): PeerEven
     clusterRooms?.roomOpened(roomId);
   }
   sockets++;
-  const events = room.accept(peer, playerId);
+  const events = room.accept(peer, playerId, resume);
   return {
     message: events.message,
     close: () => {

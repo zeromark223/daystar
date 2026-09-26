@@ -14,6 +14,9 @@ test("every mesh message round-trips", () => {
     { t: "left", room: "r", id: 9 },
     { t: "moves", room: "r", players: [{ id: 9, x: 1, y: 2.5, dir: "north", moving: false }] },
     { t: "chat", room: "r", message: { id: 2 * 0x1000000 + 5, playerId: 9, name: "Zed", text: "xin chào", ts: 1_790_000_000_000 } },
+    { t: "takeover", room: "r", id: 9 },
+    { t: "handoff", room: "r", id: 9, player },
+    { t: "handoff", room: "r", id: 9, player: null },
   ];
   for (const m of messages) assert.deepEqual(decodeMesh(encodeMesh(m)), m);
 });

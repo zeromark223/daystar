@@ -31,6 +31,7 @@ test("server messages round-trip", () => {
     { t: "correction", x: 10, y: 20.5 },
     { t: "error", message: "nope" },
     { t: "snapshot", players: [{ id: 1, x: 1199.95, y: 0, dir: "south", moving: true }] },
+    { t: "migrate" },
   ];
   for (const m of messages) assert.deepEqual(decodeServerMessage(encodeServerMessage(m)), m);
 });

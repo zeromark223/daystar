@@ -134,6 +134,12 @@ export class Game {
     this.avatars.delete(id);
   }
 
+  /** Forget every avatar, e.g. before a fresh "welcome" after reconnecting. */
+  resetPlayers(): void {
+    for (const avatar of this.avatars.values()) avatar.destroy();
+    this.avatars.clear();
+  }
+
   applySnapshot(players: PlayerState[]): void {
     const now = performance.now();
     for (const p of players) {

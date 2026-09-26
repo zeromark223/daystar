@@ -23,6 +23,8 @@ import {
 const MOVE_SLACK = 24;
 const CHAT_BURST = 5;
 const CHAT_WINDOW_MS = 5000;
+/** A player asked to migrate is not asked again for this long (and stays if it never moves). */
+const MIGRATE_RETRY_MS = 30_000;
 
 /** A connected client, whatever the runtime's WebSocket implementation is. */
 export interface Peer {
@@ -108,6 +110,8 @@ export class Room {
   /** Players (local or replicated) whose position or motion changed since the last snapshot. */
   private readonly changed = new Set<Player>();
   private ticker: ReturnType<typeof setInterval> | null = null;
+  /** Local players asked to migrate, and when they may be asked again. */
+  private readonly migrating = new Map<number, number>();
   private readonly map: CollisionMap;
   private readonly publish: Publish | null;
   private readonly opts: RoomOptions;
@@ -136,26 +140,38 @@ export class Room {
 
   /**
    * Add a freshly upgraded connection; it becomes a player once it sends "join".
-   * `playerId` is the id from the agent's ticket in cluster mode.
+   * `playerId` is the id from the agent's ticket in cluster mode. `resume`, for a
+   * migrating player, resolves to its state on the previous server (or null).
    * The runtime adapter must call the returned handlers for binary messages and on close.
    */
-  accept(peer: Peer, playerId?: number): PeerEvents {
+  accept(peer: Peer, playerId?: number, resume?: Promise<PlayerInfo | null>): PeerEvents {
     let player: Player | null = null;
+    let joining = false;
     this.connections++;
 
     return {
       message: (data) => {
         const msg = decodeClientMessage(data);
         if (!msg) return;
+        // After a handoff the old socket no longer speaks for the player.
+        if (player && this.players.get(player.id) !== player) return;
         if (msg.t === "move" && player) {
           this.handleMove(player, msg);
-        } else if (msg.t === "join" && !player) {
-          player = this.join(peer, msg.name, msg.character, playerId);
+        } else if (msg.t === "join" && !player && !joining) {
+          if (!resume) {
+            player = this.join(peer, msg.name, msg.character, playerId);
+            return;
+          }
+          joining = true;
+          void resume.then((state) => {
+            if (joining) player = this.join(peer, msg.name, msg.character, playerId, state);
+          });
         } else if (msg.t === "chat" && player) {
           this.handleChat(player, msg.text);
         }
       },
       close: () => {
+        joining = false;
         if (player) this.leave(player);
         if (--this.connections === 0) {
           this.stopTicker();
@@ -212,9 +228,50 @@ export class Room {
     for (const p of [...this.players.values()]) if (p.owner === owner) this.remoteLeft(owner, p.id);
   }
 
+  // ------------------------------------------------------------ migration
+
+  /**
+   * Ask up to `count` random local players to reconnect elsewhere (the server is
+   * shedding load). Returns the ids asked.
+   */
+  pickMigrants(count: number, now = Date.now()): number[] {
+    for (const [id, until] of this.migrating) if (until <= now) this.migrating.delete(id);
+    const candidates = [...this.players.values()].filter((p) => p.owner === null && !this.migrating.has(p.id));
+    const picked: number[] = [];
+    while (picked.length < count && candidates.length > 0) {
+      const p = candidates.splice(Math.floor(Math.random() * candidates.length), 1)[0];
+      this.migrating.set(p.id, now + MIGRATE_RETRY_MS);
+      send(p.peer!, { t: "migrate" });
+      picked.push(p.id);
+    }
+    return picked;
+  }
+
+  /**
+   * Another server took over this player's socket (takeover): keep it as a
+   * replica owned by `newOwner` without telling anyone it left. Its old socket is
+   * ignored from now on and closes quietly. Returns the state to hand over.
+   */
+  handOff(id: number, newOwner: number): PlayerInfo | null {
+    const p = this.players.get(id);
+    if (!p || p.owner !== null) return null;
+    const info = toInfo(p);
+    this.players.set(id, { ...p, owner: newOwner, peer: null });
+    this.localCount--;
+    this.changed.delete(p);
+    this.migrating.delete(id);
+    return info;
+  }
+
   // ------------------------------------------------------------ local side
 
-  private join(peer: Peer, rawName: unknown, character: unknown, assignedId?: number): Player | null {
+  private join(
+    peer: Peer,
+    rawName: unknown,
+    character: unknown,
+    assignedId?: number,
+    resume?: PlayerInfo | null,
+  ): Player | null {
     const name = typeof rawName === "string" ? rawName.trim().slice(0, MAX_NAME_LENGTH) : "";
     if (!name || !isCharacterId(character)) {
       send(peer, { t: "error", message: "Invalid name or character." });
@@ -228,25 +285,31 @@ export class Room {
     }
     const id = assignedId ?? this.nextLocalId();
 
-    const spawn = findSpawn(this.map, collisionOffsetY(character));
+    // A migrating player continues where it was; others start at the spawn point.
+    const start =
+      resume && this.map.canStandAt(resume.x, resume.y, collisionOffsetY(character))
+        ? resume
+        : { ...findSpawn(this.map, collisionOffsetY(character)), dir: "south" as const };
+    const wasReplica = this.players.get(id)?.owner != null;
     const player: Player = {
       id,
       owner: null,
       peer,
       name,
       character,
-      x: spawn.x,
-      y: spawn.y,
-      dir: "south",
+      x: start.x,
+      y: start.y,
+      dir: start.dir,
       moving: false,
       lastMoveAt: Date.now(),
       chatTimes: [],
     };
 
-    // A stale replica with our id (its old server lost it) is replaced silently.
+    // A replica with our id (a migration, or a stale copy) is replaced in place.
     const others = [...this.players.values()].filter((p) => p.id !== id);
     send(peer, { t: "welcome", selfId: player.id, players: [...others, player].map(toInfo), chat: this.chat });
-    this.broadcast({ t: "player_joined", player: toInfo(player) });
+    // Our clients already see a migrating player; only its position may change.
+    if (!wasReplica) this.broadcast({ t: "player_joined", player: toInfo(player) });
     // Subscribe after the announcement so the newcomer does not receive its own join.
     if (this.publish) {
       if (!peer.subscribe) throw new Error("Room uses publish but the peer cannot subscribe");
@@ -254,6 +317,7 @@ export class Room {
     }
     this.players.set(player.id, player);
     this.localCount++;
+    if (wasReplica) this.changed.add(player);
     this.startTicker();
     this.opts.onJoined?.(player.id);
     this.opts.sync?.joined(toInfo(player));

@@ -10,11 +10,12 @@
 import { readFileSync } from "node:fs";
 import { ROOM_ID_PATTERN } from "../../../shared/src/constants.ts";
 import type { AgentToServer, ServerToAgent } from "../cluster/control.ts";
-import { sign, verifyServer } from "../cluster/ticket.ts";
-import { readJoinRequest, rejectWithoutHealthToken } from "../http.ts";
+import { sign, verifyPlayer, verifyServer } from "../cluster/ticket.ts";
+import { readJoinRequest, readLimited, rejectWithoutHealthToken } from "../http.ts";
 import { CLIENT_DIR, COLLISION_FILE } from "../paths.ts";
 import { createStaticHandler } from "../static.ts";
 import type { StatsSample } from "../stats.ts";
+import { HARD_LIMIT } from "./placement.ts";
 import { Registry } from "./registry.ts";
 
 const PORT = Number(process.env.PORT ?? 3000);
@@ -27,6 +28,16 @@ const TICKET_TTL_MS = 30_000;
 /** Rooms may span several servers; their servers sync over the mesh. */
 const ALLOW_SPAN = true;
 const HISTORY = 300;
+
+// Overload handling (docs/cluster.md "Placement"): a server is hot above the hard
+// limit, or when its loop p99 stays above LOOP_P99_HOT_MS for HOT_SAMPLES seconds.
+const LOOP_P99_HOT_MS = 40;
+const HOT_SAMPLES = 5;
+/** Share of a hot server's players asked to move per order. */
+const SHED_RATIO = 0.1;
+/** Minimum time between two orders to the same server (hysteresis). */
+const ORDER_COOLDOWN_MS = 30_000;
+const lastOrder = new Map<number, number>();
 
 const registry = new Registry();
 /** Current control socket per server id. */
@@ -67,6 +78,9 @@ function onLinkMessage(server: number, msg: ServerToAgent): void {
       break;
     case "stats":
       registry.stats(server, msg.sample);
+      break;
+    case "migrating":
+      registry.markMigrating(server, msg.room, msg.player);
       break;
   }
 }
@@ -118,12 +132,36 @@ function healthReport(since: number) {
   };
 }
 
+/** Ask hot servers to move some players of their busiest room elsewhere. */
+function shedLoad(now: number): void {
+  const live = registry.liveServers();
+  if (live.length < 2) return; // nowhere to move to
+  const views = new Map(registry.views().map((v) => [v.id, v]));
+  for (const s of live) {
+    const view = views.get(s.server)!;
+    const recent = s.samples.slice(-HOT_SAMPLES);
+    const slow = recent.length === HOT_SAMPLES && recent.every((x) => x.loopP99Ms > LOOP_P99_HOT_MS);
+    const full = view.players / view.capacity > HARD_LIMIT;
+    if (!slow && !full) continue;
+    if (now - (lastOrder.get(s.server) ?? 0) < ORDER_COOLDOWN_MS) continue;
+    const busiest = [...registry.roomsOn(s.server)]
+      .map(([room, r]) => ({ room, here: r.perServer.get(s.server) ?? 0 }))
+      .sort((a, b) => b.here - a.here)[0];
+    if (!busiest) continue;
+    const count = Math.min(busiest.here, Math.max(1, Math.ceil(view.players * SHED_RATIO)));
+    lastOrder.set(s.server, now);
+    console.log(`server ${s.server} is ${full ? "full" : "slow"}: moving ${count} players of room ${busiest.room}`);
+    tell(s.server, { t: "move", room: busiest.room, count });
+  }
+}
+
 setInterval(() => {
   const now = Date.now();
   for (const server of registry.sweep(now)) {
     console.warn(`server ${server} went silent; dropping its players`);
     broadcastPeers();
   }
+  shedLoad(now);
   const sample = aggregate(now);
   if (sample) {
     clusterSamples.push(sample);
@@ -142,8 +180,44 @@ async function handleJoin(req: Request): Promise<Response> {
   const seat = registry.seat(room, { reservedUntil: exp + 5000, allowSpan: ALLOW_SPAN });
   if (!seat) return new Response("No game server available", { status: 503 });
   const ticket = sign({ kind: "player", room, server: seat.server.server, player: seat.player, exp }, SECRET);
-  const wsUrl = `${seat.server.publicUrl}?room=${room}&ticket=${ticket}`;
-  return Response.json({ serverId: seat.server.server, wsUrl });
+  return Response.json({ serverId: seat.server.server, wsUrl: `${seat.server.publicUrl}?room=${room}&ticket=${ticket}`, ticket });
+}
+
+/**
+ * A client its server asked to move presents its current (possibly expired)
+ * ticket and gets one for another server, keeping its player id.
+ */
+async function handleMigrate(req: Request): Promise<Response> {
+  if (req.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
+  const body = await readLimited(req, 4096);
+  let token = "";
+  try {
+    token = (JSON.parse(body ?? "") as { ticket?: string }).ticket ?? "";
+  } catch {
+    // falls through to the 400 below
+  }
+  const current = verifyPlayer(token, SECRET, { allowExpired: true });
+  if (!current) return new Response("Invalid ticket", { status: 400 });
+  if (!registry.takeMigration(current.server, current.room, current.player)) {
+    return new Response("Not asked to migrate", { status: 409 });
+  }
+  const exp = Date.now() + TICKET_TTL_MS;
+  const seat = registry.seat(current.room, {
+    reservedUntil: exp + 5000,
+    allowSpan: true,
+    exclude: new Set([current.server]),
+    player: current.player,
+  });
+  if (!seat) return new Response("No other game server available", { status: 503 });
+  const ticket = sign(
+    { kind: "player", room: current.room, server: seat.server.server, player: current.player, exp, from: current.server },
+    SECRET,
+  );
+  return Response.json({
+    serverId: seat.server.server,
+    wsUrl: `${seat.server.publicUrl}?room=${current.room}&ticket=${ticket}`,
+    ticket,
+  });
 }
 
 async function handleHttp(req: Request): Promise<Response> {
@@ -158,6 +232,8 @@ async function handleHttp(req: Request): Promise<Response> {
       }
       case "/api/join":
         return await handleJoin(req);
+      case "/api/migrate":
+        return await handleMigrate(req);
       case "/api/collision":
         if (req.method !== "GET") return new Response("Map editing is disabled in cluster mode.", { status: 403 });
         return new Response(readFileSync(COLLISION_FILE, "utf8"), {

@@ -4,7 +4,7 @@ import type { ServerMessage } from "../../shared/src/protocol.ts";
 import { Game } from "./game/game.ts";
 import { Connection } from "./net.ts";
 import { ChatPanel } from "./ui/chat.ts";
-import { runLobby } from "./ui/lobby.ts";
+import { runLobby, type LobbyChoice } from "./ui/lobby.ts";
 
 function randomRoomId(): string {
   const words = ["cozy", "sunny", "mossy", "fuzzy", "sleepy", "bouncy", "misty", "happy"];
@@ -22,6 +22,9 @@ function currentRoomId(): string {
   return fresh;
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const RECONNECT_ATTEMPTS = 5;
+
 async function main(): Promise<void> {
   const roomId = currentRoomId();
   const hud = document.getElementById("hud")!;
@@ -30,6 +33,10 @@ async function main(): Promise<void> {
   let game: Game | null = null;
   let chat: ChatPanel | null = null;
   let joined = false;
+  /** The socket we play on; replaced on migration and reconnect. */
+  let conn: Connection | null = null;
+  let identity: LobbyChoice | null = null;
+  let switching = false;
 
   const updateCount = () => {
     count.textContent = `${names.size} here`;
@@ -40,20 +47,27 @@ async function main(): Promise<void> {
     document.getElementById("disconnected")!.hidden = false;
   };
 
-  const handle = (msg: ServerMessage) => {
-    if (!game || !chat) return;
+  const handle = (msg: ServerMessage, from: Connection) => {
+    if (!game || !chat || from !== conn) return;
     switch (msg.t) {
-      case "welcome":
+      case "welcome": {
+        // A second welcome means we moved or reconnected: rebuild the room from it.
+        const rejoin = joined;
+        game.resetPlayers();
+        names.clear();
         game.setSelf(msg.selfId);
         for (const p of msg.players) {
           names.set(p.id, p.name);
           game.addPlayer(p);
         }
-        msg.chat.forEach((m) => chat!.addMessage(m));
-        chat.addSystem(`You joined ${roomId}.`);
+        if (!rejoin) {
+          msg.chat.forEach((m) => chat!.addMessage(m));
+          chat.addSystem(`You joined ${roomId}.`);
+        }
         updateCount();
         joined = true;
         break;
+      }
       case "player_joined":
         names.set(msg.player.id, msg.player.name);
         game.addPlayer(msg.player);
@@ -78,6 +92,9 @@ async function main(): Promise<void> {
       case "correction":
         game.applyCorrection(msg.x, msg.y);
         break;
+      case "migrate":
+        void migrate();
+        break;
       case "error":
         if (joined) chat.addSystem(msg.message);
         else showDisconnected(msg.message);
@@ -85,13 +102,58 @@ async function main(): Promise<void> {
     }
   };
 
+  const handlers = { onMessage: handle, onLost: (c: Connection) => void lost(c) };
+
+  /** Switch to a new socket: join there first, then drop the old one. */
+  const adopt = (next: Connection) => {
+    const old = conn;
+    conn = next;
+    next.send({ t: "join", name: identity!.name, character: identity!.character });
+    old?.close();
+  };
+
+  /** Cluster: the server is shedding load; move without leaving the room. */
+  async function migrate(): Promise<void> {
+    if (switching || !conn?.ticket) return;
+    switching = true;
+    try {
+      adopt(await Connection.migrate(conn.ticket, handlers));
+    } catch {
+      // Stay where we are; the server keeps us and may ask again later.
+    } finally {
+      switching = false;
+    }
+  }
+
+  /** The server (or network) went away: rejoin the room through the agent. */
+  async function lost(c: Connection): Promise<void> {
+    if (c !== conn || switching) return;
+    switching = true;
+    chat?.addSystem("Connection lost, reconnecting…");
+    try {
+      for (let attempt = 1; attempt <= RECONNECT_ATTEMPTS; attempt++) {
+        try {
+          adopt(await Connection.open(roomId, handlers));
+          chat?.addSystem("Reconnected.");
+          return;
+        } catch {
+          await sleep(attempt * 1000);
+        }
+      }
+      showDisconnected();
+    } finally {
+      switching = false;
+    }
+  }
+
   await runLobby(roomId, async (choice) => {
-    const conn = await Connection.open(roomId, handle, () => showDisconnected());
+    const first = await Connection.open(roomId, handlers);
+    identity = choice;
     game ??= await Game.create(document.getElementById("stage")!, {
-      sendMove: (x, y, dir, moving) => conn.send({ t: "move", x, y, dir, moving }),
+      sendMove: (x, y, dir, moving) => conn?.send({ t: "move", x, y, dir, moving }),
     });
-    chat = new ChatPanel((text) => conn.send({ t: "chat", text }));
-    conn.send({ t: "join", name: choice.name, character: choice.character });
+    chat = new ChatPanel((text) => conn?.send({ t: "chat", text }));
+    adopt(first);
   });
 
   document.getElementById("hud-room")!.textContent = roomId;

@@ -6,6 +6,8 @@ import { overloaded, place, type RoomView, type ServerView } from "./placement.t
 const ID_REUSE_DELAY_MS = 60_000;
 /** Stats older than this mean the server is gone. */
 const STATS_TIMEOUT_MS = 3_000;
+/** A server's request to move a player is honored this long. */
+const MIGRATION_WINDOW_MS = 60_000;
 const HISTORY = 300;
 
 interface Seat {
@@ -35,6 +37,8 @@ interface ServerState extends ServerInfo {
 export class Registry {
   private readonly servers = new Map<number, ServerState>();
   private readonly rooms = new Map<string, RoomState>();
+  /** Players a server asked to migrate ("room:player" → expiry). */
+  private readonly migrating = new Map<string, number>();
 
   // ------------------------------------------------------------ servers
 
@@ -80,6 +84,7 @@ export class Registry {
       for (const [id, at] of r.cooling) if (at <= now) r.cooling.delete(id);
       if (r.seats.size === 0 && r.cooling.size === 0) this.rooms.delete(name);
     }
+    for (const [key, until] of this.migrating) if (until <= now) this.migrating.delete(key);
     return lost;
   }
 
@@ -131,6 +136,19 @@ export class Registry {
     const seat = r?.seats.get(player);
     // A migrated player's seat already points at the new server; ignore the old one.
     if (r && seat && seat.server === server) this.free(r, player, now);
+  }
+
+  /** A server asked this player to move (it may then call /api/migrate). */
+  markMigrating(server: number, room: string, player: number, now = Date.now()): void {
+    if (this.seatOf(room, player) === server) this.migrating.set(`${room}:${player}`, now + MIGRATION_WINDOW_MS);
+  }
+
+  /** Consumes the migration mark; true when the player was asked to move by `server`. */
+  takeMigration(server: number, room: string, player: number, now = Date.now()): boolean {
+    const key = `${room}:${player}`;
+    const until = this.migrating.get(key);
+    this.migrating.delete(key);
+    return until !== undefined && until > now && this.seatOf(room, player) === server;
   }
 
   /** Server currently holding the player's seat, if any. */

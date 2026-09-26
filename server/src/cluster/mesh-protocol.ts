@@ -28,9 +28,16 @@ export type MeshMessage =
   | { t: "left"; room: string; id: number }
   /** The sender's local players that changed in one tick. */
   | { t: "moves"; room: string; players: PlayerState[] }
-  | { t: "chat"; room: string; message: ChatMessage };
+  | { t: "chat"; room: string; message: ChatMessage }
+  /** Migration: the sender now holds player `id`'s socket and asks for its state. */
+  | { t: "takeover"; room: string; id: number }
+  /**
+   * Reply to takeover: the player's last state, or null if the sender did not
+   * have it. The sender now treats the player as a replica of the requester.
+   */
+  | { t: "handoff"; room: string; id: number; player: PlayerInfo | null };
 
-const Op = { interest: 100, room_state: 101, joined: 102, left: 103, moves: 104, chat: 105 } as const;
+const Op = { interest: 100, room_state: 101, joined: 102, left: 103, moves: 104, chat: 105, takeover: 106, handoff: 107 } as const;
 
 const Schemas: Record<number, Struct> = {
   [Op.interest]: { room: Type.String, on: Type.UInt8 },
@@ -39,6 +46,8 @@ const Schemas: Record<number, Struct> = {
   [Op.left]: { room: Type.String, id: Type.UInt16 },
   [Op.moves]: { room: Type.String, players: Type.Object16, players_Struct: PlayerStateStruct },
   [Op.chat]: { room: Type.String, message: Type.Object8, message_Struct: ChatStruct },
+  [Op.takeover]: { room: Type.String, id: Type.UInt16 },
+  [Op.handoff]: { room: Type.String, id: Type.UInt16, player: Type.Object8, player_Struct: PlayerInfoStruct },
 };
 
 export function encodeMesh(msg: MeshMessage): Uint8Array<ArrayBuffer> {
@@ -56,6 +65,15 @@ export function encodeMesh(msg: MeshMessage): Uint8Array<ArrayBuffer> {
       return encode(Schemas[Op.moves], { room: msg.room, players: msg.players.map(stateToWire) }, Op.moves);
     case "chat":
       return encode(Schemas[Op.chat], { room: msg.room, message: [msg.message] }, Op.chat);
+    case "takeover":
+      return encode(Schemas[Op.takeover], msg, Op.takeover);
+    case "handoff":
+      // Zero or one player.
+      return encode(
+        Schemas[Op.handoff],
+        { room: msg.room, id: msg.id, player: msg.player ? [infoToWire(msg.player)] : [] },
+        Op.handoff,
+      );
   }
 }
 
@@ -86,6 +104,13 @@ export function decodeMesh(bytes: Uint8Array): MeshMessage | null {
       case Op.chat: {
         const m = decode<{ room: string; message: ChatMessage[] }>(schema, bytes, 1);
         return m.message.length === 1 ? { t: "chat", room: m.room, message: m.message[0] } : null;
+      }
+      case Op.takeover:
+        return { t: "takeover", ...decode<{ room: string; id: number }>(schema, bytes, 1) };
+      case Op.handoff: {
+        const m = decode<{ room: string; id: number; player: WireInfo[] }>(schema, bytes, 1);
+        if (m.player.length > 1) return null;
+        return { t: "handoff", room: m.room, id: m.id, player: m.player[0] ? infoFromWire(m.player[0]) : null };
       }
       default:
         return null;

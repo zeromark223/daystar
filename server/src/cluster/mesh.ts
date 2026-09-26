@@ -1,8 +1,11 @@
+import type { PlayerInfo } from "../../../shared/src/protocol.ts";
 import type { Room, RoomSync } from "../room.ts";
 import { decodeMesh, encodeMesh, type MeshMessage } from "./mesh-protocol.ts";
 import { serverToken } from "./ticket.ts";
 
 const REDIAL_MS = 1000;
+/** How long a new server waits for the previous one to hand a migrating player over. */
+const HANDOFF_TIMEOUT_MS = 1500;
 
 /** One direct connection to another game server. */
 export interface MeshLink {
@@ -33,6 +36,8 @@ export class Mesh {
   private readonly interest = new Map<string, Set<number>>();
   /** Peers we are responsible for dialing, and their mesh URLs. */
   private readonly dialing = new Map<number, string>();
+  /** Takeovers waiting for a handoff, by "room:id". */
+  private readonly handoffs = new Map<string, (player: PlayerInfo | null) => void>();
 
   constructor(self: number, secret: string, rooms: MeshRooms) {
     this.self = self;
@@ -131,7 +136,39 @@ export class Mesh {
       case "chat":
         room?.remoteChat(msg.message);
         break;
+      case "takeover": {
+        // The player reconnected to `server`: stop owning it and send its state over.
+        const player = room?.handOff(msg.id, server) ?? null;
+        this.links.get(server)?.send(encodeMesh({ t: "handoff", room: msg.room, id: msg.id, player }));
+        break;
+      }
+      case "handoff":
+        this.handoffs.get(`${msg.room}:${msg.id}`)?.(msg.player);
+        break;
     }
+  }
+
+  /**
+   * Migration: player `id` of `room` just connected here with a ticket from
+   * server `from`. Ask `from` to hand it over; resolves to its last state, or null
+   * when `from` is unreachable or too slow (the player then starts at the spawn).
+   */
+  takeover(from: number, room: string, id: number): Promise<PlayerInfo | null> {
+    const link = this.links.get(from);
+    if (!link) return Promise.resolve(null);
+    const key = `${room}:${id}`;
+    this.handoffs.get(key)?.(null);
+    return new Promise((resolve) => {
+      const done = (player: PlayerInfo | null) => {
+        if (this.handoffs.get(key) !== done) return;
+        this.handoffs.delete(key);
+        clearTimeout(timer);
+        resolve(player);
+      };
+      const timer = setTimeout(() => done(null), HANDOFF_TIMEOUT_MS);
+      this.handoffs.set(key, done);
+      link.send(encodeMesh({ t: "takeover", room, id }));
+    });
   }
 
   /** We started hosting `room`: peers hosting it answer with their players. */
