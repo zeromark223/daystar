@@ -1,8 +1,6 @@
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import type { WebSocket } from "ws";
 import { CollisionMap } from "../../shared/src/collision.ts";
 import {
   decodeServerMessage,
@@ -10,23 +8,24 @@ import {
   type ClientMessage,
   type ServerMessage,
 } from "../../shared/src/protocol.ts";
-import { Room } from "./room.ts";
+import { Room, type PeerEvents } from "./room.ts";
 
 const map = CollisionMap.parse(
   readFileSync(new URL("../../client/public/assets/collision.txt", import.meta.url), "utf8"),
 );
 
-/** Minimal stand-in for a ws socket: records what the room sends. */
-class FakeSocket extends EventEmitter {
+/** Stand-in peer: records what the room sends and feeds it client messages. */
+class FakeSocket {
   received: ServerMessage[] = [];
+  events!: PeerEvents;
   send(data: Uint8Array): void {
     this.received.push(decodeServerMessage(data)!);
   }
   close(): void {
-    this.emit("close");
+    this.events.close();
   }
   deliver(msg: ClientMessage): void {
-    this.emit("message", Buffer.from(encodeClientMessage(msg)), true);
+    this.events.message(encodeClientMessage(msg));
   }
   take(): ServerMessage[] {
     const out = this.received;
@@ -40,7 +39,7 @@ function setup() {
   const tick = () => (room as unknown as { tick(): void }).tick();
   const sockets = ["Ann", "Ben", "Cat"].map((name) => {
     const s = new FakeSocket();
-    room.accept(s as unknown as WebSocket);
+    s.events = room.accept(s);
     s.deliver({ t: "join", name, character: "rabbit_white" });
     return s;
   });

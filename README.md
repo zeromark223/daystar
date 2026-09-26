@@ -4,8 +4,8 @@ A tiny meeting app that plays like a game: pick an animal, walk around a pixel-a
 ruin with everyone else in the room, and chat. Voice chat comes later.
 
 - **Client:** PixiJS v8 + Vite (TypeScript)
-- **Server:** Node 24 + `ws`, runs TypeScript directly (native type stripping) and
-  serves the built client
+- **Server:** runs on Node 24 (`ws`), Bun or Deno (their native WebSocket servers),
+  TypeScript executed directly, and serves the built client
 - **Transport:** WebSocket only, binary frames throughout — a schema-driven encoder
   (`shared/src/binary/schema.ts`) lays out every message; see `shared/src/protocol.ts`
 
@@ -38,6 +38,20 @@ npm test             # protocol + collision unit tests
 npm run typecheck
 npm run build && npm start   # production mode on :3000
 ```
+
+### Runtimes
+
+The server core (`server/src/app.ts`, `room.ts`) is runtime-independent; each
+runtime has a thin entry point with its own HTTP and WebSocket server:
+
+| Runtime | Entry | Start | Docker |
+|---|---|---|---|
+| Node 24 + `ws` | `server/src/index.ts` | `npm start` | `Dockerfile` |
+| Bun 1.4 (`Bun.serve`) | `server/src/bun.ts` | `npm run start:bun` | `Dockerfile.bun` |
+| Deno 2.9 (`Deno.serve`) | `server/src/deno.ts` | `npm run start:deno` | `Dockerfile.deno` |
+
+Bun and Deno are fetched by `npx` on first use (pinned versions) rather than being
+devDependencies, because Deno's npm installer fails on Alpine (musl) builds.
 
 ## Layout
 
@@ -93,6 +107,8 @@ npm run loadtest -- --last               # same options again
 npm run loadtest -- --last --hold 60     # same, with one option changed
 ```
 
+`--runtime bun|deno` runs the spawned local server on another runtime to compare them.
+
 `--last` reads `.loadtest-last.json` (git-ignored; it stores the token in plain text).
 
 Bots use rooms named `<room-prefix>-all` / `<room-prefix>-0..n` (default `load`).
@@ -105,7 +121,7 @@ unlike snapshot gaps (a room where nobody moves gets no snapshots at all).
 
 ## Deploy (Coolify)
 
-Build from the `Dockerfile`. The container listens on `PORT` (default 3000) and
+Build from the `Dockerfile` (or `Dockerfile.bun` / `Dockerfile.deno` for the other runtimes). The container listens on `PORT` (default 3000) and
 exposes `GET /healthz` (plain liveness) and `GET /api/health` (JSON load stats: rooms,
 players, CPU, event loop, memory, last 5 minutes of 1 s samples). Set `HEALTH_TOKEN`
 to require `Authorization: Bearer <token>` on `/api/health` in production. WebSockets go through the normal HTTP proxy on `/ws`.

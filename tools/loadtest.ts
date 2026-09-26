@@ -289,12 +289,14 @@ interface StatsSample {
   rooms: number;
   players: number;
   cpu: number;
-  elu: number;
+  /** null on runtimes that do not report it (Bun, Deno). */
+  elu: number | null;
   loopP99Ms: number;
   rssMb: number;
 }
 
 interface HealthReport {
+  runtime?: string;
   now: number;
   latest: StatsSample | null;
   samples: StatsSample[];
@@ -313,6 +315,7 @@ const USAGE = `Usage: npm run loadtest -- [options]
   --target <url>       test a running server instead of spawning one,
                        e.g. https://meet.example.com
   --health-token <s>   token for the server's /api/health, if it sets HEALTH_TOKEN
+  --runtime <name>     runtime for the spawned server: node, bun or deno (default node)
   --port <n>           port for the spawned server               (default 3300)
   --room-prefix <s>    rooms are <prefix>-all or <prefix>-0, -1, ... (default load)
   --keep-going         continue ramping after a failed step
@@ -332,6 +335,7 @@ interface Options {
   chatEveryMs: number;
   movingRatio: number;
   port: number;
+  runtime: "node" | "bun" | "deno";
   roomPrefix: string;
   keepGoing: boolean;
   healthToken: string;
@@ -349,6 +353,7 @@ const OPTION_NAMES = [
   "moving",
   "target",
   "health-token",
+  "runtime",
   "port",
   "room-prefix",
   "keep-going",
@@ -410,6 +415,7 @@ function parseOptions(): Options {
         target: { type: "string" },
         "health-token": { type: "string", default: "" },
         port: { type: "string", default: "3300" },
+        runtime: { type: "string", default: "node" },
         "room-prefix": { type: "string", default: "load" },
         "keep-going": { type: "boolean", default: false },
         help: { type: "boolean", short: "h", default: false },
@@ -442,6 +448,9 @@ function parseOptions(): Options {
   const steps = values.steps.split(",").map((s) => int("steps", s.trim(), 1));
   if (steps.some((n, i) => i > 0 && n <= steps[i - 1])) fail("--steps must be increasing");
   if (!ROOM_ID_PATTERN.test(`${values["room-prefix"]}-all`)) fail("--room-prefix may only use a-z, 0-9 and -");
+  const runtime = values.runtime;
+  if (runtime !== "node" && runtime !== "bun" && runtime !== "deno") fail(`--runtime must be node, bun or deno, got "${runtime}"`);
+  if (values.target !== undefined && given.has("runtime")) fail("--runtime only applies to the spawned server, not --target");
 
   const options: Options = {
     steps,
@@ -452,6 +461,7 @@ function parseOptions(): Options {
     chatEveryMs: int("chat-every", values["chat-every"], 1) * 1000,
     movingRatio: ratio("moving", values.moving),
     port: int("port", values.port, 1),
+    runtime,
     roomPrefix: values["room-prefix"],
     keepGoing: values["keep-going"],
     healthToken: values["health-token"],
@@ -521,6 +531,28 @@ class HealthClient {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * How to start the local server per runtime. Bun and Deno are fetched by npx on
+ * first use (pinned, same versions as Dockerfile.bun / Dockerfile.deno); they are
+ * not devDependencies because Deno's npm installer fails on Alpine (musl) builds.
+ */
+const SERVER_COMMANDS: Record<Options["runtime"], string[]> = {
+  node: [process.execPath, "server/src/index.ts"],
+  bun: ["npx", "-y", "bun@1.4.2", "run", "server/src/bun.ts"],
+  deno: [
+    "npx",
+    "-y",
+    "deno@2.9.6",
+    "run",
+    "--allow-net",
+    "--allow-read",
+    "--allow-env",
+    "--allow-write",
+    "--allow-sys",
+    "server/src/deno.ts",
+  ],
+};
+
 async function runOrchestrator(): Promise<void> {
   const opts = parseOptions();
   const { steps, roomSize, hold, ramp, chatEveryMs, roomPrefix } = opts;
@@ -535,20 +567,22 @@ async function runOrchestrator(): Promise<void> {
   } else {
     wsUrl = `ws://127.0.0.1:${opts.port}${WS_PATH}`;
     httpUrl = `http://127.0.0.1:${opts.port}`;
-    server = spawn(process.execPath, ["server/src/index.ts"], {
+    server = spawn(SERVER_COMMANDS[opts.runtime][0], SERVER_COMMANDS[opts.runtime].slice(1), {
       cwd: ROOT,
       env: { ...process.env, PORT: String(opts.port), HOST: "0.0.0.0", HEALTH_TOKEN: opts.healthToken, NODE_ENV: "production" },
       stdio: ["ignore", "ignore", "inherit"],
     });
   }
   const health = new HealthClient(httpUrl, opts.healthToken);
+  let runtimeLabel = "unknown runtime";
   try {
-    await health.waitReady(opts.target ? 0 : 10_000);
+    await health.waitReady(opts.target ? 0 : 60_000);
+    runtimeLabel = (await health.fetch(Date.now())).runtime ?? runtimeLabel;
   } catch (err) {
     server?.kill();
     fail((err as Error).message);
   }
-  console.log(opts.target ? `Target ${wsUrl}` : `Spawned server on port ${opts.port}`);
+  console.log(opts.target ? `Target ${wsUrl} (${runtimeLabel})` : `Spawned ${runtimeLabel} server on port ${opts.port}`);
   console.log(`Bots walk ${Math.round(opts.movingRatio * 100)}% of the time`);
   console.log(`Rooms: /r/${roomSize > 0 ? `${roomPrefix}-0 .. ${roomPrefix}-${Math.ceil(steps.at(-1)! / roomSize) - 1}` : `${roomPrefix}-all`}`);
 
@@ -622,10 +656,10 @@ async function runOrchestrator(): Promise<void> {
       socketErrors += r.errors;
     }
     const joined = [...connected.values()].reduce((a, b) => a + b, 0);
-    const mean = (key: keyof StatsSample) => samples.reduce((a, s) => a + s[key], 0) / samples.length;
+    const mean = (key: keyof StatsSample) => samples.reduce((a, s) => a + (s[key] ?? 0), 0) / samples.length;
     const have = samples.length > 0;
     const cpu = have ? mean("cpu") : NaN;
-    const elu = have ? mean("elu") : NaN;
+    const elu = have && samples.every((s) => s.elu !== null) ? mean("elu") : NaN;
     const loopP99 = have ? Math.max(...samples.map((s) => s.loopP99Ms)) : NaN;
     const show = (v: number, text: () => string) => (Number.isNaN(v) ? "-" : text());
 

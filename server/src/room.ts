@@ -1,4 +1,3 @@
-import type { WebSocket } from "ws";
 import type { CollisionMap } from "../../shared/src/collision.ts";
 import {
   CHAT_HISTORY_SIZE,
@@ -23,9 +22,21 @@ const MOVE_SLACK = 24;
 const CHAT_BURST = 5;
 const CHAT_WINDOW_MS = 5000;
 
+/** A connected client, whatever the runtime's WebSocket implementation is. */
+export interface Peer {
+  send(data: Uint8Array): void;
+  close(): void;
+}
+
+/** Events the runtime adapter forwards to the room for one peer. */
+export interface PeerEvents {
+  message(data: Uint8Array): void;
+  close(): void;
+}
+
 interface Player {
   id: number;
-  socket: WebSocket;
+  peer: Peer;
   name: string;
   character: CharacterId;
   x: number;
@@ -39,10 +50,6 @@ interface Player {
 export class Room {
   readonly id: string;
   private readonly players = new Map<number, Player>();
-
-  get playerCount(): number {
-    return this.players.size;
-  }
   private readonly chat: ChatMessage[] = [];
   /** Open sockets, including ones that have not joined yet. */
   private connections = 0;
@@ -50,7 +57,7 @@ export class Room {
   private nextChatId = 1;
   /** Players whose position or motion changed since the last snapshot. */
   private readonly changed = new Set<Player>();
-  private ticker: NodeJS.Timeout | null = null;
+  private ticker: ReturnType<typeof setInterval> | null = null;
   private readonly map: CollisionMap;
   private readonly onEmpty: () => void;
 
@@ -60,39 +67,45 @@ export class Room {
     this.onEmpty = onEmpty;
   }
 
-  /** Wire a freshly upgraded socket into the room; it becomes a player once it sends "join". */
-  accept(socket: WebSocket): void {
+  get playerCount(): number {
+    return this.players.size;
+  }
+
+  /**
+   * Add a freshly upgraded connection; it becomes a player once it sends "join".
+   * The runtime adapter must call the returned handlers for binary messages and on close.
+   */
+  accept(peer: Peer): PeerEvents {
     let player: Player | null = null;
     this.connections++;
 
-    socket.on("message", (data, isBinary) => {
-      if (!isBinary) return;
-      const buf = data as Buffer;
-      const msg = decodeClientMessage(new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength));
-      if (!msg) return;
-      if (msg.t === "move" && player) {
-        this.handleMove(player, msg);
-      } else if (msg.t === "join" && !player) {
-        player = this.join(socket, msg.name, msg.character);
-      } else if (msg.t === "chat" && player) {
-        this.handleChat(player, msg.text);
-      }
-    });
-
-    socket.on("close", () => {
-      if (player) this.leave(player);
-      if (--this.connections === 0) {
-        this.stopTicker();
-        this.onEmpty();
-      }
-    });
+    return {
+      message: (data) => {
+        const msg = decodeClientMessage(data);
+        if (!msg) return;
+        if (msg.t === "move" && player) {
+          this.handleMove(player, msg);
+        } else if (msg.t === "join" && !player) {
+          player = this.join(peer, msg.name, msg.character);
+        } else if (msg.t === "chat" && player) {
+          this.handleChat(player, msg.text);
+        }
+      },
+      close: () => {
+        if (player) this.leave(player);
+        if (--this.connections === 0) {
+          this.stopTicker();
+          this.onEmpty();
+        }
+      },
+    };
   }
 
-  private join(socket: WebSocket, rawName: unknown, character: unknown): Player | null {
+  private join(peer: Peer, rawName: unknown, character: unknown): Player | null {
     const name = typeof rawName === "string" ? rawName.trim().slice(0, MAX_NAME_LENGTH) : "";
     if (!name || !isCharacterId(character)) {
-      send(socket, { t: "error", message: "Invalid name or character." });
-      socket.close();
+      send(peer, { t: "error", message: "Invalid name or character." });
+      peer.close();
       return null;
     }
     if (this.nextPlayerId > 0xffff) this.nextPlayerId = 1;
@@ -100,7 +113,7 @@ export class Room {
     const spawn = findSpawn(this.map, collisionOffsetY(character));
     const player: Player = {
       id: this.nextPlayerId++,
-      socket,
+      peer,
       name,
       character,
       x: spawn.x,
@@ -111,7 +124,7 @@ export class Room {
       chatTimes: [],
     };
 
-    send(socket, {
+    send(peer, {
       t: "welcome",
       selfId: player.id,
       players: [...this.players.values(), player].map(toInfo),
@@ -136,7 +149,7 @@ export class Room {
     const distance = Math.hypot(move.x - player.x, move.y - player.y);
 
     if (distance > maxDistance || !this.map.canStandAt(move.x, move.y, collisionOffsetY(player.character))) {
-      send(player.socket, { t: "correction", x: player.x, y: player.y });
+      send(player.peer, { t: "correction", x: player.x, y: player.y });
       return;
     }
 
@@ -156,7 +169,7 @@ export class Room {
     const now = Date.now();
     player.chatTimes = player.chatTimes.filter((t) => now - t < CHAT_WINDOW_MS);
     if (player.chatTimes.length >= CHAT_BURST) {
-      send(player.socket, { t: "error", message: "You are sending messages too fast." });
+      send(player.peer, { t: "error", message: "You are sending messages too fast." });
       return;
     }
     player.chatTimes.push(now);
@@ -191,12 +204,12 @@ export class Room {
   /** Encode once, send to everyone in the room. */
   private broadcast(msg: ServerMessage): void {
     const data = encodeServerMessage(msg);
-    for (const p of this.players.values()) p.socket.send(data);
+    for (const p of this.players.values()) p.peer.send(data);
   }
 }
 
-function send(socket: WebSocket, msg: ServerMessage): void {
-  socket.send(encodeServerMessage(msg));
+function send(peer: Peer, msg: ServerMessage): void {
+  peer.send(encodeServerMessage(msg));
 }
 
 function toInfo(p: Player): PlayerInfo {

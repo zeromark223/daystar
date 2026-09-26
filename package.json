@@ -12,15 +12,18 @@
     "dev:client": "vite --config client/vite.config.ts",
     "build": "vite build --config client/vite.config.ts",
     "start": "node server/src/index.ts",
-    "typecheck": "tsc -p client && tsc -p server",
+    "typecheck": "tsc -p client && tsc -p server && tsc -p server/tsconfig.bun.json && npx -y deno@2.9.6 check server/src/deno.ts",
     "test": "node --test \"shared/**/*.test.ts\" \"server/**/*.test.ts\"",
     "assets": "python3 tools/build_sprites.py",
-    "loadtest": "node tools/loadtest.ts"
+    "loadtest": "node tools/loadtest.ts",
+    "start:bun": "npx -y bun@1.4.2 run server/src/bun.ts",
+    "start:deno": "npx -y deno@2.9.6 run --allow-net --allow-read --allow-env --allow-write --allow-sys server/src/deno.ts"
   },
   "dependencies": {
     "ws": "^8.21.3"
   },
   "devDependencies": {
+    "@types/bun": "^1.4.2",
     "@types/node": "^26.6.2",
     "@types/ws": "^8.18.1",
     "concurrently": "^10.0.5",

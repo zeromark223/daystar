@@ -1,0 +1,19 @@
+# Same app on Deno's native WebSocket server (server/src/deno.ts).
+FROM node:24-alpine AS build
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
+
+FROM denoland/deno:alpine-2.9.6
+WORKDIR /app
+ENV NODE_ENV=production \
+    PORT=3000
+COPY shared/src shared/src
+COPY server/src server/src
+COPY --from=build /app/client/dist client/dist
+USER deno
+EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=3s CMD wget -qO- http://127.0.0.1:3000/healthz || exit 1
+CMD ["deno", "run", "--allow-net", "--allow-read", "--allow-env", "--allow-write", "--allow-sys", "server/src/deno.ts"]
