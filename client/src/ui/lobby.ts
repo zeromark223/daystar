@@ -9,6 +9,7 @@ import {
   type AppearanceId,
   type BodyKind,
 } from "../../../shared/src/appearance.ts";
+import { paintPlanet } from "../game/textures.ts";
 
 const NAME_KEY = "daystar:name";
 const APPEARANCE_KEY = "daystar:appearance";
@@ -77,20 +78,8 @@ function drawPreview(canvas: HTMLCanvasElement, kind: BodyKind, color: number): 
     ctx.ellipse(c, c, r * 2.3, r * 0.75, 0, Math.PI, Math.PI * 2);
     ctx.stroke();
   }
-  ctx.fillStyle = hex(color);
-  ctx.beginPath();
-  ctx.arc(c, c, r, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = "#00000047";
-  ctx.beginPath();
-  ctx.arc(c + r * 0.35, c + r * 0.3, r * 0.92, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = "#ffffff5a";
-  ctx.beginPath();
-  ctx.arc(c - r * 0.35, c - r * 0.35, r * 0.35, 0, Math.PI * 2);
-  ctx.fill();
+  paintPlanet(ctx, c, c, r, color);
   if (kind === "ringed") {
-    ctx.strokeStyle = "#ffffffaa";
     ctx.beginPath();
     ctx.ellipse(c, c, r * 2.3, r * 0.75, 0, 0, Math.PI);
     ctx.stroke();

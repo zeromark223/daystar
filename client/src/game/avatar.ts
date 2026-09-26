@@ -4,7 +4,7 @@ import { TICK_RATE } from "../../../shared/src/constants.ts";
 import type { Direction } from "../../../shared/src/direction.ts";
 import type { PlayerInfo } from "../../../shared/src/protocol.ts";
 import { brightnessAt } from "../../../shared/src/space.ts";
-import { glowTexture } from "./textures.ts";
+import { glowTexture, planetTexture } from "./textures.ts";
 
 const BUBBLE_MS = 6000;
 const BUBBLE_MAX_WIDTH = 220;
@@ -41,12 +41,24 @@ function lighten(color: number, amount: number): number {
   return (mix(r) << 16) | (mix(g) << 8) | mix(b);
 }
 
+/** Half of an ellipse (the back or front of a planet's ring). */
+function ringHalf(g: Graphics, rx: number, ry: number, front: boolean, color: number): void {
+  const steps = 24;
+  const from = front ? 0 : Math.PI;
+  g.moveTo(Math.cos(from) * rx, Math.sin(from) * ry);
+  for (let i = 1; i <= steps; i++) {
+    const a = from + (i / steps) * Math.PI;
+    g.lineTo(Math.cos(a) * rx, Math.sin(a) * ry);
+  }
+  g.stroke({ color, width: 2.2, alpha: 0.85 });
+}
+
 /** The body itself (without the glow), drawn around (0, 0). */
-function drawBody(kind: BodyKind, color: number): Graphics {
-  const g = new Graphics();
+function drawBody(kind: BodyKind, color: number): Container {
   const r = SIZES[kind].core;
   if (kind === "star") {
     // A bright core with a four-pointed sparkle.
+    const g = new Graphics();
     const spike = r * 3.2;
     g.poly([0, -spike, r * 0.35, 0, 0, spike, -r * 0.35, 0]).fill({ color: lighten(color, 0.6), alpha: 0.9 });
     g.poly([-spike, 0, 0, r * 0.35, spike, 0, 0, -r * 0.35]).fill({ color: lighten(color, 0.6), alpha: 0.9 });
@@ -54,24 +66,23 @@ function drawBody(kind: BodyKind, color: number): Graphics {
     g.circle(0, 0, r * 0.55).fill({ color: 0xffffff });
     return g;
   }
-  // Planets: a disc with a shaded side and a small highlight.
+  // Planets: a shaded sphere, with a ring passing behind and in front of it.
+  const body = new Container();
+  const ringColor = lighten(color, 0.35);
   if (kind === "ringed") {
-    g.ellipse(0, 0, r * 2.3, r * 0.75).stroke({ color: lighten(color, 0.35), width: 2.2, alpha: 0.85 });
+    const back = new Graphics();
+    ringHalf(back, r * 2.3, r * 0.75, false, ringColor);
+    body.addChild(back);
   }
-  g.circle(0, 0, r).fill({ color });
-  g.circle(r * 0.35, r * 0.3, r * 0.92).fill({ color: 0x000000, alpha: 0.28 });
-  g.circle(-r * 0.35, -r * 0.35, r * 0.35).fill({ color: 0xffffff, alpha: 0.35 });
+  const sphere = new Sprite({ texture: planetTexture(color, r), anchor: 0.5 });
+  sphere.width = sphere.height = r * 2;
+  body.addChild(sphere);
   if (kind === "ringed") {
-    // The front half of the ring passes over the planet.
-    const steps = 24;
-    g.moveTo(r * 2.3, 0);
-    for (let i = 1; i <= steps; i++) {
-      const a = (i / steps) * Math.PI;
-      g.lineTo(Math.cos(a) * r * 2.3, Math.sin(a) * r * 0.75);
-    }
-    g.stroke({ color: lighten(color, 0.35), width: 2.2, alpha: 0.85 });
+    const front = new Graphics();
+    ringHalf(front, r * 2.3, r * 0.75, true, ringColor);
+    body.addChild(front);
   }
-  return g;
+  return body;
 }
 
 /**
@@ -91,7 +102,7 @@ export class Avatar {
   private readonly color: number;
   private readonly kind: BodyKind;
   private readonly body = new Container();
-  private readonly core: Graphics;
+  private readonly core: Container;
   private readonly trail = new Graphics();
   private readonly trailPoints: { x: number; y: number }[] = [];
   private lastTrailAt = 0;

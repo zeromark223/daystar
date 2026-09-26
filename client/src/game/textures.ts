@@ -57,3 +57,48 @@ export function starTileTexture(opts: { size: number; count: number; maxRadius: 
   }
   return Texture.from(canvas);
 }
+
+function shade(color: number, amount: number): string {
+  // amount > 0 lightens towards white, < 0 darkens towards black.
+  const channel = (c: number) =>
+    Math.round(amount >= 0 ? c + (255 - c) * amount : c * (1 + amount));
+  const r = channel((color >> 16) & 0xff);
+  const g = channel((color >> 8) & 0xff);
+  const b = channel(color & 0xff);
+  return `rgb(${r},${g},${b})`;
+}
+
+/**
+ * Paint a lit sphere of radius `r` centered at (cx, cy): light from the top
+ * left, fading to a darker limb. The shading never leaves the disc.
+ */
+export function paintPlanet(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: number, color: number): void {
+  const g = ctx.createRadialGradient(cx - r * 0.4, cy - r * 0.45, r * 0.05, cx - r * 0.1, cy - r * 0.1, r * 1.15);
+  g.addColorStop(0, shade(color, 0.6));
+  g.addColorStop(0.35, shade(color, 0.05));
+  g.addColorStop(0.8, shade(color, -0.35));
+  g.addColorStop(1, shade(color, -0.6));
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+const planets = new Map<string, Texture>();
+/** Sharper than the on-screen size so planets stay crisp when zoomed in. */
+const PLANET_SUPERSAMPLE = 4;
+
+/** A shaded sphere texture of world radius `radius`; draw it at width = 2 * radius. */
+export function planetTexture(color: number, radius: number): Texture {
+  const key = `${color}:${radius}`;
+  let texture = planets.get(key);
+  if (texture) return texture;
+  const r = radius * PLANET_SUPERSAMPLE;
+  const size = Math.ceil(r * 2) + 2;
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  paintPlanet(canvas.getContext("2d")!, size / 2, size / 2, r, color);
+  texture = Texture.from(canvas);
+  planets.set(key, texture);
+  return texture;
+}

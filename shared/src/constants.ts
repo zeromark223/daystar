@@ -6,9 +6,9 @@ export const WORLD_SIZE = 10_000;
 export const WORLD_CENTER = { x: 5_000, y: 5_000 } as const;
 export const WORLD_RADIUS = 5_000;
 /** Players cannot get closer to the center than this (the sun). */
-export const SUN_RADIUS = 600;
+export const SUN_RADIUS = 200;
 /** Beyond this share of WORLD_RADIUS players fade out, reaching invisible at the edge. */
-export const FADE_START = 0.8;
+export const FADE_START = 0.6;
 
 /** Movement speed in map pixels per second, shared by everyone. */
 export const MOVE_SPEED = 400;

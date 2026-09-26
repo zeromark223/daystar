@@ -29,7 +29,9 @@ test("moves stop at the sun and at the edge, keeping the direction", () => {
 test("brightness is full inside, fades near the edge, and is zero at it", () => {
   const inside = at(WORLD_RADIUS * 0.5);
   assert.equal(brightnessAt(inside.x, inside.y), 1);
-  const mid = at(WORLD_RADIUS * 0.9);
+  const start = at(WORLD_RADIUS * 0.6);
+  assert.equal(brightnessAt(start.x, start.y), 1);
+  const mid = at(WORLD_RADIUS * 0.8);
   assert.ok(Math.abs(brightnessAt(mid.x, mid.y) - 0.5) < 1e-9);
   const edge = at(WORLD_RADIUS);
   assert.equal(brightnessAt(edge.x, edge.y), 0);

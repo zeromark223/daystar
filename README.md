@@ -42,9 +42,9 @@ tools/          load test
 
 ## The world
 
-- A disc of radius 5,000 px around the sun; players cannot enter the sun (radius 600)
+- A disc of radius 5,000 px around the sun; players cannot enter the sun (radius 200)
   and slide along it and along the edge (`shared/src/space.ts`).
-- Brightness falls off beyond 80% of the radius and reaches zero at the edge, where a
+- Brightness falls off beyond 60% of the radius and reaches zero at the edge, where a
   player is invisible to others (you still see a faint ring around yourself). This is
   visual only: positions are still sent to everyone.
 - Appearance: star, planet or ringed planet, in one of eight colors; one byte on the wire.
