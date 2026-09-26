@@ -108,7 +108,7 @@ async function main(): Promise<void> {
   const adopt = (next: Connection) => {
     const old = conn;
     conn = next;
-    next.send({ t: "join", name: identity!.name, character: identity!.character });
+    next.send({ t: "join", name: identity!.name, appearance: identity!.appearance });
     old?.close();
   };
 

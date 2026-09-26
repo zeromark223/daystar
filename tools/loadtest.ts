@@ -1,7 +1,7 @@
 /**
  * Load test: ramps up bot players in steps and reports whether each step
  * stays healthy. Bots join, walk non-stop (worst case: everyone moving) using
- * the real collision map, send positions at the client rate and chat now and then.
+ * the world's real limits (sun and edge), send positions at the client rate and chat now and then.
  *
  *   bun run loadtest --steps 100,200,400 --room-size 20
  *   bun run loadtest --target https://meet.example.com --steps 200,500
@@ -13,8 +13,9 @@ import { createInterface } from "node:readline";
 import { readFileSync, writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { resolve } from "node:path";
-import { CHARACTER_IDS, collisionOffsetY, type CharacterId, type Direction } from "../shared/src/characters.ts";
-import { CollisionMap } from "../shared/src/collision.ts";
+import { APPEARANCE_COUNT, type AppearanceId } from "../shared/src/appearance.ts";
+import type { Direction } from "../shared/src/direction.ts";
+import { canBeAt, moveInSpace } from "../shared/src/space.ts";
 import { MOVE_SPEED, ROOM_ID_PATTERN, TICK_RATE, WS_PATH } from "../shared/src/constants.ts";
 import {
   decodeServerMessage,
@@ -99,7 +100,7 @@ interface Bot {
   name: string;
   /** A migration or rejoin is in flight. */
   switching: boolean;
-  character: CharacterId;
+  appearance: AppearanceId;
   id: number;
   x: number;
   y: number;
@@ -139,7 +140,6 @@ function idleMs(ratio: number): number {
 }
 
 function runWorker(): void {
-  const map = CollisionMap.parse(readFileSync(resolve(ROOT, "client/public/assets/collision.txt"), "utf8"));
   const bots: Bot[] = [];
   /** Base HTTP URL of the agent (cluster) or the server (standalone). */
   let baseUrl = "";
@@ -178,13 +178,13 @@ function runWorker(): void {
   async function addBot(room: string): Promise<void> {
     const placed = await place("/api/join", { room });
     if (!placed) return;
-    const character = CHARACTER_IDS[Math.floor(Math.random() * CHARACTER_IDS.length)];
+    const appearance = Math.floor(Math.random() * APPEARANCE_COUNT);
     const bot: Bot = {
       ws: null!,
       room,
       ticket: placed.ticket,
       name: `bot${bots.length}`,
-      character,
+      appearance,
       id: -1,
       x: 0,
       y: 0,
@@ -218,7 +218,7 @@ function runWorker(): void {
     bot.ws = ws;
     bot.pending = [];
     ws.addEventListener("open", () => {
-      ws.send(encodeClientMessage({ t: "join", name: bot.name, character: bot.character }));
+      ws.send(encodeClientMessage({ t: "join", name: bot.name, appearance: bot.appearance }));
       if (old && old !== ws) old.close();
     });
     ws.addEventListener("message", (event) => {
@@ -322,10 +322,9 @@ function runWorker(): void {
         bot.nextTurn = now + 1000 + Math.random() * 2000;
       }
       const d = DIRS[bot.heading];
-      const offset = collisionOffsetY(bot.character);
-      let next = map.moveWithCollision(bot.x, bot.y, d.dx * stepPx, d.dy * stepPx, offset);
+      let next = moveInSpace(bot.x, bot.y, d.dx * stepPx, d.dy * stepPx);
       const snapped = { x: quantize(next.x), y: quantize(next.y) };
-      next = map.canStandAt(snapped.x, snapped.y, offset) ? snapped : bot;
+      next = canBeAt(snapped.x, snapped.y) ? snapped : bot;
       if (next.x === bot.x && next.y === bot.y) bot.nextTurn = 0; // stuck: turn next tick
       bot.x = next.x;
       bot.y = next.y;

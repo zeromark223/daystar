@@ -4,6 +4,6 @@ client/dist
 .DS_Store
 .loadtest-last.json
 
-# Artwork is not distributed yet (see README "Assets")
+# Leftover art from the pixel version (no longer used; everything is drawn in code)
 assets/
-client/public/assets/**/*.png
+client/public/assets/

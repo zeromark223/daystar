@@ -1,7 +1,8 @@
 # Daystar
 
-A tiny meeting app that plays like a game: pick an animal, walk around a pixel-art
-ruin with everyone else in the room, and chat. Voice chat comes later.
+A tiny meeting app that plays like a game: every person is a glowing star or planet
+drifting around a shared sun in a 10,000 px disc of space. Move freely and chat; the
+world is drawn entirely in code with PixiJS (no image assets). Voice chat comes later.
 
 - **Client:** PixiJS v8 + Vite (TypeScript)
 - **Server:** Bun (`Bun.serve`, native WebSockets and topic pub/sub), TypeScript
@@ -18,27 +19,8 @@ bun run dev          # server on :3000 (watch) + Vite on :5173 (proxies /ws)
 ```
 
 Open http://localhost:5173 — you get redirected to a random room (`/r/<room-id>`).
-Share the URL to invite others. Add `?debug` to see collision cells.
+Share the URL to invite others. Add `?debug` to expose the game object in the console.
 
-### Collision editor
-
-Open a room with `?edit` (e.g. `/r/my-room?edit`). The game plays as usual, plus a
-toolbar:
-
-- **Draw** (`B`) paints blocked cells, **Erase** (`E`) paints walkable cells; click
-  the active tool again to go back to tap-to-move. Brush size 1×1 to 8×8 cells.
-- **Undo** (`Ctrl+Z`) reverts the last stroke.
-- Edits apply to your own movement immediately; **Save** sends them to the server,
-  which updates every room in memory and rewrites
-  `client/public/assets/collision.txt` (commit that file).
-
-Saving is enabled unless `NODE_ENV=production`; override with `MAP_EDITOR=1` or `0`.
-
-```bash
-bun test             # protocol + collision unit tests
-bun run typecheck
-bun run build && bun start   # production mode on :3000
-```
 
 ## Cluster
 
@@ -52,35 +34,23 @@ servers hand players over. Design, configuration and Coolify setup:
 ## Layout
 
 ```
-shared/src/     protocol, character definitions, collision (used by client and server)
+shared/src/     protocol, appearances, world rules (used by client and server)
 server/src/     game server (main.ts), rooms, agent/, cluster/ (tickets, mesh), supervisor.ts
 client/src/     lobby, chat UI, Pixi game (camera, avatars, input)
-client/public/  generated game assets (spritesheets, map)
-assets/         raw source art (not shipped)
-tools/          asset pipeline scripts (Python + Pillow)
+tools/          load test
 ```
 
-## Assets
+## The world
 
-> **Art is not included yet.** The project is under development and its artwork
-> (character sprites and the map) will be replaced soon; until then images are kept out
-> of the repository. To run it, provide your own:
->
-> - character frames at `assets/animal/<Animal>/<idle|walk|run>/<south|west|east|north>/00.png`
->   (folder names are mapped to characters in `tools/build_sprites.py`), then run
->   `bun run assets` to build `client/public/assets/characters/*.png`;
-> - a 1200×1200 map image at `assets/Scene Overview.png` (`bun run assets` copies it to
->   `client/public/assets/map.png`).
->
-> The spritesheet metadata (`*.json`) and the collision grid are in the repository.
-
-- `python3 tools/build_sprites.py` packs `assets/animal/<Animal>/<anim>/<dir>/*.png`
-  into one Pixi spritesheet per character with `idle_<dir>` and `run_<dir>`
-  animations. Only the deer has a real run cycle; the others reuse walk played faster.
-- `python3 tools/gen_collision.py [overlay.png]` derives the first-pass walkability
-  grid in `client/public/assets/collision.txt` from the map colors, plus hand-placed
-  polygons for stairs and passages (`WALKABLE_OVERRIDES`). Re-running it overwrites
-  edits made in the collision editor.
+- A disc of radius 5,000 px around the sun; players cannot enter the sun (radius 600)
+  and slide along it and along the edge (`shared/src/space.ts`).
+- Brightness falls off beyond 80% of the radius and reaches zero at the edge, where a
+  player is invisible to others (you still see a faint ring around yourself). This is
+  visual only: positions are still sent to everyone.
+- Appearance: star, planet or ringed planet, in one of eight colors; one byte on the wire.
+- Newcomers appear near someone already in the room, or on a ring around the sun.
+- Sky, nebulae, sun, glows and trails are generated at startup (canvas gradients and
+  PixiJS graphics); the minimap and wheel / `+` `-` zoom help finding people.
 
 ## Networking
 
@@ -88,7 +58,7 @@ tools/          asset pipeline scripts (Python + Pillow)
   (`shared/src/binary/schema.ts`, a port of an older BinaryBuilder/BinaryParser).
   Positions are UInt16 in 1/20 px steps, so a snapshot costs 7 bytes per player.
 - Client moves locally (instant response) and sends its position at 20 Hz.
-- Server validates speed and collision, sends a `correction` if a move is invalid,
+- Server validates speed and the world limits, sends a `correction` if a move is invalid,
   and broadcasts a binary snapshot at 20 Hz when anything changed.
 - Other players are rendered 100 ms in the past and interpolated between snapshots.
 - Rooms live in memory and disappear when the last socket closes; each keeps the

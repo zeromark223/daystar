@@ -7,12 +7,11 @@
  * is down nobody can join or move and the system is considered down. Several
  * agents behind a load balancer (shared registry state) are future work.
  */
-import { readFileSync } from "node:fs";
 import { ROOM_ID_PATTERN } from "../../../shared/src/constants.ts";
 import type { AgentToServer, ServerToAgent } from "../cluster/control.ts";
 import { sign, verifyPlayer, verifyServer } from "../cluster/ticket.ts";
 import { readJoinRequest, readLimited, rejectWithoutHealthToken } from "../http.ts";
-import { CLIENT_DIR, COLLISION_FILE } from "../paths.ts";
+import { CLIENT_DIR } from "../paths.ts";
 import { createStaticHandler } from "../static.ts";
 import type { StatsSample } from "../stats.ts";
 import { HARD_LIMIT } from "./placement.ts";
@@ -234,11 +233,6 @@ async function handleHttp(req: Request): Promise<Response> {
         return await handleJoin(req);
       case "/api/migrate":
         return await handleMigrate(req);
-      case "/api/collision":
-        if (req.method !== "GET") return new Response("Map editing is disabled in cluster mode.", { status: 403 });
-        return new Response(readFileSync(COLLISION_FILE, "utf8"), {
-          headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-cache" },
-        });
       default:
         return await serveStatic(req);
     }

@@ -1,15 +1,8 @@
-import type { CollisionMap } from "../../shared/src/collision.ts";
+import { isAppearanceId, type AppearanceId } from "../../shared/src/appearance.ts";
+import { CHAT_HISTORY_SIZE, MAX_CHAT_LENGTH, MAX_NAME_LENGTH, MOVE_SPEED, TICK_RATE } from "../../shared/src/constants.ts";
+import type { Direction } from "../../shared/src/direction.ts";
+import { canBeAt, spawnPoint } from "../../shared/src/space.ts";
 import { recordTick } from "./stats.ts";
-import {
-  CHAT_HISTORY_SIZE,
-  MAX_CHAT_LENGTH,
-  MAX_NAME_LENGTH,
-  MOVE_SPEED,
-  SPAWN_POINT,
-  SPAWN_RADIUS,
-  TICK_RATE,
-} from "../../shared/src/constants.ts";
-import { collisionOffsetY, isCharacterId, type CharacterId, type Direction } from "../../shared/src/characters.ts";
 import {
   decodeClientMessage,
   encodeServerMessage,
@@ -68,7 +61,7 @@ interface Player {
   /** The socket, for local players only. */
   peer: Peer | null;
   name: string;
-  character: CharacterId;
+  appearance: AppearanceId;
   x: number;
   y: number;
   dir: Direction;
@@ -78,7 +71,6 @@ interface Player {
 }
 
 export interface RoomOptions {
-  map: CollisionMap;
   /** Called when the last connection closes; the owner drops the room. */
   onEmpty(): void;
   /** Native fan-out (Bun topic); without it broadcasts loop over peers. */
@@ -112,13 +104,11 @@ export class Room {
   private ticker: ReturnType<typeof setInterval> | null = null;
   /** Local players asked to migrate, and when they may be asked again. */
   private readonly migrating = new Map<number, number>();
-  private readonly map: CollisionMap;
   private readonly publish: Publish | null;
   private readonly opts: RoomOptions;
 
   constructor(id: string, opts: RoomOptions) {
     this.id = id;
-    this.map = opts.map;
     this.publish = opts.publish ?? null;
     this.opts = opts;
   }
@@ -159,12 +149,12 @@ export class Room {
           this.handleMove(player, msg);
         } else if (msg.t === "join" && !player && !joining) {
           if (!resume) {
-            player = this.join(peer, msg.name, msg.character, playerId);
+            player = this.join(peer, msg.name, msg.appearance, playerId);
             return;
           }
           joining = true;
           void resume.then((state) => {
-            if (joining) player = this.join(peer, msg.name, msg.character, playerId, state);
+            if (joining) player = this.join(peer, msg.name, msg.appearance, playerId, state);
           });
         } else if (msg.t === "chat" && player) {
           this.handleChat(player, msg.text);
@@ -268,13 +258,13 @@ export class Room {
   private join(
     peer: Peer,
     rawName: unknown,
-    character: unknown,
+    appearance: unknown,
     assignedId?: number,
     resume?: PlayerInfo | null,
   ): Player | null {
     const name = typeof rawName === "string" ? rawName.trim().slice(0, MAX_NAME_LENGTH) : "";
-    if (!name || !isCharacterId(character)) {
-      send(peer, { t: "error", message: "Invalid name or character." });
+    if (!name || !isAppearanceId(appearance)) {
+      send(peer, { t: "error", message: "Invalid name or appearance." });
       peer.close();
       return null;
     }
@@ -285,18 +275,18 @@ export class Room {
     }
     const id = assignedId ?? this.nextLocalId();
 
-    // A migrating player continues where it was; others start at the spawn point.
+    // A migrating player continues where it was; others appear near someone in the room.
     const start =
-      resume && this.map.canStandAt(resume.x, resume.y, collisionOffsetY(character))
+      resume && canBeAt(resume.x, resume.y)
         ? resume
-        : { ...findSpawn(this.map, collisionOffsetY(character)), dir: "south" as const };
+        : { ...spawnPoint([...this.players.values()].filter((p) => p.id !== id)), dir: "south" as const };
     const wasReplica = this.players.get(id)?.owner != null;
     const player: Player = {
       id,
       owner: null,
       peer,
       name,
-      character,
+      appearance,
       x: start.x,
       y: start.y,
       dir: start.dir,
@@ -349,7 +339,7 @@ export class Room {
     const maxDistance = MOVE_SPEED * elapsed + MOVE_SLACK;
     const distance = Math.hypot(move.x - player.x, move.y - player.y);
 
-    if (distance > maxDistance || !this.map.canStandAt(move.x, move.y, collisionOffsetY(player.character))) {
+    if (distance > maxDistance || !canBeAt(move.x, move.y)) {
       send(player.peer!, { t: "correction", x: player.x, y: player.y });
       return;
     }
@@ -428,20 +418,9 @@ function send(peer: Peer, msg: ServerMessage): void {
 }
 
 function toInfo(p: Player): PlayerInfo {
-  return { id: p.id, name: p.name, character: p.character, x: p.x, y: p.y, dir: p.dir, moving: p.moving };
+  return { id: p.id, name: p.name, appearance: p.appearance, x: p.x, y: p.y, dir: p.dir, moving: p.moving };
 }
 
 function toState(p: Player): PlayerState {
   return { id: p.id, x: p.x, y: p.y, dir: p.dir, moving: p.moving };
-}
-
-function findSpawn(map: CollisionMap, offsetY: number): { x: number; y: number } {
-  for (let i = 0; i < 50; i++) {
-    const angle = Math.random() * Math.PI * 2;
-    const r = Math.random() * SPAWN_RADIUS;
-    const x = Math.round(SPAWN_POINT.x + Math.cos(angle) * r);
-    const y = Math.round(SPAWN_POINT.y + Math.sin(angle) * r);
-    if (map.canStandAt(x, y, offsetY)) return { x, y };
-  }
-  return { ...SPAWN_POINT };
 }

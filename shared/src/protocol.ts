@@ -1,5 +1,6 @@
 import { decode, encode, Type, type Struct } from "./binary/schema.ts";
-import { CHARACTER_IDS, DIRECTIONS, type CharacterId, type Direction } from "./characters.ts";
+import { isAppearanceId, type AppearanceId } from "./appearance.ts";
+import { DIRECTIONS, type Direction } from "./direction.ts";
 
 // Every frame is binary: one opcode byte, then the message body laid out by
 // its schema (see ./binary/schema.ts).
@@ -7,7 +8,7 @@ import { CHARACTER_IDS, DIRECTIONS, type CharacterId, type Direction } from "./c
 export interface PlayerInfo {
   id: number;
   name: string;
-  character: CharacterId;
+  appearance: AppearanceId;
   x: number;
   y: number;
   dir: Direction;
@@ -32,7 +33,7 @@ export interface ChatMessage {
 }
 
 export type ClientMessage =
-  | { t: "join"; name: string; character: CharacterId }
+  | { t: "join"; name: string; appearance: AppearanceId }
   | { t: "chat"; text: string }
   | { t: "move"; x: number; y: number; dir: Direction; moving: boolean };
 
@@ -50,11 +51,11 @@ export type ServerMessage =
 // ------------------------------------------------------------------ positions
 
 /**
- * Positions travel as UInt16 in 1/POSITION_SCALE px steps (max 3276 px, enough
- * for the 1200 px map). The client snaps its own position to the same grid so
+ * Positions travel as UInt16 in 1/POSITION_SCALE px steps (max 16383 px, enough
+ * for the 10000 px world). The client snaps its own position to the same grid so
  * what the server validates is exactly what the client simulated.
  */
-export const POSITION_SCALE = 20;
+export const POSITION_SCALE = 4;
 
 export function quantize(v: number): number {
   return Math.round(v * POSITION_SCALE) / POSITION_SCALE;
@@ -75,7 +76,7 @@ function unpackMotion(bits: number): { dir: Direction; moving: boolean } {
 // ------------------------------------------------------------------ schemas
 
 export const PlayerStateStruct: Struct = { id: Type.UInt16, x: Type.UInt16, y: Type.UInt16, motion: Type.UInt8 };
-export const PlayerInfoStruct: Struct = { ...PlayerStateStruct, name: Type.String, character: Type.UInt8 };
+export const PlayerInfoStruct: Struct = { ...PlayerStateStruct, name: Type.String, appearance: Type.UInt8 };
 export const ChatStruct: Struct = {
   id: Type.UInt32,
   playerId: Type.UInt16,
@@ -104,7 +105,7 @@ const Op = {
 export const SNAPSHOT_OPCODE = Op.snapshot;
 
 const Schemas: Record<number, Struct> = {
-  [Op.join]: { name: Type.String, character: Type.UInt8 },
+  [Op.join]: { name: Type.String, appearance: Type.UInt8 },
   [Op.chat]: { text: Type.String },
   [Op.move]: { x: Type.UInt16, y: Type.UInt16, motion: Type.UInt8 },
   [Op.welcome]: {
@@ -134,7 +135,7 @@ export interface WireState {
 
 export interface WireInfo extends WireState {
   name: string;
-  character: number;
+  appearance: number;
 }
 
 export function stateToWire(p: PlayerState): WireState {
@@ -146,19 +147,18 @@ export function stateFromWire(w: WireState): PlayerState {
 }
 
 export function infoToWire(p: PlayerInfo): WireInfo {
-  return { ...stateToWire(p), name: p.name, character: CHARACTER_IDS.indexOf(p.character) };
+  return { ...stateToWire(p), name: p.name, appearance: p.appearance };
 }
 
 export function infoFromWire(w: WireInfo): PlayerInfo {
-  const character = CHARACTER_IDS[w.character];
-  if (!character) throw new RangeError("Unknown character");
-  return { ...stateFromWire(w), name: w.name, character };
+  if (!isAppearanceId(w.appearance)) throw new RangeError("Unknown appearance");
+  return { ...stateFromWire(w), name: w.name, appearance: w.appearance };
 }
 
 export function encodeClientMessage(msg: ClientMessage): Uint8Array<ArrayBuffer> {
   switch (msg.t) {
     case "join":
-      return encode(Schemas[Op.join], { name: msg.name, character: CHARACTER_IDS.indexOf(msg.character) }, Op.join);
+      return encode(Schemas[Op.join], { name: msg.name, appearance: msg.appearance }, Op.join);
     case "chat":
       return encode(Schemas[Op.chat], msg, Op.chat);
     case "move":
@@ -176,9 +176,8 @@ export function decodeClientMessage(bytes: Uint8Array): ClientMessage | null {
     const op = bytes[0];
     switch (op) {
       case Op.join: {
-        const m = decode<{ name: string; character: number }>(Schemas[op], bytes, 1);
-        const character = CHARACTER_IDS[m.character];
-        return character ? { t: "join", name: m.name, character } : null;
+        const m = decode<{ name: string; appearance: number }>(Schemas[op], bytes, 1);
+        return isAppearanceId(m.appearance) ? { t: "join", name: m.name, appearance: m.appearance } : null;
       }
       case Op.chat:
         return { t: "chat", ...decode<{ text: string }>(Schemas[op], bytes, 1) };

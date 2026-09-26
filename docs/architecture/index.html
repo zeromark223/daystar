@@ -400,7 +400,7 @@
             <div class="eyebrow">System architecture — Fig. 01</div>
             <h1>Daystar</h1>
             <p class="lede">
-              A pixel-art meeting space you walk around in. Browsers ask one <strong>agent</strong> where to
+              A meeting space in orbit around a shared sun, where every person is a glowing star or planet. Browsers ask one <strong>agent</strong> where to
               play, then talk to a <strong>game server</strong> over a live connection; game servers mirror
               shared rooms to each other so people on different servers still see one another.
             </p>
@@ -433,8 +433,8 @@
             </div>
             <h2>Game Client</h2>
             <ul>
-              <li>Lobby: pick a name and an animal</li>
-              <li>Pixel map drawn with PixiJS (WebGL)</li>
+              <li>Lobby: pick a name, a kind of body and a color</li>
+              <li>Space, sun and glowing players drawn in code with PixiJS (no images)</li>
               <li><strong>Your own moves show instantly</strong>; the server double-checks them</li>
               <li>Other players are smoothed 100 ms behind so motion looks fluid</li>
               <li>Chat panel plus speech bubbles above heads</li>
@@ -497,8 +497,8 @@
             </div>
             <h2>Game Server</h2>
             <ul>
-              <li>Holds each room's players and the map's walls</li>
-              <li>Checks every move: not too fast, not into a wall</li>
+              <li>Holds each room's players and the world's limits</li>
+              <li>Checks every move: not too fast, not into the sun, not past the edge</li>
               <li>Sends each room an update <strong>20 times a second</strong>, only for players who moved</li>
               <li>One call reaches everyone in a room (Bun pub/sub)</li>
             </ul>
@@ -592,8 +592,8 @@
             <div class="eyebrow">Invariant 01</div>
             <h3>The server is the referee</h3>
             <p>
-              Your screen moves you right away, but every position is checked against walking speed and
-              walls. A move that does not add up is corrected back.
+              Your screen moves you right away, but every position is checked against speed and the
+              world's limits. A move that does not add up is corrected back.
             </p>
           </div>
           <div class="cell">

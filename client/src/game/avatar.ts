@@ -1,20 +1,29 @@
-import { AnimatedSprite, Container, Graphics, Text, type Spritesheet } from "pixi.js";
-import {
-  CHARACTERS,
-  animationName,
-  type AnimationState,
-  type CharacterId,
-  type Direction,
-} from "../../../shared/src/characters.ts";
+import { Container, Graphics, Sprite, Text } from "pixi.js";
+import { appearanceOf, type AppearanceId, type BodyKind } from "../../../shared/src/appearance.ts";
 import { TICK_RATE } from "../../../shared/src/constants.ts";
+import type { Direction } from "../../../shared/src/direction.ts";
 import type { PlayerInfo } from "../../../shared/src/protocol.ts";
+import { brightnessAt } from "../../../shared/src/space.ts";
+import { glowTexture } from "./textures.ts";
 
 const BUBBLE_MS = 6000;
-const BUBBLE_MAX_WIDTH = 200;
+const BUBBLE_MAX_WIDTH = 220;
 /** A gap longer than this between samples means the player was idle. */
 const SAMPLE_GAP_MS = 150;
 /** Remote players are drawn this far in the past so there are two samples to blend. */
 export const INTERPOLATION_DELAY_MS = 100;
+/** Trail: positions kept while moving, and how often one is recorded. */
+const TRAIL_POINTS = 14;
+const TRAIL_EVERY_MS = 45;
+/** Bodies never shrink below this share of their size when the camera zooms out. */
+const MIN_SCREEN_SCALE = 0.55;
+
+/** Size of each kind of body, in world pixels at zoom 1. */
+const SIZES: Record<BodyKind, { core: number; glow: number }> = {
+  star: { core: 7, glow: 170 },
+  planet: { core: 14, glow: 130 },
+  ringed: { core: 12, glow: 130 },
+};
 
 interface Sample {
   t: number;
@@ -24,54 +33,112 @@ interface Sample {
   moving: boolean;
 }
 
+function lighten(color: number, amount: number): number {
+  const r = (color >> 16) & 0xff;
+  const g = (color >> 8) & 0xff;
+  const b = color & 0xff;
+  const mix = (c: number) => Math.round(c + (255 - c) * amount);
+  return (mix(r) << 16) | (mix(g) << 8) | mix(b);
+}
+
+/** The body itself (without the glow), drawn around (0, 0). */
+function drawBody(kind: BodyKind, color: number): Graphics {
+  const g = new Graphics();
+  const r = SIZES[kind].core;
+  if (kind === "star") {
+    // A bright core with a four-pointed sparkle.
+    const spike = r * 3.2;
+    g.poly([0, -spike, r * 0.35, 0, 0, spike, -r * 0.35, 0]).fill({ color: lighten(color, 0.6), alpha: 0.9 });
+    g.poly([-spike, 0, 0, r * 0.35, spike, 0, 0, -r * 0.35]).fill({ color: lighten(color, 0.6), alpha: 0.9 });
+    g.circle(0, 0, r).fill({ color: lighten(color, 0.45) });
+    g.circle(0, 0, r * 0.55).fill({ color: 0xffffff });
+    return g;
+  }
+  // Planets: a disc with a shaded side and a small highlight.
+  if (kind === "ringed") {
+    g.ellipse(0, 0, r * 2.3, r * 0.75).stroke({ color: lighten(color, 0.35), width: 2.2, alpha: 0.85 });
+  }
+  g.circle(0, 0, r).fill({ color });
+  g.circle(r * 0.35, r * 0.3, r * 0.92).fill({ color: 0x000000, alpha: 0.28 });
+  g.circle(-r * 0.35, -r * 0.35, r * 0.35).fill({ color: 0xffffff, alpha: 0.35 });
+  if (kind === "ringed") {
+    // The front half of the ring passes over the planet.
+    const steps = 24;
+    g.moveTo(r * 2.3, 0);
+    for (let i = 1; i <= steps; i++) {
+      const a = (i / steps) * Math.PI;
+      g.lineTo(Math.cos(a) * r * 2.3, Math.sin(a) * r * 0.75);
+    }
+    g.stroke({ color: lighten(color, 0.35), width: 2.2, alpha: 0.85 });
+  }
+  return g;
+}
+
 /**
- * One player on the map: the animated body lives in the zoomed world layer,
- * the name tag and chat bubble live in the unscaled overlay so text stays crisp.
+ * One player: a glowing body (and its trail) in the world layer; the name tag
+ * and chat bubble live in the unscaled overlay so text stays crisp.
  */
 export class Avatar {
   readonly id: number;
   readonly name: string;
+  readonly appearance: AppearanceId;
   x: number;
   y: number;
   dir: Direction;
   moving: boolean;
 
-  private readonly sheet: Spritesheet;
-  readonly character: CharacterId;
-  private readonly body: AnimatedSprite;
+  private readonly isSelf: boolean;
+  private readonly color: number;
+  private readonly kind: BodyKind;
+  private readonly body = new Container();
+  private readonly core: Graphics;
+  private readonly trail = new Graphics();
+  private readonly trailPoints: { x: number; y: number }[] = [];
+  private lastTrailAt = 0;
+  /** Only for the local player: a faint marker once it has faded near the edge. */
+  private readonly marker: Graphics | null = null;
   private readonly tag = new Container();
   private readonly label: Text;
   private bubble: Container | null = null;
   private bubbleUntil = 0;
-  private readonly headHeight: number;
   private readonly samples: Sample[] = [];
 
-  constructor(info: PlayerInfo, sheet: Spritesheet, world: Container, overlay: Container, isSelf: boolean) {
+  constructor(info: PlayerInfo, trails: Container, bodies: Container, overlay: Container, isSelf: boolean) {
     this.id = info.id;
     this.name = info.name;
+    this.appearance = info.appearance;
     this.x = info.x;
     this.y = info.y;
     this.dir = info.dir;
     this.moving = info.moving;
-    this.sheet = sheet;
-    this.character = info.character;
+    this.isSelf = isSelf;
 
-    const def = CHARACTERS[info.character];
-    this.headHeight = (sheet.data.meta as unknown as { height: number }).height * def.scale;
+    const look = appearanceOf(info.appearance);
+    this.color = look.color;
+    this.kind = look.kind;
 
-    this.body = new AnimatedSprite(this.textures(this.state));
-    this.body.scale.set(def.scale);
-    this.body.animationSpeed = this.fps / 60;
-    this.body.play();
-    world.addChild(this.body);
+    const glow = new Sprite({ texture: glowTexture(), anchor: 0.5, blendMode: "add", tint: this.color });
+    glow.width = glow.height = SIZES[this.kind].glow;
+    this.core = drawBody(this.kind, this.color);
+    this.body.addChild(glow, this.core);
+    bodies.addChild(this.body);
+    if (isSelf) {
+      // Outside the body so it does not fade with it.
+      this.marker = new Graphics().circle(0, 0, 26).stroke({ color: 0xffffff, width: 1.5, alpha: 1 });
+      this.marker.alpha = 0;
+      bodies.addChild(this.marker);
+    }
+    this.trail.blendMode = "add";
+    trails.addChild(this.trail);
 
     this.label = new Text({
       text: info.name,
       style: {
-        fontFamily: "Pixelify Sans, system-ui, sans-serif",
-        fontSize: 14,
-        fill: isSelf ? 0xffe38a : 0xffffff,
-        stroke: { color: 0x2a1a10, width: 4, join: "round" },
+        fontFamily: "Space Grotesk, system-ui, sans-serif",
+        fontSize: 13,
+        fontWeight: "500",
+        fill: isSelf ? 0xffe9a8 : 0xe8ecff,
+        stroke: { color: 0x05060d, width: 4, join: "round" },
       },
     });
     this.label.anchor.set(0.5, 1);
@@ -79,30 +146,12 @@ export class Avatar {
     overlay.addChild(this.tag);
 
     this.pushSample(performance.now(), info);
-    this.render();
   }
 
-  private get state(): AnimationState {
-    return this.moving ? "run" : "idle";
-  }
-
-  private get fps(): number {
-    const def = CHARACTERS[this.character];
-    return this.moving ? def.runFps : def.idleFps;
-  }
-
-  private textures(state: AnimationState) {
-    return this.sheet.animations[animationName(state, this.dir)];
-  }
-
-  /** Update facing/animation; only swaps textures when something changed. */
+  /** Update facing and motion (drives the trail). */
   setMotion(dir: Direction, moving: boolean): void {
-    if (dir === this.dir && moving === this.moving) return;
     this.dir = dir;
     this.moving = moving;
-    this.body.textures = this.textures(this.state);
-    this.body.animationSpeed = this.fps / 60;
-    this.body.play();
   }
 
   pushSample(t: number, s: { x: number; y: number; dir: Direction; moving: boolean }): void {
@@ -141,45 +190,56 @@ export class Avatar {
     const content = new Text({
       text,
       style: {
-        fontFamily: "Pixelify Sans, system-ui, sans-serif",
-        fontSize: 14,
-        fill: 0x3b2a1e,
+        fontFamily: "Space Grotesk, system-ui, sans-serif",
+        fontSize: 13,
+        fill: 0x0d1024,
         wordWrap: true,
         wordWrapWidth: BUBBLE_MAX_WIDTH,
         breakWords: true,
       },
     });
-    const padX = 8;
-    const padY = 5;
+    const padX = 10;
+    const padY = 6;
     const w = content.width + padX * 2;
     const h = content.height + padY * 2;
     const bg = new Graphics()
-      .roundRect(-w / 2, -h - 6, w, h, 8)
-      .fill(0xfdf8ea)
-      .stroke({ color: 0x4c1e0a, width: 2 })
-      .poly([-5, -7, 5, -7, 0, 0])
-      .fill(0xfdf8ea);
-    content.position.set(-w / 2 + padX, -h - 6 + padY);
+      .roundRect(-w / 2, -h - 7, w, h, 10)
+      .fill({ color: 0xf1f3ff, alpha: 0.96 })
+      .poly([-5, -8, 5, -8, 0, 0])
+      .fill({ color: 0xf1f3ff, alpha: 0.96 });
+    content.position.set(-w / 2 + padX, -h - 7 + padY);
 
     this.bubble = new Container();
     this.bubble.addChild(bg, content);
-    this.bubble.y = -this.label.height - 2;
+    this.bubble.y = -this.label.height - 4;
     this.tag.addChild(this.bubble);
     this.bubbleUntil = performance.now() + BUBBLE_MS;
   }
 
-  /** Sync sprite and overlay with the current position; call once per frame after the camera moves. */
-  render(worldX = 0, worldY = 0, zoom = 1): void {
+  /** Sync the drawing with the current position; call once per frame after the camera moves. */
+  render(now: number, worldX: number, worldY: number, zoom: number): void {
+    const brightness = brightnessAt(this.x, this.y);
+    const scale = Math.max(1, MIN_SCREEN_SCALE / zoom);
     this.body.position.set(this.x, this.y);
-    this.body.zIndex = this.y;
-    this.tag.position.set(
-      Math.round(worldX + this.x * zoom),
-      Math.round(worldY + (this.y - this.headHeight) * zoom - 2),
-    );
-    this.tag.zIndex = this.y;
+    this.body.scale.set(scale);
+    this.body.alpha = brightness;
+    if (this.kind === "star") this.core.rotation = now * 0.0006;
+    if (this.marker) {
+      this.marker.position.set(this.x, this.y);
+      this.marker.scale.set(scale);
+      this.marker.alpha = Math.max(0, 0.55 - brightness) * 1.6;
+    }
+
+    this.renderTrail(now, brightness, scale);
+
+    const radius = SIZES[this.kind].core * 2.2 * scale * zoom;
+    this.tag.position.set(Math.round(worldX + this.x * zoom), Math.round(worldY + this.y * zoom - radius - 6));
+    // Faded players disappear from view, name and bubble included; you still see your own.
+    this.tag.alpha = this.isSelf ? Math.max(brightness, 0.6) : brightness;
+    this.tag.visible = this.tag.alpha > 0.02;
 
     if (this.bubble) {
-      const left = this.bubbleUntil - performance.now();
+      const left = this.bubbleUntil - now;
       if (left <= 0) {
         this.bubble.destroy({ children: true });
         this.bubble = null;
@@ -189,8 +249,39 @@ export class Avatar {
     }
   }
 
+  private renderTrail(now: number, brightness: number, scale: number): void {
+    const pts = this.trailPoints;
+    if (this.moving && now - this.lastTrailAt >= TRAIL_EVERY_MS) {
+      pts.push({ x: this.x, y: this.y });
+      if (pts.length > TRAIL_POINTS) pts.shift();
+      this.lastTrailAt = now;
+    } else if (!this.moving && pts.length > 0 && now - this.lastTrailAt >= TRAIL_EVERY_MS) {
+      pts.shift(); // let the trail shrink away once stopped
+      this.lastTrailAt = now;
+    }
+    this.trail.clear();
+    if (pts.length < 2 || brightness <= 0) return;
+    const width = SIZES[this.kind].core * 1.1 * scale;
+    for (let i = 1; i < pts.length; i++) {
+      const k = i / pts.length;
+      this.trail
+        .moveTo(pts[i - 1].x, pts[i - 1].y)
+        .lineTo(pts[i].x, pts[i].y)
+        .stroke({ color: this.color, width: width * k, alpha: 0.5 * k * brightness, cap: "round" });
+    }
+    const head = pts.at(-1)!;
+    this.trail.moveTo(head.x, head.y).lineTo(this.x, this.y).stroke({
+      color: this.color,
+      width,
+      alpha: 0.5 * brightness,
+      cap: "round",
+    });
+  }
+
   destroy(): void {
-    this.body.destroy();
+    this.body.destroy({ children: true });
+    this.marker?.destroy();
+    this.trail.destroy();
     this.tag.destroy({ children: true });
   }
 }

@@ -1,12 +1,22 @@
-export const MAP_WIDTH = 1200;
-export const MAP_HEIGHT = 1200;
+/**
+ * The world is a disc of WORLD_RADIUS around the sun at WORLD_CENTER, inside a
+ * WORLD_SIZE square of map coordinates (pixels at zoom 1).
+ */
+export const WORLD_SIZE = 10_000;
+export const WORLD_CENTER = { x: 5_000, y: 5_000 } as const;
+export const WORLD_RADIUS = 5_000;
+/** Players cannot get closer to the center than this (the sun). */
+export const SUN_RADIUS = 600;
+/** Beyond this share of WORLD_RADIUS players fade out, reaching invisible at the edge. */
+export const FADE_START = 0.8;
 
-/** Where new players appear (map pixel coords). */
-export const SPAWN_POINT = { x: 540, y: 600 };
-export const SPAWN_RADIUS = 48;
+/** Movement speed in map pixels per second, shared by everyone. */
+export const MOVE_SPEED = 400;
 
-/** Movement speed in map pixels per second, shared by every character. */
-export const MOVE_SPEED = 110;
+/** Newcomers appear this far from a random player already in the room... */
+export const SPAWN_NEAR = { min: 120, max: 320 } as const;
+/** ...or, in an empty room, on this ring around the sun. */
+export const SPAWN_RING = { min: 900, max: 1_600 } as const;
 
 /** Server snapshot rate and client position send rate. */
 export const TICK_RATE = 20;

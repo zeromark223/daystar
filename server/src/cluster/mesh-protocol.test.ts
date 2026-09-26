@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { decodeMesh, encodeMesh, type MeshMessage } from "./mesh-protocol.ts";
 
-const player = { id: 9, name: "Zed 🦌", character: "wolf_black" as const, x: 540.5, y: 600.25, dir: "west" as const, moving: true };
+const player = { id: 9, name: "Zed 🦌", appearance: 12, x: 540.5, y: 600.25, dir: "west" as const, moving: true };
 
 test("every mesh message round-trips", () => {
   const messages: MeshMessage[] = [

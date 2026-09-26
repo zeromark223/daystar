@@ -49,7 +49,7 @@ everything exactly like today. This is the in-code fallback besides the `master`
 > join or move and the system is considered down. Multiple agents behind a load
 > balancer are future work; code comments in the agent must say so.
 
-- Serves the built client, `GET /api/collision`, and the cluster APIs below.
+- Serves the built client and the cluster APIs below.
 - Accepts internal WebSocket connections from servers: registration, 1 s stats,
   room membership changes. Pushes the peer list and migration orders back.
 - Keeps, per room, which servers host it and how many players each has.
@@ -58,14 +58,12 @@ everything exactly like today. This is the in-code fallback besides the `master`
 
 ### Game server
 
-- Same room logic as today (collision, validation, 20 Hz delta snapshots, Bun topic
+- Same room logic as today (move validation, 20 Hz delta snapshots, Bun topic
   pub/sub for local fan-out), plus:
 - Registers with the agent on start: `{ serverId, publicUrl, meshUrl, capacity }`.
 - Verifies the ticket on every client connection.
 - Joins the mesh with every peer the agent lists, and syncs rooms that span servers.
 - Obeys migration orders from the agent.
-- Map editor (`PUT /api/collision`) is **disabled in cluster mode**; edit the map in
-  standalone mode and redeploy.
 
 ### Supervisor
 

@@ -4,10 +4,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Daystar</title>
-    <link rel="icon" href="/assets/characters/rabbit_white_portrait.png" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3CradialGradient id='g'%3E%3Cstop offset='0' stop-color='%23fff'/%3E%3Cstop offset='.35' stop-color='%23ffd166'/%3E%3Cstop offset='1' stop-color='%23ffd166' stop-opacity='0'/%3E%3C/radialGradient%3E%3C/defs%3E%3Ccircle cx='16' cy='16' r='16' fill='url(%23g)'/%3E%3C/svg%3E"
+    />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Pixelify+Sans:wght@400;600&display=swap" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
   </head>
   <body>
     <div id="stage"></div>
@@ -15,12 +18,14 @@
     <section id="lobby" class="lobby">
       <div class="card">
         <h1>Daystar</h1>
+        <p class="tagline">Meet in orbit around a shared sun.</p>
         <p class="room-line">Room <code id="lobby-room"></code></p>
         <form id="join-form">
           <label for="name-input">Your name</label>
           <input id="name-input" maxlength="20" autocomplete="nickname" placeholder="e.g. Mochi" required />
-          <span class="label">Pick a character</span>
-          <div id="character-grid" class="character-grid" role="radiogroup" aria-label="Character"></div>
+          <span class="label">Choose your light</span>
+          <div id="kind-grid" class="kind-grid" role="radiogroup" aria-label="Kind of body"></div>
+          <div id="color-grid" class="color-grid" role="radiogroup" aria-label="Color"></div>
           <button type="submit" id="join-button">Join meeting</button>
           <p id="join-error" class="error" role="alert"></p>
         </form>
@@ -39,7 +44,7 @@
           <input id="chat-input" maxlength="280" autocomplete="off" placeholder="Press Enter to chat" />
         </form>
       </aside>
-      <p class="hint">WASD / arrow keys or tap to move · Enter to chat · Esc to stop typing</p>
+      <p class="hint">WASD / arrows or tap to move · wheel or +/− to zoom · Enter to chat · Esc to stop typing</p>
     </section>
 
     <section id="disconnected" class="lobby" hidden>

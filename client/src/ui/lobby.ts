@@ -1,13 +1,17 @@
-import { CHARACTERS, CHARACTER_IDS, type CharacterId } from "../../../shared/src/characters.ts";
+import {
+  appearanceId,
+  appearanceOf,
+  BODY_KINDS,
+  BODY_LABELS,
+  DEFAULT_APPEARANCE,
+  isAppearanceId,
+  PALETTE,
+  type AppearanceId,
+  type BodyKind,
+} from "../../../shared/src/appearance.ts";
 
 const NAME_KEY = "daystar:name";
-const CHARACTER_KEY = "daystar:character";
-
-interface SheetData {
-  animations: Record<string, string[]>;
-  frames: Record<string, { frame: { w: number; h: number } }>;
-  meta: { size: { w: number; h: number } };
-}
+const APPEARANCE_KEY = "daystar:appearance";
 
 function load(key: string): string | null {
   try {
@@ -25,41 +29,77 @@ function save(key: string, value: string): void {
   }
 }
 
-/** Animated CSS preview of a character's south-facing idle (run on hover). */
-async function buildPreview(id: CharacterId): Promise<HTMLElement> {
-  const data: SheetData = await fetch(`/assets/characters/${id}.json`).then((r) => r.json());
-  const scale = CHARACTERS[id].scale;
-  const first = data.frames[data.animations.idle_south[0]].frame;
-  const w = first.w * scale;
-  const h = first.h * scale;
+function hex(color: number): string {
+  return `#${color.toString(16).padStart(6, "0")}`;
+}
 
-  const box = document.createElement("div");
-  box.className = "sprite-preview";
-  const sprite = document.createElement("div");
-  sprite.style.width = `${w}px`;
-  sprite.style.height = `${h}px`;
-  sprite.style.backgroundImage = `url(/assets/characters/${id}.png)`;
-  sprite.style.backgroundSize = `${data.meta.size.w * scale}px ${data.meta.size.h * scale}px`;
-  sprite.style.setProperty("--frame-w", String(w));
-
-  // Sheet rows: idle south, west, east, north, then run in the same order.
-  const show = (anim: "idle_south" | "run_south", row: number, fps: number) => {
-    const frames = data.animations[anim].length;
-    sprite.style.backgroundPositionY = `${-row * h}px`;
-    sprite.style.setProperty("--frames", String(frames));
-    sprite.style.setProperty("--duration", `${frames / fps}s`);
-  };
-  show("idle_south", 0, CHARACTERS[id].idleFps);
-  box.addEventListener("pointerenter", () => show("run_south", 4, CHARACTERS[id].runFps));
-  box.addEventListener("pointerleave", () => show("idle_south", 0, CHARACTERS[id].idleFps));
-
-  box.appendChild(sprite);
-  return box;
+/** A small canvas drawing of a body, matching the in-game look closely enough. */
+function drawPreview(canvas: HTMLCanvasElement, kind: BodyKind, color: number): void {
+  const size = 96;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = canvas.height = size * dpr;
+  canvas.style.width = canvas.style.height = `${size}px`;
+  const ctx = canvas.getContext("2d")!;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, size, size);
+  const c = size / 2;
+  const glow = ctx.createRadialGradient(c, c, 0, c, c, c);
+  glow.addColorStop(0, hex(color));
+  glow.addColorStop(0.3, `${hex(color)}66`);
+  glow.addColorStop(1, `${hex(color)}00`);
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, size, size);
+  if (kind === "star") {
+    ctx.fillStyle = "#ffffffdd";
+    ctx.beginPath();
+    ctx.moveTo(c, c - 26);
+    ctx.lineTo(c + 3, c);
+    ctx.lineTo(c, c + 26);
+    ctx.lineTo(c - 3, c);
+    ctx.closePath();
+    ctx.moveTo(c - 26, c);
+    ctx.lineTo(c, c + 3);
+    ctx.lineTo(c + 26, c);
+    ctx.lineTo(c, c - 3);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath();
+    ctx.arc(c, c, 6, 0, Math.PI * 2);
+    ctx.fill();
+    return;
+  }
+  const r = kind === "planet" ? 15 : 13;
+  if (kind === "ringed") {
+    ctx.strokeStyle = "#ffffffaa";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.ellipse(c, c, r * 2.3, r * 0.75, 0, Math.PI, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.fillStyle = hex(color);
+  ctx.beginPath();
+  ctx.arc(c, c, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#00000047";
+  ctx.beginPath();
+  ctx.arc(c + r * 0.35, c + r * 0.3, r * 0.92, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#ffffff5a";
+  ctx.beginPath();
+  ctx.arc(c - r * 0.35, c - r * 0.35, r * 0.35, 0, Math.PI * 2);
+  ctx.fill();
+  if (kind === "ringed") {
+    ctx.strokeStyle = "#ffffffaa";
+    ctx.beginPath();
+    ctx.ellipse(c, c, r * 2.3, r * 0.75, 0, 0, Math.PI);
+    ctx.stroke();
+  }
 }
 
 export interface LobbyChoice {
   name: string;
-  character: CharacterId;
+  appearance: AppearanceId;
 }
 
 /**
@@ -70,31 +110,57 @@ export async function runLobby(roomId: string, join: (choice: LobbyChoice) => Pr
   const lobby = document.getElementById("lobby")!;
   const form = document.getElementById("join-form") as HTMLFormElement;
   const nameInput = document.getElementById("name-input") as HTMLInputElement;
-  const grid = document.getElementById("character-grid")!;
+  const kindGrid = document.getElementById("kind-grid")!;
+  const colorGrid = document.getElementById("color-grid")!;
   const button = document.getElementById("join-button") as HTMLButtonElement;
   const error = document.getElementById("join-error")!;
 
   document.getElementById("lobby-room")!.textContent = roomId;
   nameInput.value = load(NAME_KEY) ?? "";
 
-  const stored = load(CHARACTER_KEY);
-  let selected: CharacterId = CHARACTER_IDS.find((id) => id === stored) ?? "rabbit_white";
+  const stored = Number(load(APPEARANCE_KEY));
+  let { kind, colorIndex } = appearanceOf(isAppearanceId(stored) ? stored : DEFAULT_APPEARANCE);
 
-  const previews = await Promise.all(CHARACTER_IDS.map(buildPreview));
-  const buttons = CHARACTER_IDS.map((id, i) => {
+  const kindButtons = BODY_KINDS.map((k) => {
     const b = document.createElement("button");
     b.type = "button";
-    b.className = "character";
+    b.className = "kind";
     b.setAttribute("role", "radio");
-    b.append(previews[i], CHARACTERS[id].label);
+    const canvas = document.createElement("canvas");
+    b.append(canvas, BODY_LABELS[k]);
     b.addEventListener("click", () => {
-      selected = id;
-      buttons.forEach((other, j) => other.setAttribute("aria-checked", String(CHARACTER_IDS[j] === id)));
+      kind = k;
+      refresh();
     });
-    b.setAttribute("aria-checked", String(id === selected));
+    return { kind: k, button: b, canvas };
+  });
+  kindGrid.replaceChildren(...kindButtons.map((k) => k.button));
+
+  const swatches = PALETTE.map((p, i) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "swatch";
+    b.setAttribute("role", "radio");
+    b.setAttribute("aria-label", p.name);
+    b.title = p.name;
+    b.style.setProperty("--swatch", hex(p.color));
+    b.addEventListener("click", () => {
+      colorIndex = i;
+      refresh();
+    });
     return b;
   });
-  grid.replaceChildren(...buttons);
+  colorGrid.replaceChildren(...swatches);
+
+  function refresh(): void {
+    const color = PALETTE[colorIndex].color;
+    for (const k of kindButtons) {
+      k.button.setAttribute("aria-checked", String(k.kind === kind));
+      drawPreview(k.canvas, k.kind, color);
+    }
+    swatches.forEach((s, i) => s.setAttribute("aria-checked", String(i === colorIndex)));
+  }
+  refresh();
   nameInput.focus();
 
   return new Promise((resolve) => {
@@ -102,12 +168,13 @@ export async function runLobby(roomId: string, join: (choice: LobbyChoice) => Pr
       e.preventDefault();
       const name = nameInput.value.trim();
       if (!name) return;
+      const appearance = appearanceId(kind, colorIndex);
       save(NAME_KEY, name);
-      save(CHARACTER_KEY, selected);
+      save(APPEARANCE_KEY, String(appearance));
       button.disabled = true;
       error.textContent = "";
       try {
-        await join({ name, character: selected });
+        await join({ name, appearance });
         lobby.hidden = true;
         resolve();
       } catch (err) {

@@ -1,17 +1,14 @@
-import { readFileSync } from "node:fs";
-import { rename, writeFile } from "node:fs/promises";
-import { CollisionMap } from "../../shared/src/collision.ts";
 import { ROOM_ID_PATTERN, WS_PATH } from "../../shared/src/constants.ts";
 import type { PlayerInfo } from "../../shared/src/protocol.ts";
 import { readServerClusterConfig } from "./cluster/config.ts";
-import { readJoinRequest, readLimited, rejectWithoutHealthToken } from "./http.ts";
-import { CLIENT_DIR, COLLISION_FILE } from "./paths.ts";
+import { readJoinRequest, rejectWithoutHealthToken } from "./http.ts";
+import { CLIENT_DIR } from "./paths.ts";
 import { Room, type Peer, type PeerEvents, type Publish, type RoomSync } from "./room.ts";
 import { StatsSampler } from "./stats.ts";
 import { createStaticHandler } from "./static.ts";
 
 /**
- * Game server core: rooms, collision map and HTTP routes as a fetch-style
+ * Game server core: rooms and HTTP routes as a fetch-style
  * handler; main.ts wires it to Bun.serve and Bun's WebSockets. Runs standalone,
  * or as one server of a cluster when CLUSTER_SECRET is set (docs/cluster.md).
  */
@@ -25,13 +22,6 @@ export const IDLE_TIMEOUT_SEC = 60;
 
 export const cluster = readServerClusterConfig();
 
-const MAX_COLLISION_BYTES = 256 * 1024;
-// Saving collision edits (?edit in the client) rewrites a source file, so it is dev-only
-// by default, and never in cluster mode (other servers would keep the old map).
-const MAP_EDITOR =
-  !cluster && (process.env.MAP_EDITOR ? process.env.MAP_EDITOR === "1" : process.env.NODE_ENV !== "production");
-
-const collision = CollisionMap.parse(readFileSync(COLLISION_FILE, "utf8"));
 const rooms = new Map<string, Room>();
 const serveStatic = createStaticHandler(CLIENT_DIR);
 let sockets = 0;
@@ -49,7 +39,7 @@ export const stats = new StatsSampler(
 export const startupMessage = () =>
   cluster
     ? `daystar server ${cluster.server} on http://${HOST}:${PORT} (${stats.report().runtime}, cluster, public ${cluster.publicUrl})`
-    : `daystar on http://${HOST}:${PORT} (${stats.report().runtime}, standalone, map editor ${MAP_EDITOR ? "on" : "off"})`;
+    : `daystar on http://${HOST}:${PORT} (${stats.report().runtime}, standalone)`;
 
 /**
  * Runtimes with native pub/sub (Bun) register how to publish to a room's
@@ -101,7 +91,6 @@ export function connect(roomId: string, peer: Peer, playerId?: number, resume?: 
   let room = rooms.get(roomId);
   if (!room) {
     room = new Room(roomId, {
-      map: collision,
       onEmpty: () => {
         rooms.delete(roomId);
         clusterRooms?.roomClosed(roomId);
@@ -150,8 +139,6 @@ export async function handleHttp(req: Request): Promise<Response> {
       }
       case "/api/join":
         return await handleJoin(req);
-      case "/api/collision":
-        return await handleCollision(req);
       case WS_PATH:
         return new Response("WebSocket upgrade required", { status: 426 });
       default:
@@ -173,29 +160,4 @@ async function handleJoin(req: Request): Promise<Response> {
   const room = await readJoinRequest(req, ROOM_ID_PATTERN);
   if (!room) return new Response("Invalid room", { status: 400 });
   return Response.json({ serverId: 0, wsUrl: `${WS_PATH}?room=${room}` });
-}
-
-async function handleCollision(req: Request): Promise<Response> {
-  if (req.method === "GET") {
-    return new Response(collision.serialize(), {
-      headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-cache" },
-    });
-  }
-  if (req.method !== "PUT") return new Response(null, { status: 405, headers: { allow: "GET, PUT" } });
-  if (!MAP_EDITOR) return new Response("Map editing is disabled on this server.", { status: 403 });
-
-  const body = await readLimited(req, MAX_COLLISION_BYTES);
-  if (body === null) return new Response(null, { status: 413 });
-  let edited: CollisionMap;
-  try {
-    edited = CollisionMap.parse(body);
-    collision.copyFrom(edited);
-  } catch (err) {
-    return new Response((err as Error).message, { status: 400 });
-  }
-  const tmp = `${COLLISION_FILE}.tmp`;
-  await writeFile(tmp, edited.serialize());
-  await rename(tmp, COLLISION_FILE);
-  console.log(`collision map saved to ${COLLISION_FILE}`);
-  return new Response(null, { status: 204 });
 }

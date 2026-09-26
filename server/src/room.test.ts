@@ -1,7 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { CollisionMap } from "../../shared/src/collision.ts";
 import {
   decodeServerMessage,
   encodeClientMessage,
@@ -10,9 +8,6 @@ import {
 } from "../../shared/src/protocol.ts";
 import { Room, type PeerEvents } from "./room.ts";
 
-const map = CollisionMap.parse(
-  readFileSync(new URL("../../client/public/assets/collision.txt", import.meta.url), "utf8"),
-);
 
 /** Stand-in peer: records what the room sends and feeds it client messages. */
 class FakeSocket {
@@ -53,13 +48,13 @@ function fakeTopic() {
 }
 
 function setup(topic?: ReturnType<typeof fakeTopic>) {
-  const room = new Room("test", { map, onEmpty: () => {}, publish: topic?.publish ?? null });
+  const room = new Room("test", { onEmpty: () => {}, publish: topic?.publish ?? null });
   const tick = () => (room as unknown as { tick(): void }).tick();
   const sockets = ["Ann", "Ben", "Cat"].map((name) => {
     const s = new FakeSocket();
     topic?.sockets.push(s);
     s.events = room.accept(s);
-    s.deliver({ t: "join", name, character: "rabbit_white" });
+    s.deliver({ t: "join", name, appearance: 0 });
     return s;
   });
   const welcome = sockets[0].received.find((m) => m.t === "welcome")!;
@@ -124,7 +119,7 @@ test("with publish, a newcomer gets welcome but not its own join", () => {
   const late = new FakeSocket();
   topic.sockets.push(late);
   late.events = room.accept(late);
-  late.deliver({ t: "join", name: "Dan", character: "deer" });
+  late.deliver({ t: "join", name: "Dan", appearance: 9 });
   assert.deepEqual(
     late.take().map((m) => m.t),
     ["welcome"],
@@ -141,7 +136,6 @@ const byNumber = (a: number, b: number) => a - b;
 function syncedRoom() {
   const sent = { joined: [] as number[], left: [] as number[], moves: [] as number[][], chat: [] as string[] };
   const room = new Room("sync", {
-    map,
     onEmpty: () => {},
     sync: {
       joined: (p) => sent.joined.push(p.id),
@@ -153,20 +147,20 @@ function syncedRoom() {
   const tick = () => (room as unknown as { tick(): void }).tick();
   const local = new FakeSocket();
   local.events = room.accept(local, 7);
-  local.deliver({ t: "join", name: "Ann", character: "rabbit_white" });
+  local.deliver({ t: "join", name: "Ann", appearance: 0 });
   const welcome = local.take().find((m) => m.t === "welcome")!;
   const self = welcome.t === "welcome" ? welcome.players.find((p) => p.id === 7)! : null!;
   return { room, tick, local, self, sent };
 }
 
-const remoteInfo = { id: 42, name: "Zed", character: "deer" as const, x: 540, y: 600, dir: "south" as const, moving: false };
+const remoteInfo = { id: 42, name: "Zed", appearance: 9, x: 6200, y: 5000, dir: "south" as const, moving: false };
 
 test("local joins, moves, chat and leaves are mirrored; remote ones are not echoed", () => {
   const { room, tick, local, self, sent } = syncedRoom();
   assert.deepEqual(sent.joined, [7]);
   room.remoteJoined(2, remoteInfo);
   local.deliver({ t: "move", x: self.x + 1, y: self.y, dir: "east", moving: true });
-  room.remoteMoves(2, [{ id: 42, x: 541, y: 600, dir: "east", moving: true }]);
+  room.remoteMoves(2, [{ id: 42, x: 6201, y: 5000, dir: "east", moving: true }]);
   tick();
   // Both changes reach our client, but only our own player is mirrored.
   const snap = local.take().filter((m) => m.t === "snapshot").at(-1);
@@ -188,7 +182,7 @@ test("remote players appear, move, leave, and vanish with their server", () => {
     ["player_joined", "player_joined"],
   );
   // Only the owning server can move or remove a replica.
-  room.remoteMoves(3, [{ id: 42, x: 900, y: 900, dir: "north", moving: true }]);
+  room.remoteMoves(3, [{ id: 42, x: 6400, y: 5000, dir: "north", moving: true }]);
   room.remoteLeft(3, 42);
   tick();
   assert.deepEqual(local.take(), []);
@@ -206,7 +200,7 @@ test("a newcomer's welcome lists replicas, and full state for a peer lists only 
   room.remoteJoined(2, remoteInfo);
   const late = new FakeSocket();
   late.events = room.accept(late, 8);
-  late.deliver({ t: "join", name: "Bo", character: "deer" });
+  late.deliver({ t: "join", name: "Bo", appearance: 9 });
   const welcome = late.take().find((m) => m.t === "welcome");
   assert.deepEqual(welcome?.t === "welcome" && welcome.players.map((p) => p.id).sort(byNumber), [7, 8, 42]);
   assert.deepEqual(room.localState().map((p) => p.id).sort(byNumber), [7, 8]);
@@ -250,7 +244,7 @@ test("handOff turns a local player into a replica silently; its old socket is ig
   leaving.close();
   assert.deepEqual(other.take(), []);
   // Moves now come from the new owner.
-  room.remoteMoves(2, [{ id: self.id, x: 600, y: 600, dir: "west", moving: true }]);
+  room.remoteMoves(2, [{ id: self.id, x: 6000, y: 6000, dir: "west", moving: true }]);
   tick();
   assert.ok(other.take().some((m) => m.t === "snapshot"));
   assert.equal(room.handOff(self.id, 3), null);
@@ -262,14 +256,14 @@ test("a migrating player joins where it was, without a second join announcement"
   room.remoteJoined(2, remoteInfo);
   for (const s of sockets) s.take(); // the replica's own (legitimate) join
   const moved = new FakeSocket();
-  const resume = Promise.resolve({ ...remoteInfo, x: 560, y: 610, dir: "west" as const });
+  const resume = Promise.resolve({ ...remoteInfo, x: 6300, y: 5100, dir: "west" as const });
   moved.events = room.accept(moved, 42, resume);
-  moved.deliver({ t: "join", name: "Zed", character: "deer" });
+  moved.deliver({ t: "join", name: "Zed", appearance: 9 });
   await resume;
   await Promise.resolve();
   const welcome = moved.take().find((m) => m.t === "welcome");
   const me = welcome?.t === "welcome" ? welcome.players.find((p) => p.id === 42) : undefined;
-  assert.deepEqual(me && [me.x, me.y, me.dir], [560, 610, "west"]);
+  assert.deepEqual(me && [me.x, me.y, me.dir], [6300, 5100, "west"]);
   for (const s of sockets) assert.ok(!s.take().some((m) => m.t === "player_joined"));
   assert.equal(room.playerCount, 4);
   moved.close();
