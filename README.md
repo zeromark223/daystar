@@ -62,6 +62,18 @@ tools/          asset pipeline scripts (Python + Pillow)
 
 ## Assets
 
+> **Art is not included yet.** The project is under development and its artwork
+> (character sprites and the map) will be replaced soon; until then images are kept out
+> of the repository. To run it, provide your own:
+>
+> - character frames at `assets/animal/<Animal>/<idle|walk|run>/<south|west|east|north>/00.png`
+>   (folder names are mapped to characters in `tools/build_sprites.py`), then run
+>   `bun run assets` to build `client/public/assets/characters/*.png`;
+> - a 1200×1200 map image at `assets/Scene Overview.png` (`bun run assets` copies it to
+>   `client/public/assets/map.png`).
+>
+> The spritesheet metadata (`*.json`) and the collision grid are in the repository.
+
 - `python3 tools/build_sprites.py` packs `assets/animal/<Animal>/<anim>/<dir>/*.png`
   into one Pixi spritesheet per character with `idle_<dir>` and `run_<dir>`
   animations. Only the deer has a real run cycle; the others reuse walk played faster.

@@ -3,3 +3,7 @@ client/dist
 *.log
 .DS_Store
 .loadtest-last.json
+
+# Artwork is not distributed yet (see README "Assets")
+assets/
+client/public/assets/**/*.png
