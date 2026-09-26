@@ -107,7 +107,11 @@ npm run loadtest -- --last               # same options again
 npm run loadtest -- --last --hold 60     # same, with one option changed
 ```
 
-`--runtime bun|deno` runs the spawned local server on another runtime to compare them.
+`--runtime bun|deno` runs the spawned local server on another runtime to compare them;
+a spawned Bun server logs GC (`BUN_JSC_logGC`) so the `gc/s` and `gc max ms` columns are
+filled (Node reports GC in-process). `--bot-runtime bun` runs the bots on Bun, whose
+native WebSocket client drives several times more bots per machine. `tick p99` is the
+time a room tick spends encoding and sending its snapshot (the budget at 20 Hz is 50 ms).
 
 `--last` reads `.loadtest-last.json` (git-ignored; it stores the token in plain text).
 

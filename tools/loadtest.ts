@@ -8,7 +8,8 @@
  *
  * Run with --help for the options (USAGE below).
  */
-import { fork, spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
+import { createInterface } from "node:readline";
 import { readFileSync, writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { resolve } from "node:path";
@@ -262,7 +263,8 @@ function runWorker(): void {
       chat: chat.entries(),
       move: move.entries(),
     };
-    process.send!(report);
+    // Workers talk to the orchestrator in JSON lines over stdio (works for Node and Bun workers).
+    process.stdout.write(JSON.stringify(report) + "\n");
     gaps = new Histogram();
     chat = new Histogram();
     move = new Histogram();
@@ -270,7 +272,8 @@ function runWorker(): void {
   }, 1000);
 
   type Command = { cmd: "config"; url: string; chatEveryMs: number; movingRatio: number } | { cmd: "add"; room: string };
-  process.on("message", (msg: Command) => {
+  createInterface({ input: process.stdin }).on("line", (line) => {
+    const msg = JSON.parse(line) as Command;
     if (msg.cmd === "config") {
       url = msg.url;
       chatEveryMs = msg.chatEveryMs;
@@ -292,6 +295,10 @@ interface StatsSample {
   /** null on runtimes that do not report it (Bun, Deno). */
   elu: number | null;
   loopP99Ms: number;
+  tickP99Ms?: number;
+  /** In-process GC stats (Node); null elsewhere. */
+  gcCount?: number | null;
+  gcMaxMs?: number | null;
   rssMb: number;
 }
 
@@ -315,7 +322,10 @@ const USAGE = `Usage: npm run loadtest -- [options]
   --target <url>       test a running server instead of spawning one,
                        e.g. https://meet.example.com
   --health-token <s>   token for the server's /api/health, if it sets HEALTH_TOKEN
-  --runtime <name>     runtime for the spawned server: node, bun or deno (default node)
+  --runtime <name>     runtime for the spawned server: node, bun or deno (default node);
+                       a spawned Bun server logs GC (BUN_JSC_logGC) for the gc columns
+  --bot-runtime <name> runtime for the bot workers: node or bun (default node);
+                       Bun's native WebSocket client lets one machine drive more bots
   --port <n>           port for the spawned server               (default 3300)
   --room-prefix <s>    rooms are <prefix>-all or <prefix>-0, -1, ... (default load)
   --keep-going         continue ramping after a failed step
@@ -336,6 +346,7 @@ interface Options {
   movingRatio: number;
   port: number;
   runtime: "node" | "bun" | "deno";
+  botRuntime: "node" | "bun";
   roomPrefix: string;
   keepGoing: boolean;
   healthToken: string;
@@ -354,6 +365,7 @@ const OPTION_NAMES = [
   "target",
   "health-token",
   "runtime",
+  "bot-runtime",
   "port",
   "room-prefix",
   "keep-going",
@@ -416,6 +428,7 @@ function parseOptions(): Options {
         "health-token": { type: "string", default: "" },
         port: { type: "string", default: "3300" },
         runtime: { type: "string", default: "node" },
+        "bot-runtime": { type: "string", default: "node" },
         "room-prefix": { type: "string", default: "load" },
         "keep-going": { type: "boolean", default: false },
         help: { type: "boolean", short: "h", default: false },
@@ -450,6 +463,8 @@ function parseOptions(): Options {
   if (!ROOM_ID_PATTERN.test(`${values["room-prefix"]}-all`)) fail("--room-prefix may only use a-z, 0-9 and -");
   const runtime = values.runtime;
   if (runtime !== "node" && runtime !== "bun" && runtime !== "deno") fail(`--runtime must be node, bun or deno, got "${runtime}"`);
+  const botRuntime = values["bot-runtime"];
+  if (botRuntime !== "node" && botRuntime !== "bun") fail(`--bot-runtime must be node or bun, got "${botRuntime}"`);
   if (values.target !== undefined && given.has("runtime")) fail("--runtime only applies to the spawned server, not --target");
 
   const options: Options = {
@@ -462,6 +477,7 @@ function parseOptions(): Options {
     movingRatio: ratio("moving", values.moving),
     port: int("port", values.port, 1),
     runtime,
+    botRuntime,
     roomPrefix: values["room-prefix"],
     keepGoing: values["keep-going"],
     healthToken: values["health-token"],
@@ -531,6 +547,19 @@ class HealthClient {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** Send a command line to a worker's stdin. */
+function tell(worker: ChildProcess, msg: object): void {
+  worker.stdin!.write(JSON.stringify(msg) + "\n");
+}
+
+const BUN = ["npx", "-y", "bun@1.4.2"];
+
+/** How to run bot workers (loadtest.ts --worker) per runtime. */
+const BOT_COMMANDS: Record<Options["botRuntime"], string[]> = {
+  node: [process.execPath],
+  bun: [...BUN, "run"],
+};
+
 /**
  * How to start the local server per runtime. Bun and Deno are fetched by npx on
  * first use (pinned, same versions as Dockerfile.bun / Dockerfile.deno); they are
@@ -538,7 +567,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  */
 const SERVER_COMMANDS: Record<Options["runtime"], string[]> = {
   node: [process.execPath, "server/src/index.ts"],
-  bun: ["npx", "-y", "bun@1.4.2", "run", "server/src/bun.ts"],
+  bun: [...BUN, "run", "server/src/bun.ts"],
   deno: [
     "npx",
     "-y",
@@ -560,6 +589,8 @@ async function runOrchestrator(): Promise<void> {
 
   // Either spawn a local server or use the remote one; both report through /api/health.
   let server: ChildProcess | null = null;
+  /** GC pauses parsed from a spawned Bun server's BUN_JSC_logGC output. */
+  const gcEvents: { t: number; pauseMs: number; full: boolean }[] = [];
   let wsUrl: string;
   let httpUrl: string;
   if (opts.target) {
@@ -569,8 +600,21 @@ async function runOrchestrator(): Promise<void> {
     httpUrl = `http://127.0.0.1:${opts.port}`;
     server = spawn(SERVER_COMMANDS[opts.runtime][0], SERVER_COMMANDS[opts.runtime].slice(1), {
       cwd: ROOT,
-      env: { ...process.env, PORT: String(opts.port), HOST: "0.0.0.0", HEALTH_TOKEN: opts.healthToken, NODE_ENV: "production" },
-      stdio: ["ignore", "ignore", "inherit"],
+      env: {
+        ...process.env,
+        PORT: String(opts.port),
+        HOST: "0.0.0.0",
+        HEALTH_TOKEN: opts.healthToken,
+        NODE_ENV: "production",
+        // JavaScriptCore prints one line per collection with its pause ("p=<ms>").
+        ...(opts.runtime === "bun" ? { BUN_JSC_logGC: "1" } : {}),
+      },
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    createInterface({ input: server.stderr! }).on("line", (line) => {
+      const gc = line.match(/=> (Eden|Full)Collection.*\bp=([\d.]+)ms/);
+      if (gc) gcEvents.push({ t: Date.now(), pauseMs: Number(gc[2]), full: gc[1] === "Full" });
+      else if (!/^(\[GC<|GC END!|Requesting GC)/.test(line)) process.stderr.write(line + "\n");
     });
   }
   const health = new HealthClient(httpUrl, opts.healthToken);
@@ -590,26 +634,29 @@ async function runOrchestrator(): Promise<void> {
   let window: WorkerReport[] = [];
   const connected = new Map<ChildProcess, number>();
   for (let i = 0; i < workerCount; i++) {
-    const w = fork(import.meta.filename, ["--worker"], { stdio: "inherit" });
-    w.send({ cmd: "config", url: wsUrl, chatEveryMs, movingRatio: opts.movingRatio });
-    w.on("message", (r: WorkerReport) => {
+    const [cmd, ...args] = BOT_COMMANDS[opts.botRuntime];
+    const w = spawn(cmd, [...args, import.meta.filename, "--worker"], { stdio: ["pipe", "pipe", "inherit"] });
+    createInterface({ input: w.stdout! }).on("line", (line) => {
+      if (!line.startsWith("{")) return;
+      const r = JSON.parse(line) as WorkerReport;
       window.push(r);
       connected.set(w, r.connected);
     });
     workers.push(w);
+    tell(w, { cmd: "config", url: wsUrl, chatEveryMs, movingRatio: opts.movingRatio });
   }
 
   const roomFor = (i: number) => (roomSize > 0 ? `${roomPrefix}-${Math.floor(i / roomSize)}` : `${roomPrefix}-all`);
   let total = 0;
   console.log(
-    "bots | rooms | srv players | srv CPU | ELU  | loop p99 | RSS MB | move p50/p99 ms | snap gap p50/p99/max ms | chat p50/p99 ms | in MB/s | corr | drops | verdict",
+    "bots | rooms | srv players | srv CPU | ELU  | loop p99 | tick p99 | gc/s | gc max ms | RSS MB | move p50/p99 ms | snap gap p50/p99/max ms | chat p50/p99 ms | in MB/s | corr | drops | verdict",
   );
 
   for (const target of steps) {
     // Ramp up at a fixed connection rate.
     while (total < target) {
       const batch = Math.min(target - total, Math.max(1, Math.round(ramp / 10)));
-      for (let i = 0; i < batch; i++, total++) workers[total % workerCount].send({ cmd: "add", room: roomFor(total) });
+      for (let i = 0; i < batch; i++, total++) tell(workers[total % workerCount], { cmd: "add", room: roomFor(total) });
       await sleep(100);
     }
     await sleep((hold / 2) * 1000);
@@ -625,7 +672,8 @@ async function runOrchestrator(): Promise<void> {
     }
     const t0 = Date.now();
     await sleep((hold / 2) * 1000);
-    const elapsed = (Date.now() - t0) / 1000;
+    const t1 = Date.now();
+    const elapsed = (t1 - t0) / 1000;
     let samples: StatsSample[] = [];
     let latest: StatsSample | null = null;
     if (serverFrom !== null) {
@@ -661,6 +709,22 @@ async function runOrchestrator(): Promise<void> {
     const cpu = have ? mean("cpu") : NaN;
     const elu = have && samples.every((s) => s.elu !== null) ? mean("elu") : NaN;
     const loopP99 = have ? Math.max(...samples.map((s) => s.loopP99Ms)) : NaN;
+    const tickP99 = have && samples[0].tickP99Ms !== undefined ? Math.max(...samples.map((s) => s.tickP99Ms ?? 0)) : NaN;
+    // GC: Bun's log when we spawned it, otherwise the server's own numbers (Node).
+    const gcWindow = gcEvents.filter((e) => e.t >= t0 && e.t <= t1);
+    const gcFromServer = have && samples.every((s) => s.gcCount != null);
+    const gcPerSec = gcWindow.length
+      ? gcWindow.length / elapsed
+      : gcFromServer
+        ? samples.reduce((a, s) => a + (s.gcCount ?? 0), 0) / samples.length
+        : opts.runtime === "bun" && server
+          ? 0
+          : NaN;
+    const gcMax = gcWindow.length
+      ? Math.max(...gcWindow.map((e) => e.pauseMs))
+      : gcFromServer
+        ? Math.max(...samples.map((s) => s.gcMaxMs ?? 0))
+        : NaN;
     const show = (v: number, text: () => string) => (Number.isNaN(v) ? "-" : text());
 
     const gapP99 = gaps.percentile(0.99);
@@ -684,6 +748,9 @@ async function runOrchestrator(): Promise<void> {
       show(cpu, () => `${(cpu * 100).toFixed(0)}%`).padStart(7),
       show(elu, () => elu.toFixed(2)).padStart(4),
       show(loopP99, () => loopP99.toFixed(1)).padStart(8),
+      show(tickP99, () => tickP99.toFixed(2)).padStart(8),
+      show(gcPerSec, () => gcPerSec.toFixed(1)).padStart(4),
+      show(gcMax, () => gcMax.toFixed(1)).padStart(9),
       String(latest?.rssMb ?? "-").padStart(6),
       (move.total ? `${move.percentile(0.5)}/${moveP99}` : "-").padStart(15),
       `${gaps.percentile(0.5)}/${gapP99}/${gaps.percentile(1)}`.padStart(23),

@@ -1,4 +1,5 @@
 import type { CollisionMap } from "../../shared/src/collision.ts";
+import { recordTick } from "./stats.ts";
 import {
   CHAT_HISTORY_SIZE,
   MAX_CHAT_LENGTH,
@@ -215,9 +216,11 @@ export class Room {
    */
   private tick(): void {
     if (this.changed.size === 0) return;
+    const start = performance.now();
     const players = [...this.changed];
     this.changed.clear();
     this.broadcast({ t: "snapshot", players });
+    recordTick(performance.now() - start);
   }
 
   /** Encode once, send to every joined player. */
