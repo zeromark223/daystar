@@ -1,6 +1,6 @@
 /**
  * Schema-driven binary serialization, ported from the original
- * BinaryBuilder / BinaryParser (ref/, 2017) so it runs in both Node and browsers.
+ * BinaryBuilder / BinaryParser (ref/, 2017) so it runs in both Bun and browsers.
  *
  * A struct maps field names to type ids, in wire order:
  *

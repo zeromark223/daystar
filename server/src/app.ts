@@ -9,8 +9,7 @@ import { createStaticHandler } from "./static.ts";
 
 /**
  * Runtime-independent server core: rooms, collision map and HTTP routes as a
- * fetch-style handler. index.ts (Node), bun.ts and deno.ts only adapt their
- * HTTP server and WebSocket implementation to it.
+ * fetch-style handler; main.ts wires it to Bun.serve and Bun's WebSockets.
  */
 
 export const PORT = Number(process.env.PORT ?? 3000);

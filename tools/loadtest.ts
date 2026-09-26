@@ -3,8 +3,8 @@
  * stays healthy. Bots join, walk non-stop (worst case: everyone moving) using
  * the real collision map, send positions at the client rate and chat now and then.
  *
- *   npm run loadtest -- --steps 100,200,400 --room-size 20
- *   npm run loadtest -- --target https://meet.example.com --steps 200,500
+ *   bun run loadtest --steps 100,200,400 --room-size 20
+ *   bun run loadtest --target https://meet.example.com --steps 200,500
  *
  * Run with --help for the options (USAGE below).
  */
@@ -13,7 +13,6 @@ import { createInterface } from "node:readline";
 import { readFileSync, writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { resolve } from "node:path";
-import WebSocket from "ws";
 import { CHARACTER_IDS, collisionOffsetY, type CharacterId, type Direction } from "../shared/src/characters.ts";
 import { CollisionMap } from "../shared/src/collision.ts";
 import { MOVE_SPEED, ROOM_ID_PATTERN, TICK_RATE, WS_PATH } from "../shared/src/constants.ts";
@@ -110,10 +109,10 @@ interface Bot {
 const SNAPSHOT_ENTRY = 7;
 
 /** Position of `id` in a raw snapshot frame, in wire units, without a full decode. */
-function findInSnapshot(data: Buffer, id: number): { xw: number; yw: number } | null {
-  const count = data.readUInt16LE(1);
+function findInSnapshot(data: DataView, id: number): { xw: number; yw: number } | null {
+  const count = data.getUint16(1, true);
   for (let i = 0, o = 3; i < count; i++, o += SNAPSHOT_ENTRY) {
-    if (data.readUInt16LE(o) === id) return { xw: data.readUInt16LE(o + 2), yw: data.readUInt16LE(o + 4) };
+    if (data.getUint16(o, true) === id) return { xw: data.getUint16(o + 2, true), yw: data.getUint16(o + 4, true) };
   }
   return null;
 }
@@ -142,6 +141,7 @@ function runWorker(): void {
 
   function addBot(room: string): void {
     const ws = new WebSocket(`${url}?room=${room}`);
+    ws.binaryType = "arraybuffer";
     const character = CHARACTER_IDS[Math.floor(Math.random() * CHARACTER_IDS.length)];
     const bot: Bot = {
       ws,
@@ -166,16 +166,20 @@ function runWorker(): void {
       bot.walking = Math.random() < movingRatio;
       bot.phaseUntil = Date.now() + Math.random() * (bot.walking ? walkMs() : idleMs(movingRatio));
     }
-    ws.on("open", () => ws.send(encodeClientMessage({ t: "join", name: `bot${bots.length}`, character })));
-    ws.on("message", (data: Buffer) => {
-      counters.bytesIn += data.length;
+    ws.addEventListener("open", () =>
+      ws.send(encodeClientMessage({ t: "join", name: `bot${bots.length}`, character })),
+    );
+    ws.addEventListener("message", (event) => {
+      if (!(event.data instanceof ArrayBuffer)) return;
+      const bytes = new Uint8Array(event.data);
+      counters.bytesIn += bytes.byteLength;
       const now = performance.now();
       // Snapshots are only scanned for our own entry, not decoded, to keep bots cheap.
-      if (data[0] === SNAPSHOT_OPCODE) {
+      if (bytes[0] === SNAPSHOT_OPCODE) {
         counters.snapshots++;
         if (bot.lastSnapshot) gaps.add(now - bot.lastSnapshot);
         bot.lastSnapshot = now;
-        const own = bot.pending.length ? findInSnapshot(data, bot.id) : null;
+        const own = bot.pending.length ? findInSnapshot(new DataView(event.data), bot.id) : null;
         if (own) {
           const i = bot.pending.findLastIndex((p) => p.xw === own.xw && p.yw === own.yw);
           if (i >= 0) {
@@ -185,7 +189,7 @@ function runWorker(): void {
         }
         return;
       }
-      const msg = decodeServerMessage(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+      const msg = decodeServerMessage(bytes);
       if (msg?.t === "welcome") {
         const self = msg.players.find((p) => p.id === msg.selfId)!;
         bot.id = msg.selfId;
@@ -200,11 +204,11 @@ function runWorker(): void {
         counters.corrections++;
       }
     });
-    ws.on("close", () => {
+    ws.addEventListener("close", () => {
       if (bot.joined) counters.closes++;
       bot.joined = false;
     });
-    ws.on("error", () => counters.errors++);
+    ws.addEventListener("error", () => counters.errors++);
     bots.push(bot);
   }
 
@@ -263,7 +267,7 @@ function runWorker(): void {
       chat: chat.entries(),
       move: move.entries(),
     };
-    // Workers talk to the orchestrator in JSON lines over stdio (works for Node and Bun workers).
+    // Workers talk to the orchestrator in JSON lines over stdio .
     process.stdout.write(JSON.stringify(report) + "\n");
     gaps = new Histogram();
     chat = new Histogram();
@@ -292,13 +296,8 @@ interface StatsSample {
   rooms: number;
   players: number;
   cpu: number;
-  /** null on runtimes that do not report it (Bun, Deno). */
-  elu: number | null;
   loopP99Ms: number;
   tickP99Ms?: number;
-  /** In-process GC stats (Node); null elsewhere. */
-  gcCount?: number | null;
-  gcMaxMs?: number | null;
   rssMb: number;
 }
 
@@ -309,7 +308,7 @@ interface HealthReport {
   samples: StatsSample[];
 }
 
-const USAGE = `Usage: npm run loadtest -- [options]
+const USAGE = `Usage: bun run loadtest [options]
 
   --steps <n,n,...>    total bot counts to ramp through         (default 50,100,200)
   --room-size <n>      bots per room; 0 = everyone in one room   (default 0)
@@ -322,10 +321,6 @@ const USAGE = `Usage: npm run loadtest -- [options]
   --target <url>       test a running server instead of spawning one,
                        e.g. https://meet.example.com
   --health-token <s>   token for the server's /api/health, if it sets HEALTH_TOKEN
-  --runtime <name>     runtime for the spawned server: node, bun or deno (default node);
-                       a spawned Bun server logs GC (BUN_JSC_logGC) for the gc columns
-  --bot-runtime <name> runtime for the bot workers: node or bun (default node);
-                       Bun's native WebSocket client lets one machine drive more bots
   --port <n>           port for the spawned server               (default 3300)
   --room-prefix <s>    rooms are <prefix>-all or <prefix>-0, -1, ... (default load)
   --keep-going         continue ramping after a failed step
@@ -345,32 +340,12 @@ interface Options {
   chatEveryMs: number;
   movingRatio: number;
   port: number;
-  runtime: "node" | "bun" | "deno";
-  botRuntime: "node" | "bun";
   roomPrefix: string;
   keepGoing: boolean;
   healthToken: string;
   /** Remote server, or null to spawn a local one. */
   target: { ws: string; http: string } | null;
 }
-
-const OPTION_NAMES = [
-  "steps",
-  "room-size",
-  "hold",
-  "ramp",
-  "workers",
-  "chat-every",
-  "moving",
-  "target",
-  "health-token",
-  "runtime",
-  "bot-runtime",
-  "port",
-  "room-prefix",
-  "keep-going",
-  "last",
-];
 
 function fail(message: string): never {
   console.error(`loadtest: ${message}\n\n${USAGE}`);
@@ -385,17 +360,6 @@ function describe(argv: string[]): string {
 }
 
 function parseOptions(): Options {
-  // `npm run loadtest --steps 5` (no "--") makes npm eat the flags and only
-  // leave npm_config_* variables behind; refuse instead of silently using defaults.
-  const swallowed = OPTION_NAMES.filter(
-    (n) =>
-      process.env[`npm_config_${n.replace(/-/g, "_")}`] !== undefined &&
-      !process.argv.some((a) => a === `--${n}` || a.startsWith(`--${n}=`)),
-  );
-  if (swallowed.length > 0) {
-    fail(`npm consumed --${swallowed.join(", --")}. Put "--" before the options: npm run loadtest -- --steps 100`);
-  }
-
   let argv = process.argv.slice(2);
   if (argv.includes("--last")) {
     let saved: string[];
@@ -427,8 +391,6 @@ function parseOptions(): Options {
         target: { type: "string" },
         "health-token": { type: "string", default: "" },
         port: { type: "string", default: "3300" },
-        runtime: { type: "string", default: "node" },
-        "bot-runtime": { type: "string", default: "node" },
         "room-prefix": { type: "string", default: "load" },
         "keep-going": { type: "boolean", default: false },
         help: { type: "boolean", short: "h", default: false },
@@ -446,7 +408,7 @@ function parseOptions(): Options {
   for (const t of tokens) if (t.kind === "option") given.set(t.name, t.value);
   const reusedLast = process.argv.includes("--last");
   argv = [...given].flatMap(([name, value]) => (value === undefined ? [`--${name}`] : [`--${name}`, value]));
-  if (reusedLast) console.log(`Re-running: npm run loadtest -- ${describe(argv)}`);
+  if (reusedLast) console.log(`Re-running: bun run loadtest ${describe(argv)}`);
 
   const int = (name: string, raw: string, min: number): number => {
     const n = Number(raw);
@@ -461,11 +423,6 @@ function parseOptions(): Options {
   const steps = values.steps.split(",").map((s) => int("steps", s.trim(), 1));
   if (steps.some((n, i) => i > 0 && n <= steps[i - 1])) fail("--steps must be increasing");
   if (!ROOM_ID_PATTERN.test(`${values["room-prefix"]}-all`)) fail("--room-prefix may only use a-z, 0-9 and -");
-  const runtime = values.runtime;
-  if (runtime !== "node" && runtime !== "bun" && runtime !== "deno") fail(`--runtime must be node, bun or deno, got "${runtime}"`);
-  const botRuntime = values["bot-runtime"];
-  if (botRuntime !== "node" && botRuntime !== "bun") fail(`--bot-runtime must be node or bun, got "${botRuntime}"`);
-  if (values.target !== undefined && given.has("runtime")) fail("--runtime only applies to the spawned server, not --target");
 
   const options: Options = {
     steps,
@@ -476,8 +433,6 @@ function parseOptions(): Options {
     chatEveryMs: int("chat-every", values["chat-every"], 1) * 1000,
     movingRatio: ratio("moving", values.moving),
     port: int("port", values.port, 1),
-    runtime,
-    botRuntime,
     roomPrefix: values["room-prefix"],
     keepGoing: values["keep-going"],
     healthToken: values["health-token"],
@@ -552,35 +507,8 @@ function tell(worker: ChildProcess, msg: object): void {
   worker.stdin!.write(JSON.stringify(msg) + "\n");
 }
 
-const BUN = ["npx", "-y", "bun@1.4.2"];
-
-/** How to run bot workers (loadtest.ts --worker) per runtime. */
-const BOT_COMMANDS: Record<Options["botRuntime"], string[]> = {
-  node: [process.execPath],
-  bun: [...BUN, "run"],
-};
-
-/**
- * How to start the local server per runtime. Bun and Deno are fetched by npx on
- * first use (pinned, same versions as Dockerfile.bun / Dockerfile.deno); they are
- * not devDependencies because Deno's npm installer fails on Alpine (musl) builds.
- */
-const SERVER_COMMANDS: Record<Options["runtime"], string[]> = {
-  node: [process.execPath, "server/src/index.ts"],
-  bun: [...BUN, "run", "server/src/bun.ts"],
-  deno: [
-    "npx",
-    "-y",
-    "deno@2.9.6",
-    "run",
-    "--allow-net",
-    "--allow-read",
-    "--allow-env",
-    "--allow-write",
-    "--allow-sys",
-    "server/src/deno.ts",
-  ],
-};
+/** The load test runs on Bun; the spawned server and the bot workers use the same binary. */
+const BUN = process.execPath;
 
 async function runOrchestrator(): Promise<void> {
   const opts = parseOptions();
@@ -598,7 +526,7 @@ async function runOrchestrator(): Promise<void> {
   } else {
     wsUrl = `ws://127.0.0.1:${opts.port}${WS_PATH}`;
     httpUrl = `http://127.0.0.1:${opts.port}`;
-    server = spawn(SERVER_COMMANDS[opts.runtime][0], SERVER_COMMANDS[opts.runtime].slice(1), {
+    server = spawn(BUN, ["server/src/main.ts"], {
       cwd: ROOT,
       env: {
         ...process.env,
@@ -607,7 +535,7 @@ async function runOrchestrator(): Promise<void> {
         HEALTH_TOKEN: opts.healthToken,
         NODE_ENV: "production",
         // JavaScriptCore prints one line per collection with its pause ("p=<ms>").
-        ...(opts.runtime === "bun" ? { BUN_JSC_logGC: "1" } : {}),
+        BUN_JSC_logGC: "1",
       },
       stdio: ["ignore", "ignore", "pipe"],
     });
@@ -634,8 +562,7 @@ async function runOrchestrator(): Promise<void> {
   let window: WorkerReport[] = [];
   const connected = new Map<ChildProcess, number>();
   for (let i = 0; i < workerCount; i++) {
-    const [cmd, ...args] = BOT_COMMANDS[opts.botRuntime];
-    const w = spawn(cmd, [...args, import.meta.filename, "--worker"], { stdio: ["pipe", "pipe", "inherit"] });
+    const w = spawn(BUN, [import.meta.filename, "--worker"], { stdio: ["pipe", "pipe", "inherit"] });
     createInterface({ input: w.stdout! }).on("line", (line) => {
       if (!line.startsWith("{")) return;
       const r = JSON.parse(line) as WorkerReport;
@@ -649,7 +576,7 @@ async function runOrchestrator(): Promise<void> {
   const roomFor = (i: number) => (roomSize > 0 ? `${roomPrefix}-${Math.floor(i / roomSize)}` : `${roomPrefix}-all`);
   let total = 0;
   console.log(
-    "bots | rooms | srv players | srv CPU | ELU  | loop p99 | tick p99 | gc/s | gc max ms | RSS MB | move p50/p99 ms | snap gap p50/p99/max ms | chat p50/p99 ms | in MB/s | corr | drops | verdict",
+    "bots | rooms | srv players | srv CPU | loop p99 | tick p99 | gc/s | gc max ms | RSS MB | move p50/p99 ms | snap gap p50/p99/max ms | chat p50/p99 ms | in MB/s | corr | drops | verdict",
   );
 
   for (const target of steps) {
@@ -707,24 +634,12 @@ async function runOrchestrator(): Promise<void> {
     const mean = (key: keyof StatsSample) => samples.reduce((a, s) => a + (s[key] ?? 0), 0) / samples.length;
     const have = samples.length > 0;
     const cpu = have ? mean("cpu") : NaN;
-    const elu = have && samples.every((s) => s.elu !== null) ? mean("elu") : NaN;
     const loopP99 = have ? Math.max(...samples.map((s) => s.loopP99Ms)) : NaN;
     const tickP99 = have && samples[0].tickP99Ms !== undefined ? Math.max(...samples.map((s) => s.tickP99Ms ?? 0)) : NaN;
-    // GC: Bun's log when we spawned it, otherwise the server's own numbers (Node).
+    // GC comes from the spawned server's BUN_JSC_logGC output; unknown for --target.
     const gcWindow = gcEvents.filter((e) => e.t >= t0 && e.t <= t1);
-    const gcFromServer = have && samples.every((s) => s.gcCount != null);
-    const gcPerSec = gcWindow.length
-      ? gcWindow.length / elapsed
-      : gcFromServer
-        ? samples.reduce((a, s) => a + (s.gcCount ?? 0), 0) / samples.length
-        : opts.runtime === "bun" && server
-          ? 0
-          : NaN;
-    const gcMax = gcWindow.length
-      ? Math.max(...gcWindow.map((e) => e.pauseMs))
-      : gcFromServer
-        ? Math.max(...samples.map((s) => s.gcMaxMs ?? 0))
-        : NaN;
+    const gcPerSec = server ? gcWindow.length / elapsed : NaN;
+    const gcMax = gcWindow.length ? Math.max(...gcWindow.map((e) => e.pauseMs)) : server ? 0 : NaN;
     const show = (v: number, text: () => string) => (Number.isNaN(v) ? "-" : text());
 
     const gapP99 = gaps.percentile(0.99);
@@ -746,7 +661,6 @@ async function runOrchestrator(): Promise<void> {
       String(roomSize > 0 ? Math.ceil(target / roomSize) : 1).padStart(5),
       String(latest?.players ?? "-").padStart(11),
       show(cpu, () => `${(cpu * 100).toFixed(0)}%`).padStart(7),
-      show(elu, () => elu.toFixed(2)).padStart(4),
       show(loopP99, () => loopP99.toFixed(1)).padStart(8),
       show(tickP99, () => tickP99.toFixed(2)).padStart(8),
       show(gcPerSec, () => gcPerSec.toFixed(1)).padStart(4),

@@ -4,16 +4,17 @@ A tiny meeting app that plays like a game: pick an animal, walk around a pixel-a
 ruin with everyone else in the room, and chat. Voice chat comes later.
 
 - **Client:** PixiJS v8 + Vite (TypeScript)
-- **Server:** runs on Node 24 (`ws`), Bun or Deno (their native WebSocket servers),
-  TypeScript executed directly, and serves the built client
+- **Server:** Bun (`Bun.serve`, native WebSockets and topic pub/sub), TypeScript
+  executed directly; it also serves the built client. The project is Bun-only
+  (runtime, package manager, tests and tooling).
 - **Transport:** WebSocket only, binary frames throughout — a schema-driven encoder
   (`shared/src/binary/schema.ts`) lays out every message; see `shared/src/protocol.ts`
 
 ## Develop
 
 ```bash
-npm install
-npm run dev          # server on :3000 (watch) + Vite on :5173 (proxies /ws)
+bun install
+bun run dev          # server on :3000 (watch) + Vite on :5173 (proxies /ws)
 ```
 
 Open http://localhost:5173 — you get redirected to a random room (`/r/<room-id>`).
@@ -34,24 +35,10 @@ toolbar:
 Saving is enabled unless `NODE_ENV=production`; override with `MAP_EDITOR=1` or `0`.
 
 ```bash
-npm test             # protocol + collision unit tests
-npm run typecheck
-npm run build && npm start   # production mode on :3000
+bun test             # protocol + collision unit tests
+bun run typecheck
+bun run build && bun start   # production mode on :3000
 ```
-
-### Runtimes
-
-The server core (`server/src/app.ts`, `room.ts`) is runtime-independent; each
-runtime has a thin entry point with its own HTTP and WebSocket server:
-
-| Runtime | Entry | Start | Docker |
-|---|---|---|---|
-| Node 24 + `ws` | `server/src/index.ts` | `npm start` | `Dockerfile` |
-| Bun 1.4 (`Bun.serve`) | `server/src/bun.ts` | `npm run start:bun` | `Dockerfile.bun` |
-| Deno 2.9 (`Deno.serve`) | `server/src/deno.ts` | `npm run start:deno` | `Dockerfile.deno` |
-
-Bun and Deno are fetched by `npx` on first use (pinned versions) rather than being
-devDependencies, because Deno's npm installer fails on Alpine (musl) builds.
 
 ## Layout
 
@@ -89,28 +76,25 @@ tools/          asset pipeline scripts (Python + Pillow)
 ## Load testing
 
 ```bash
-npm run loadtest -- --steps 500,1000,2000 --room-size 20
+bun run loadtest --steps 500,1000,2000 --room-size 20
 ```
 
 Spawns a server, ramps up bot players that walk non-stop and chat, and prints per
 step: server players, CPU, event loop utilization and delay (read from the server's
 `/api/health`), snapshot arrival gaps, chat round-trip and bandwidth. `--room-size 0` puts everyone in one
-room. `npm run loadtest -- --help` lists all options; note the `--` after the script
-name, without it npm swallows the flags (the tool detects this and stops).
+room. `bun run loadtest --help` lists all options.
 
 To test a deployed server from this machine, point it at the public URL. Server
 columns come from its `/api/health`; if the server sets `HEALTH_TOKEN`, pass it:
 
 ```bash
-npm run loadtest -- --target https://meet.example.com --health-token $TOKEN --steps 200,500,1000 --room-size 20
-npm run loadtest -- --last               # same options again
-npm run loadtest -- --last --hold 60     # same, with one option changed
+bun run loadtest --target https://meet.example.com --health-token $TOKEN --steps 200,500,1000 --room-size 20
+bun run loadtest --last               # same options again
+bun run loadtest --last --hold 60     # same, with one option changed
 ```
 
-`--runtime bun|deno` runs the spawned local server on another runtime to compare them;
-a spawned Bun server logs GC (`BUN_JSC_logGC`) so the `gc/s` and `gc max ms` columns are
-filled (Node reports GC in-process). `--bot-runtime bun` runs the bots on Bun, whose
-native WebSocket client drives several times more bots per machine. `tick p99` is the
+A spawned server runs with `BUN_JSC_logGC` so the `gc/s` and `gc max ms` columns are
+filled (they show `-` with `--target`). `tick p99` is the
 time a room tick spends encoding and sending its snapshot (the budget at 20 Hz is 50 ms).
 
 `--last` reads `.loadtest-last.json` (git-ignored; it stores the token in plain text).
@@ -125,7 +109,7 @@ unlike snapshot gaps (a room where nobody moves gets no snapshots at all).
 
 ## Deploy (Coolify)
 
-Build from the `Dockerfile` (or `Dockerfile.bun` / `Dockerfile.deno` for the other runtimes). The container listens on `PORT` (default 3000) and
+Build from the `Dockerfile` (Bun). The container listens on `PORT` (default 3000) and
 exposes `GET /healthz` (plain liveness) and `GET /api/health` (JSON load stats: rooms,
 players, CPU, event loop, memory, last 5 minutes of 1 s samples). Set `HEALTH_TOKEN`
 to require `Authorization: Bearer <token>` on `/api/health` in production. WebSockets go through the normal HTTP proxy on `/ws`.

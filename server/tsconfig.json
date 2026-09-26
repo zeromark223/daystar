@@ -4,10 +4,11 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "lib": [
-      "ES2024"
+      "ES2024",
+      "DOM"
     ],
     "types": [
-      "node"
+      "bun"
     ],
     "strict": true,
     "noEmit": true,
@@ -18,10 +19,7 @@
   },
   "include": [
     "src",
-    "../shared/src"
-  ],
-  "exclude": [
-    "src/bun.ts",
-    "src/deno.ts"
+    "../shared/src",
+    "../tools"
   ]
 }

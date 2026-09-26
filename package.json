@@ -4,28 +4,22 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=24"
+    "bun": ">=1.4.2"
   },
   "scripts": {
-    "dev": "concurrently -k -n server,client -c blue,green \"npm:dev:server\" \"npm:dev:client\"",
-    "dev:server": "node --watch server/src/index.ts",
-    "dev:client": "vite --config client/vite.config.ts",
-    "build": "vite build --config client/vite.config.ts",
-    "start": "node server/src/index.ts",
-    "typecheck": "tsc -p client && tsc -p server && tsc -p server/tsconfig.bun.json && npx -y deno@2.9.6 check server/src/deno.ts",
-    "test": "node --test \"shared/**/*.test.ts\" \"server/**/*.test.ts\"",
+    "dev": "concurrently -k -n server,client -c blue,green \"bun run dev:server\" \"bun run dev:client\"",
+    "dev:server": "bun --watch server/src/main.ts",
+    "dev:client": "bun --bun vite --config client/vite.config.ts",
+    "build": "bun --bun vite build --config client/vite.config.ts",
+    "start": "bun server/src/main.ts",
+    "typecheck": "tsc -p client && tsc -p server",
+    "test": "bun test",
     "assets": "python3 tools/build_sprites.py",
-    "loadtest": "node tools/loadtest.ts",
-    "start:bun": "npx -y bun@1.4.2 run server/src/bun.ts",
-    "start:deno": "npx -y deno@2.9.6 run --allow-net --allow-read --allow-env --allow-write --allow-sys server/src/deno.ts"
-  },
-  "dependencies": {
-    "ws": "^8.21.3"
+    "loadtest": "bun tools/loadtest.ts"
   },
   "devDependencies": {
     "@types/bun": "^1.4.2",
     "@types/node": "^26.6.2",
-    "@types/ws": "^8.18.1",
     "concurrently": "^10.0.5",
     "pixi.js": "^8.21.0",
     "typescript": "^7.0.2",

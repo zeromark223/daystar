@@ -1,4 +1,4 @@
-// Bun entry point: Bun.serve with its native (uWebSockets-based) WebSocket server.
+// Server entry point: Bun.serve with its native (uWebSockets-based) WebSocket server.
 import { WS_PATH } from "../../shared/src/constants.ts";
 import {
   connect,

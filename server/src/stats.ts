@@ -1,5 +1,3 @@
-import { performance, PerformanceObserver } from "node:perf_hooks";
-
 /** One second of server load, as served by GET /api/health. */
 export interface StatsSample {
   /** Server clock, Unix epoch milliseconds, at the end of the sample. */
@@ -9,8 +7,6 @@ export interface StatsSample {
   sockets: number;
   /** Process CPU time over wall time; 1 = one full core. */
   cpu: number;
-  /** Event loop utilization, 0..1; null where the runtime does not report it (Bun, Deno). */
-  elu: number | null;
   /** How late a 20 ms timer fired: p99 and max over the sample. */
   loopP99Ms: number;
   loopMaxMs: number;
@@ -18,13 +14,6 @@ export interface StatsSample {
   ticks: number;
   tickP99Ms: number;
   tickMaxMs: number;
-  /**
-   * GC collections and pauses, where the runtime reports them in-process (Node).
-   * Bun exposes GC only through BUN_JSC_logGC; tools/loadtest.ts reads that instead.
-   */
-  gcCount: number | null;
-  gcPauseMs: number | null;
-  gcMaxMs: number | null;
   rssMb: number;
   heapMb: number;
 }
@@ -49,30 +38,19 @@ export function recordTick(ms: number): void {
 
 /**
  * Samples process load once per second and keeps a rolling history.
- * Everything here works the same on Node, Bun and Deno so runtimes can be compared;
- * loop delay in particular is measured with a timer probe rather than
- * monitorEventLoopDelay, which only Node implements.
+ * Loop delay is measured with a timer probe. Bun reports GC only through
+ * BUN_JSC_logGC on stderr, which tools/loadtest.ts parses when it spawns the server.
  */
 export class StatsSampler {
   private readonly samples: StatsSample[] = [];
   private readonly startedAt = Date.now();
   private readonly runtime: string;
   private lateness: number[] = [];
-  private gc: number[] | null = null;
 
   constructor(counts: () => Counts, onSample?: (s: StatsSample) => void) {
-    this.runtime = runtimeName();
+    this.runtime = `bun ${Bun.version}`;
     this.probe(performance.now() + PROBE_MS);
-    if ((PerformanceObserver.supportedEntryTypes ?? []).includes("gc")) {
-      const gc: number[] = (this.gc = []);
-      new PerformanceObserver((list) => {
-        for (const entry of list.getEntries()) gc.push(entry.duration);
-      }).observe({ entryTypes: ["gc"] });
-    }
 
-    const elu = performance.eventLoopUtilization as typeof performance.eventLoopUtilization | undefined;
-    let lastElu = elu?.();
-    let eluSeen = false;
     let lastCpu = process.cpuUsage();
     let lastAt = performance.now();
 
@@ -80,32 +58,22 @@ export class StatsSampler {
       const now = performance.now();
       const cpu = process.cpuUsage(lastCpu);
       const mem = process.memoryUsage();
-      // Bun and Deno expose the function but always report zero.
-      const eluNow = lastElu && elu ? elu(lastElu) : null;
-      if (eluNow && eluNow.active > 0) eluSeen = true;
-
       const late = this.lateness.sort((a, b) => a - b);
       this.lateness = [];
       const ticks = tickDurations.sort((a, b) => a - b);
       tickDurations = [];
-      const gc = this.gc?.splice(0) ?? null;
       const sample: StatsSample = {
         t: Date.now(),
         ...counts(),
         cpu: round((cpu.user + cpu.system) / 1000 / (now - lastAt), 3),
-        elu: eluSeen && eluNow ? round(eluNow.utilization, 3) : null,
         loopP99Ms: round(percentile(late, 0.99), 1),
         loopMaxMs: round(late.at(-1) ?? 0, 1),
         ticks: ticks.length,
         tickP99Ms: round(percentile(ticks, 0.99), 2),
         tickMaxMs: round(ticks.at(-1) ?? 0, 2),
-        gcCount: gc ? gc.length : null,
-        gcPauseMs: gc ? round(gc.reduce((a, b) => a + b, 0), 2) : null,
-        gcMaxMs: gc ? round(Math.max(0, ...gc), 2) : null,
         rssMb: Math.round(mem.rss / 1e6),
         heapMb: Math.round(mem.heapUsed / 1e6),
       };
-      lastElu = elu?.();
       lastCpu = process.cpuUsage();
       lastAt = now;
 
@@ -135,13 +103,6 @@ export class StatsSampler {
       samples: this.samples.filter((s) => s.t > since),
     };
   }
-}
-
-function runtimeName(): string {
-  const g = globalThis as { Bun?: { version: string }; Deno?: { version: { deno: string } } };
-  if (g.Bun) return `bun ${g.Bun.version}`;
-  if (g.Deno) return `deno ${g.Deno.version.deno}`;
-  return `node ${process.versions.node}`;
 }
 
 /** p-th percentile of an ascending array (0 when empty). */
