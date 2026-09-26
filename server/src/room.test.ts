@@ -53,7 +53,7 @@ function fakeTopic() {
 }
 
 function setup(topic?: ReturnType<typeof fakeTopic>) {
-  const room = new Room("test", map, () => {}, topic?.publish ?? null);
+  const room = new Room("test", { map, onEmpty: () => {}, publish: topic?.publish ?? null });
   const tick = () => (room as unknown as { tick(): void }).tick();
   const sockets = ["Ann", "Ben", "Cat"].map((name) => {
     const s = new FakeSocket();

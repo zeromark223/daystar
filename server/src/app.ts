@@ -1,15 +1,18 @@
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { rename, writeFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
 import { CollisionMap } from "../../shared/src/collision.ts";
 import { ROOM_ID_PATTERN, WS_PATH } from "../../shared/src/constants.ts";
+import { readServerClusterConfig } from "./cluster/config.ts";
+import { readJoinRequest, readLimited, rejectWithoutHealthToken } from "./http.ts";
+import { CLIENT_DIR, COLLISION_FILE } from "./paths.ts";
 import { Room, type Peer, type PeerEvents, type Publish } from "./room.ts";
 import { StatsSampler } from "./stats.ts";
 import { createStaticHandler } from "./static.ts";
 
 /**
- * Runtime-independent server core: rooms, collision map and HTTP routes as a
- * fetch-style handler; main.ts wires it to Bun.serve and Bun's WebSockets.
+ * Game server core: rooms, collision map and HTTP routes as a fetch-style
+ * handler; main.ts wires it to Bun.serve and Bun's WebSockets. Runs standalone,
+ * or as one server of a cluster when CLUSTER_SECRET is set (docs/cluster.md).
  */
 
 export const PORT = Number(process.env.PORT ?? 3000);
@@ -19,24 +22,20 @@ export const MAX_FRAME_BYTES = 4 * 1024;
 /** Close sockets that stop answering pings for this long (e.g. a laptop lid closed). */
 export const IDLE_TIMEOUT_SEC = 60;
 
-const fromHere = (path: string) => fileURLToPath(new URL(path, import.meta.url));
-const CLIENT_DIR = fromHere("../../client/dist");
-const MAX_COLLISION_BYTES = 256 * 1024;
+export const cluster = readServerClusterConfig();
 
-// The editable source lives in client/public; production images only ship client/dist.
-const COLLISION_SOURCE = fromHere("../../client/public/assets/collision.txt");
-const COLLISION_FILE = existsSync(COLLISION_SOURCE) ? COLLISION_SOURCE : fromHere("../../client/dist/assets/collision.txt");
-// Saving collision edits (?edit in the client) rewrites a source file, so it is dev-only by default.
-const MAP_EDITOR = process.env.MAP_EDITOR ? process.env.MAP_EDITOR === "1" : process.env.NODE_ENV !== "production";
-// GET /api/health requires "Authorization: Bearer <HEALTH_TOKEN>" (or ?token=) when set.
-const HEALTH_TOKEN = process.env.HEALTH_TOKEN ?? "";
+const MAX_COLLISION_BYTES = 256 * 1024;
+// Saving collision edits (?edit in the client) rewrites a source file, so it is dev-only
+// by default, and never in cluster mode (other servers would keep the old map).
+const MAP_EDITOR =
+  !cluster && (process.env.MAP_EDITOR ? process.env.MAP_EDITOR === "1" : process.env.NODE_ENV !== "production");
 
 const collision = CollisionMap.parse(readFileSync(COLLISION_FILE, "utf8"));
 const rooms = new Map<string, Room>();
 const serveStatic = createStaticHandler(CLIENT_DIR);
 let sockets = 0;
 
-const stats = new StatsSampler(
+export const stats = new StatsSampler(
   () => {
     let players = 0;
     for (const room of rooms.values()) players += room.playerCount;
@@ -47,7 +46,9 @@ const stats = new StatsSampler(
 );
 
 export const startupMessage = () =>
-  `cute-meeting on http://${HOST}:${PORT} (${stats.report().runtime}, map editor ${MAP_EDITOR ? "on" : "off"})`;
+  cluster
+    ? `cute-meeting server ${cluster.server} on http://${HOST}:${PORT} (${stats.report().runtime}, cluster, public ${cluster.publicUrl})`
+    : `cute-meeting on http://${HOST}:${PORT} (${stats.report().runtime}, standalone, map editor ${MAP_EDITOR ? "on" : "off"})`;
 
 /**
  * Runtimes with native pub/sub (Bun) register how to publish to a room's
@@ -58,21 +59,39 @@ export function usePublisher(factory: (roomId: string) => Publish): void {
   publisherFor = factory;
 }
 
+/** Cluster mode: told about every local join and leave (forwarded to the agent). */
+export interface PlayerHooks {
+  joined(room: string, player: number): void;
+  left(room: string, player: number): void;
+}
+let hooks: PlayerHooks | null = null;
+export function usePlayerHooks(h: PlayerHooks): void {
+  hooks = h;
+}
+
 /** Room id for a WebSocket upgrade URL (/ws?room=<id>), or null if invalid. */
 export function roomIdFor(url: URL): string | null {
   const roomId = url.searchParams.get("room") ?? "";
   return ROOM_ID_PATTERN.test(roomId) ? roomId : null;
 }
 
-/** Attach an upgraded connection to its room. */
-export function connect(roomId: string, peer: Peer): PeerEvents {
+/** Attach an upgraded connection to its room; `playerId` comes from a cluster ticket. */
+export function connect(roomId: string, peer: Peer, playerId?: number): PeerEvents {
   let room = rooms.get(roomId);
   if (!room) {
-    room = new Room(roomId, collision, () => rooms.delete(roomId), publisherFor?.(roomId) ?? null);
+    room = new Room(roomId, {
+      map: collision,
+      onEmpty: () => rooms.delete(roomId),
+      publish: publisherFor?.(roomId) ?? null,
+      onJoined: (player) => hooks?.joined(roomId, player),
+      onLeft: (player) => hooks?.left(roomId, player),
+      chatIdBase: cluster ? cluster.server * 0x1000000 : 0,
+      keepChatHistory: !cluster,
+    });
     rooms.set(roomId, room);
   }
   sockets++;
-  const events = room.accept(peer);
+  const events = room.accept(peer, playerId);
   return {
     message: events.message,
     close: () => {
@@ -82,6 +101,13 @@ export function connect(roomId: string, peer: Peer): PeerEvents {
   };
 }
 
+/** Every local player, for the agent's register message. */
+export function localPlayers(): { room: string; player: number }[] {
+  const out: { room: string; player: number }[] = [];
+  for (const [room, r] of rooms) for (const player of r.playerIds()) out.push({ room, player });
+  return out;
+}
+
 /** Every non-WebSocket request. */
 export async function handleHttp(req: Request): Promise<Response> {
   const url = new URL(req.url);
@@ -89,8 +115,15 @@ export async function handleHttp(req: Request): Promise<Response> {
     switch (url.pathname) {
       case "/healthz":
         return new Response("ok", { headers: { "content-type": "text/plain" } });
-      case "/api/health":
-        return handleHealth(req, url);
+      case "/api/health": {
+        const since = Number(url.searchParams.get("since") ?? 0) || 0;
+        return (
+          rejectWithoutHealthToken(req, url) ??
+          Response.json(stats.report(since), { headers: { "cache-control": "no-store" } })
+        );
+      }
+      case "/api/join":
+        return await handleJoin(req);
       case "/api/collision":
         return await handleCollision(req);
       case WS_PATH:
@@ -104,15 +137,16 @@ export async function handleHttp(req: Request): Promise<Response> {
   }
 }
 
-function handleHealth(req: Request, url: URL): Response {
-  if (HEALTH_TOKEN) {
-    const given = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? url.searchParams.get("token") ?? "";
-    if (!constantTimeEqual(given, HEALTH_TOKEN)) {
-      return new Response("Unauthorized", { status: 401, headers: { "content-type": "text/plain" } });
-    }
-  }
-  const since = Number(url.searchParams.get("since") ?? 0) || 0;
-  return Response.json(stats.report(since), { headers: { "cache-control": "no-store" } });
+/**
+ * Standalone only: clients always ask /api/join first; alone, the answer is
+ * "this server". In a cluster the agent answers it instead.
+ */
+async function handleJoin(req: Request): Promise<Response> {
+  if (cluster) return new Response("Ask the agent", { status: 404 });
+  if (req.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
+  const room = await readJoinRequest(req, ROOM_ID_PATTERN);
+  if (!room) return new Response("Invalid room", { status: 400 });
+  return Response.json({ serverId: 0, wsUrl: `${WS_PATH}?room=${room}` });
 }
 
 async function handleCollision(req: Request): Promise<Response> {
@@ -138,37 +172,4 @@ async function handleCollision(req: Request): Promise<Response> {
   await rename(tmp, COLLISION_FILE);
   console.log(`collision map saved to ${COLLISION_FILE}`);
   return new Response(null, { status: 204 });
-}
-
-/** Request body as text, or null once it exceeds `limit` bytes. */
-async function readLimited(req: Request, limit: number): Promise<string | null> {
-  if (!req.body) return "";
-  const reader = req.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.byteLength;
-    if (size > limit) {
-      await reader.cancel();
-      return null;
-    }
-    chunks.push(value);
-  }
-  const all = new Uint8Array(size);
-  let offset = 0;
-  for (const c of chunks) {
-    all.set(c, offset);
-    offset += c.byteLength;
-  }
-  return new TextDecoder().decode(all);
-}
-
-function constantTimeEqual(a: string, b: string): boolean {
-  const x = new TextEncoder().encode(a);
-  const y = new TextEncoder().encode(b);
-  let diff = x.length ^ y.length;
-  for (let i = 0; i < Math.max(x.length, y.length); i++) diff |= (x[i] ?? 0) ^ (y[i] ?? 0);
-  return diff === 0;
 }

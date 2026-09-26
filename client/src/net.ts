@@ -1,4 +1,3 @@
-import { WS_PATH } from "../../shared/src/constants.ts";
 import {
   decodeServerMessage,
   encodeClientMessage,
@@ -21,10 +20,22 @@ export class Connection {
     window.addEventListener("pagehide", () => ws.close());
   }
 
-  /** Resolve once the socket is open; handlers only start firing after that. */
-  static open(roomId: string, onMessage: (msg: ServerMessage) => void, onClose: () => void): Promise<Connection> {
+  /**
+   * Ask where to connect (the agent in a cluster, the server itself when
+   * standalone), then resolve once the socket is open; handlers only start
+   * firing after that.
+   */
+  static async open(roomId: string, onMessage: (msg: ServerMessage) => void, onClose: () => void): Promise<Connection> {
+    const res = await fetch("/api/join", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ room: roomId }),
+    }).catch(() => null);
+    if (!res?.ok) throw new Error(res?.status === 503 ? "No game server is available right now." : "Could not reach the server.");
+    const { wsUrl } = (await res.json()) as { wsUrl: string };
+    // Standalone servers answer with a path on this host; the agent with a full URL.
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    const ws = new WebSocket(`${protocol}//${location.host}${WS_PATH}?room=${encodeURIComponent(roomId)}`);
+    const ws = new WebSocket(wsUrl.startsWith("/") ? `${protocol}//${location.host}${wsUrl}` : wsUrl);
     ws.binaryType = "arraybuffer";
     return new Promise((resolve, reject) => {
       ws.addEventListener("open", () => resolve(new Connection(ws, onMessage, onClose)), { once: true });

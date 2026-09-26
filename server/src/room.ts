@@ -59,6 +59,24 @@ interface Player {
   chatTimes: number[];
 }
 
+export interface RoomOptions {
+  map: CollisionMap;
+  /** Called when the last connection closes; the owner drops the room. */
+  onEmpty(): void;
+  /** Native fan-out (Bun topic); without it broadcasts loop over peers. */
+  publish?: Publish | null;
+  /** Cluster: report local players to the agent. */
+  onJoined?(player: number): void;
+  onLeft?(player: number): void;
+  /** Cluster: chat ids are `chatIdBase | counter` (serverId << 24) so servers never collide. */
+  chatIdBase?: number;
+  /**
+   * Standalone keeps the last messages for newcomers. Cluster mode keeps none
+   * (future: chat history in a separate database service, docs/cluster.md).
+   */
+  keepChatHistory?: boolean;
+}
+
 export class Room {
   readonly id: string;
   private readonly players = new Map<number, Player>();
@@ -71,26 +89,30 @@ export class Room {
   private readonly changed = new Set<Player>();
   private ticker: ReturnType<typeof setInterval> | null = null;
   private readonly map: CollisionMap;
-  private readonly onEmpty: () => void;
-
   private readonly publish: Publish | null;
+  private readonly opts: RoomOptions;
 
-  constructor(id: string, map: CollisionMap, onEmpty: () => void, publish: Publish | null = null) {
+  constructor(id: string, opts: RoomOptions) {
     this.id = id;
-    this.map = map;
-    this.onEmpty = onEmpty;
-    this.publish = publish;
+    this.map = opts.map;
+    this.publish = opts.publish ?? null;
+    this.opts = opts;
   }
 
   get playerCount(): number {
     return this.players.size;
   }
 
+  playerIds(): number[] {
+    return [...this.players.keys()];
+  }
+
   /**
    * Add a freshly upgraded connection; it becomes a player once it sends "join".
+   * `playerId` is the id from the agent's ticket in cluster mode.
    * The runtime adapter must call the returned handlers for binary messages and on close.
    */
-  accept(peer: Peer): PeerEvents {
+  accept(peer: Peer, playerId?: number): PeerEvents {
     let player: Player | null = null;
     this.connections++;
 
@@ -101,7 +123,7 @@ export class Room {
         if (msg.t === "move" && player) {
           this.handleMove(player, msg);
         } else if (msg.t === "join" && !player) {
-          player = this.join(peer, msg.name, msg.character);
+          player = this.join(peer, msg.name, msg.character, playerId);
         } else if (msg.t === "chat" && player) {
           this.handleChat(player, msg.text);
         }
@@ -110,24 +132,29 @@ export class Room {
         if (player) this.leave(player);
         if (--this.connections === 0) {
           this.stopTicker();
-          this.onEmpty();
+          this.opts.onEmpty();
         }
       },
     };
   }
 
-  private join(peer: Peer, rawName: unknown, character: unknown): Player | null {
+  private join(peer: Peer, rawName: unknown, character: unknown, assignedId?: number): Player | null {
     const name = typeof rawName === "string" ? rawName.trim().slice(0, MAX_NAME_LENGTH) : "";
     if (!name || !isCharacterId(character)) {
       send(peer, { t: "error", message: "Invalid name or character." });
       peer.close();
       return null;
     }
-    if (this.nextPlayerId > 0xffff) this.nextPlayerId = 1;
+    if (assignedId !== undefined && this.players.has(assignedId)) {
+      send(peer, { t: "error", message: "This seat is already taken; please rejoin." });
+      peer.close();
+      return null;
+    }
+    const id = assignedId ?? this.nextLocalId();
 
     const spawn = findSpawn(this.map, collisionOffsetY(character));
     const player: Player = {
-      id: this.nextPlayerId++,
+      id,
       peer,
       name,
       character,
@@ -153,13 +180,24 @@ export class Room {
     }
     this.players.set(player.id, player);
     this.startTicker();
+    this.opts.onJoined?.(player.id);
     return player;
+  }
+
+  /** Standalone ids: a per-room counter that skips ids still in use. */
+  private nextLocalId(): number {
+    for (;;) {
+      if (this.nextPlayerId > 0xffff) this.nextPlayerId = 1;
+      const id = this.nextPlayerId++;
+      if (!this.players.has(id)) return id;
+    }
   }
 
   private leave(player: Player): void {
     this.players.delete(player.id);
     this.changed.delete(player);
     this.broadcast({ t: "player_left", id: player.id });
+    this.opts.onLeft?.(player.id);
   }
 
   private handleMove(player: Player, move: { x: number; y: number; dir: Direction; moving: boolean }): void {
@@ -194,9 +232,13 @@ export class Room {
     }
     player.chatTimes.push(now);
 
-    const message: ChatMessage = { id: this.nextChatId++, playerId: player.id, name: player.name, text, ts: now };
-    this.chat.push(message);
-    if (this.chat.length > CHAT_HISTORY_SIZE) this.chat.shift();
+    // Chat ids fit a UInt32: the server's base (serverId * 2^24 in cluster mode) plus a counter.
+    const id = (this.opts.chatIdBase ?? 0) + (this.nextChatId++ % 0x1000000);
+    const message: ChatMessage = { id, playerId: player.id, name: player.name, text, ts: now };
+    if (this.opts.keepChatHistory ?? true) {
+      this.chat.push(message);
+      if (this.chat.length > CHAT_HISTORY_SIZE) this.chat.shift();
+    }
     this.broadcast({ t: "chat", message });
   }
 

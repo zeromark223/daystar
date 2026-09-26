@@ -46,6 +46,8 @@ export class StatsSampler {
   private readonly startedAt = Date.now();
   private readonly runtime: string;
   private lateness: number[] = [];
+  /** Called with every new sample (e.g. to forward it to the cluster agent). */
+  readonly listeners = new Set<(s: StatsSample) => void>();
 
   constructor(counts: () => Counts, onSample?: (s: StatsSample) => void) {
     this.runtime = `bun ${Bun.version}`;
@@ -80,6 +82,7 @@ export class StatsSampler {
       this.samples.push(sample);
       if (this.samples.length > HISTORY) this.samples.shift();
       onSample?.(sample);
+      for (const listener of this.listeners) listener(sample);
     }, SAMPLE_MS);
   }
 

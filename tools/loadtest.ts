@@ -131,7 +131,8 @@ function idleMs(ratio: number): number {
 function runWorker(): void {
   const map = CollisionMap.parse(readFileSync(resolve(ROOT, "client/public/assets/collision.txt"), "utf8"));
   const bots: Bot[] = [];
-  let url = "";
+  /** Base HTTP URL of the agent (cluster) or the server (standalone). */
+  let baseUrl = "";
   let chatEveryMs = 30_000;
   let movingRatio = 1;
   let gaps = new Histogram();
@@ -139,8 +140,34 @@ function runWorker(): void {
   let move = new Histogram();
   let counters = { snapshots: 0, bytesIn: 0, bytesOut: 0, corrections: 0, closes: 0, errors: 0 };
 
-  function addBot(room: string): void {
-    const ws = new WebSocket(`${url}?room=${room}`);
+  /** Like the web client: ask /api/join where to connect (retries a few times). */
+  async function joinUrl(room: string): Promise<string | null> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const res = await fetch(`${baseUrl}/api/join`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ room }),
+        });
+        if (res.ok) {
+          const { wsUrl } = (await res.json()) as { wsUrl: string };
+          if (!wsUrl.startsWith("/")) return wsUrl;
+          const base = new URL(baseUrl);
+          return `${base.protocol === "https:" ? "wss:" : "ws:"}//${base.host}${wsUrl}`;
+        }
+      } catch {
+        // retried below
+      }
+      await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+    }
+    counters.errors++;
+    return null;
+  }
+
+  async function addBot(room: string): Promise<void> {
+    const url = await joinUrl(room);
+    if (!url) return;
+    const ws = new WebSocket(url);
     ws.binaryType = "arraybuffer";
     const character = CHARACTER_IDS[Math.floor(Math.random() * CHARACTER_IDS.length)];
     const bot: Bot = {
@@ -275,15 +302,15 @@ function runWorker(): void {
     counters = { snapshots: 0, bytesIn: 0, bytesOut: 0, corrections: 0, closes: 0, errors: 0 };
   }, 1000);
 
-  type Command = { cmd: "config"; url: string; chatEveryMs: number; movingRatio: number } | { cmd: "add"; room: string };
+  type Command = { cmd: "config"; baseUrl: string; chatEveryMs: number; movingRatio: number } | { cmd: "add"; room: string };
   createInterface({ input: process.stdin }).on("line", (line) => {
     const msg = JSON.parse(line) as Command;
     if (msg.cmd === "config") {
-      url = msg.url;
+      baseUrl = msg.baseUrl;
       chatEveryMs = msg.chatEveryMs;
       movingRatio = msg.movingRatio;
     } else {
-      addBot(msg.room);
+      void addBot(msg.room);
     }
   });
 }
@@ -570,7 +597,7 @@ async function runOrchestrator(): Promise<void> {
       connected.set(w, r.connected);
     });
     workers.push(w);
-    tell(w, { cmd: "config", url: wsUrl, chatEveryMs, movingRatio: opts.movingRatio });
+    tell(w, { cmd: "config", baseUrl: httpUrl, chatEveryMs, movingRatio: opts.movingRatio });
   }
 
   const roomFor = (i: number) => (roomSize > 0 ? `${roomPrefix}-${Math.floor(i / roomSize)}` : `${roomPrefix}-all`);
