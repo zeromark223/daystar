@@ -5,6 +5,7 @@ import {
   cluster,
   connect,
   handleHttp,
+  hostedRooms,
   HOST,
   IDLE_TIMEOUT_SEC,
   localPlayers,
@@ -13,30 +14,40 @@ import {
   roomIdFor,
   startupMessage,
   stats,
+  useClusterRooms,
   usePlayerHooks,
   usePublisher,
 } from "./app.ts";
 import { AgentLink } from "./cluster/agent-link.ts";
-import { verifyPlayer } from "./cluster/ticket.ts";
+import { Mesh } from "./cluster/mesh.ts";
+import { verifyPlayer, verifyServer } from "./cluster/ticket.ts";
 import type { PeerEvents } from "./room.ts";
 
-interface SocketData {
-  roomId: string;
-  /** From the ticket in cluster mode; the room allocates one otherwise. */
-  playerId?: number;
-  events?: PeerEvents;
-}
+/** A client socket, or (cluster) a mesh link from another game server. */
+type SocketData =
+  | {
+      kind: "client";
+      roomId: string;
+      /** From the ticket in cluster mode; the room allocates one otherwise. */
+      playerId?: number;
+      events?: PeerEvents;
+    }
+  | { kind: "mesh"; server: number; events?: { message(data: Uint8Array): void; close(): void } };
+
+const MESH_PATH = "/mesh";
+const mesh = cluster ? new Mesh(cluster.server, cluster.secret, hostedRooms) : null;
+if (mesh) useClusterRooms(mesh);
 
 const topic = (roomId: string) => `room:${roomId}`;
 
 /** In cluster mode a client must present a ticket the agent signed for this server and room. */
 function admit(url: URL, roomId: string): SocketData | Response {
-  if (!cluster) return { roomId };
+  if (!cluster) return { kind: "client", roomId };
   const ticket = verifyPlayer(url.searchParams.get("ticket") ?? "", cluster.secret);
   if (!ticket || ticket.server !== cluster.server || ticket.room !== roomId) {
     return new Response("Invalid or expired ticket", { status: 401 });
   }
-  return { roomId, playerId: ticket.player };
+  return { kind: "client", roomId, playerId: ticket.player };
 }
 
 const server = Bun.serve<SocketData>({
@@ -44,6 +55,13 @@ const server = Bun.serve<SocketData>({
   hostname: HOST,
   fetch(req, server) {
     const url = new URL(req.url);
+    if (mesh && url.pathname === MESH_PATH) {
+      const token = verifyServer(url.searchParams.get("token") ?? "", cluster!.secret);
+      if (!token || !server.upgrade(req, { data: { kind: "mesh", server: token.server } })) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+      return undefined;
+    }
     if (url.pathname !== WS_PATH) return handleHttp(req);
     const roomId = roomIdFor(url);
     if (!roomId) return new Response("Bad request", { status: 400 });
@@ -53,22 +71,33 @@ const server = Bun.serve<SocketData>({
     return undefined;
   },
   websocket: {
-    maxPayloadLength: MAX_FRAME_BYTES,
+    // Mesh frames (a whole room's state) can be large; client frames are capped below.
+    maxPayloadLength: 16 * 1024 * 1024,
     idleTimeout: IDLE_TIMEOUT_SEC,
     sendPings: true,
     open(ws) {
-      ws.data.events = connect(
-        ws.data.roomId,
+      const data = ws.data;
+      if (data.kind === "mesh") {
+        data.events = mesh!.attach(data.server, { send: (d) => void ws.send(d), close: () => ws.close() });
+        return;
+      }
+      data.events = connect(
+        data.roomId,
         {
-          send: (data) => void ws.send(data),
+          send: (d) => void ws.send(d),
           close: () => ws.close(),
-          subscribe: () => ws.subscribe(topic(ws.data.roomId)),
+          subscribe: () => ws.subscribe(topic(data.roomId)),
         },
-        ws.data.playerId,
+        data.playerId,
       );
     },
     message(ws, message) {
-      if (typeof message !== "string") ws.data.events?.message(message);
+      if (typeof message === "string") return;
+      if (ws.data.kind === "client" && message.byteLength > MAX_FRAME_BYTES) {
+        ws.close(1009, "Message too big");
+        return;
+      }
+      ws.data.events?.message(message);
     },
     close(ws) {
       ws.data.events?.close();
@@ -84,8 +113,8 @@ usePublisher((roomId) => {
 
 if (cluster) {
   const agent = new AgentLink(cluster, localPlayers, (msg) => {
-    // Peer lists (mesh) and move orders (migration) arrive in later milestones.
-    void msg;
+    if (msg.t === "peers") mesh!.setPeers(msg.peers);
+    // Move orders (migration) arrive in milestone 4.
   });
   usePlayerHooks({
     joined: (room, player) => agent.send({ t: "joined", room, player }),

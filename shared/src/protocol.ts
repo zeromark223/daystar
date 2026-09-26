@@ -72,9 +72,9 @@ function unpackMotion(bits: number): { dir: Direction; moving: boolean } {
 
 // ------------------------------------------------------------------ schemas
 
-const PlayerStateStruct: Struct = { id: Type.UInt16, x: Type.UInt16, y: Type.UInt16, motion: Type.UInt8 };
-const PlayerInfoStruct: Struct = { ...PlayerStateStruct, name: Type.String, character: Type.UInt8 };
-const ChatStruct: Struct = {
+export const PlayerStateStruct: Struct = { id: Type.UInt16, x: Type.UInt16, y: Type.UInt16, motion: Type.UInt8 };
+export const PlayerInfoStruct: Struct = { ...PlayerStateStruct, name: Type.String, character: Type.UInt8 };
+export const ChatStruct: Struct = {
   id: Type.UInt32,
   playerId: Type.UInt16,
   name: Type.String,
@@ -121,31 +121,31 @@ const Schemas: Record<number, Struct> = {
 
 // ------------------------------------------------------------------ wire <-> message
 
-interface WireState {
+export interface WireState {
   id: number;
   x: number;
   y: number;
   motion: number;
 }
 
-interface WireInfo extends WireState {
+export interface WireInfo extends WireState {
   name: string;
   character: number;
 }
 
-function stateToWire(p: PlayerState): WireState {
+export function stateToWire(p: PlayerState): WireState {
   return { id: p.id, x: toWire(p.x), y: toWire(p.y), motion: packMotion(p.dir, p.moving) };
 }
 
-function stateFromWire(w: WireState): PlayerState {
+export function stateFromWire(w: WireState): PlayerState {
   return { id: w.id, x: fromWire(w.x), y: fromWire(w.y), ...unpackMotion(w.motion) };
 }
 
-function infoToWire(p: PlayerInfo): WireInfo {
+export function infoToWire(p: PlayerInfo): WireInfo {
   return { ...stateToWire(p), name: p.name, character: CHARACTER_IDS.indexOf(p.character) };
 }
 
-function infoFromWire(w: WireInfo): PlayerInfo {
+export function infoFromWire(w: WireInfo): PlayerInfo {
   const character = CHARACTER_IDS[w.character];
   if (!character) throw new RangeError("Unknown character");
   return { ...stateFromWire(w), name: w.name, character };

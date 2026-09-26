@@ -133,3 +133,92 @@ test("with publish, a newcomer gets welcome but not its own join", () => {
   late.close();
   done();
 });
+
+// ------------------------------------------------------------ cluster sync
+
+const byNumber = (a: number, b: number) => a - b;
+
+function syncedRoom() {
+  const sent = { joined: [] as number[], left: [] as number[], moves: [] as number[][], chat: [] as string[] };
+  const room = new Room("sync", {
+    map,
+    onEmpty: () => {},
+    sync: {
+      joined: (p) => sent.joined.push(p.id),
+      left: (id) => sent.left.push(id),
+      moves: (players) => sent.moves.push(players.map((p) => p.id)),
+      chat: (m) => sent.chat.push(m.text),
+    },
+  });
+  const tick = () => (room as unknown as { tick(): void }).tick();
+  const local = new FakeSocket();
+  local.events = room.accept(local, 7);
+  local.deliver({ t: "join", name: "Ann", character: "rabbit_white" });
+  const welcome = local.take().find((m) => m.t === "welcome")!;
+  const self = welcome.t === "welcome" ? welcome.players.find((p) => p.id === 7)! : null!;
+  return { room, tick, local, self, sent };
+}
+
+const remoteInfo = { id: 42, name: "Zed", character: "deer" as const, x: 540, y: 600, dir: "south" as const, moving: false };
+
+test("local joins, moves, chat and leaves are mirrored; remote ones are not echoed", () => {
+  const { room, tick, local, self, sent } = syncedRoom();
+  assert.deepEqual(sent.joined, [7]);
+  room.remoteJoined(2, remoteInfo);
+  local.deliver({ t: "move", x: self.x + 1, y: self.y, dir: "east", moving: true });
+  room.remoteMoves(2, [{ id: 42, x: 541, y: 600, dir: "east", moving: true }]);
+  tick();
+  // Both changes reach our client, but only our own player is mirrored.
+  const snap = local.take().filter((m) => m.t === "snapshot").at(-1);
+  assert.deepEqual(snap?.t === "snapshot" && snap.players.map((p) => p.id).sort(byNumber), [7, 42]);
+  assert.deepEqual(sent.moves, [[7]]);
+  local.deliver({ t: "chat", text: "hi" });
+  room.remoteChat({ id: 1, playerId: 42, name: "Zed", text: "yo", ts: 0 });
+  assert.deepEqual(sent.chat, ["hi"]);
+  local.close();
+  assert.deepEqual(sent.left, [7]);
+});
+
+test("remote players appear, move, leave, and vanish with their server", () => {
+  const { room, local, tick } = syncedRoom();
+  room.remoteJoined(2, remoteInfo);
+  room.remoteJoined(3, { ...remoteInfo, id: 43 });
+  assert.deepEqual(
+    local.take().map((m) => m.t),
+    ["player_joined", "player_joined"],
+  );
+  // Only the owning server can move or remove a replica.
+  room.remoteMoves(3, [{ id: 42, x: 900, y: 900, dir: "north", moving: true }]);
+  room.remoteLeft(3, 42);
+  tick();
+  assert.deepEqual(local.take(), []);
+  room.dropOwner(2);
+  room.dropOwner(3);
+  assert.deepEqual(
+    local.take().map((m) => (m.t === "player_left" ? m.id : m.t)),
+    [42, 43],
+  );
+  assert.equal(room.playerCount, 1);
+});
+
+test("a newcomer's welcome lists replicas, and full state for a peer lists only locals", () => {
+  const { room } = syncedRoom();
+  room.remoteJoined(2, remoteInfo);
+  const late = new FakeSocket();
+  late.events = room.accept(late, 8);
+  late.deliver({ t: "join", name: "Bo", character: "deer" });
+  const welcome = late.take().find((m) => m.t === "welcome");
+  assert.deepEqual(welcome?.t === "welcome" && welcome.players.map((p) => p.id).sort(byNumber), [7, 8, 42]);
+  assert.deepEqual(room.localState().map((p) => p.id).sort(byNumber), [7, 8]);
+  assert.deepEqual(room.playerIds().sort(byNumber), [7, 8]);
+});
+
+test("a repeated remote join refreshes state instead of announcing twice", () => {
+  const { room, local } = syncedRoom();
+  room.remoteJoined(2, remoteInfo);
+  room.remoteJoined(2, { ...remoteInfo, x: 700 });
+  assert.deepEqual(
+    local.take().map((m) => m.t),
+    ["player_joined"],
+  );
+});

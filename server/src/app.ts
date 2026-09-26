@@ -5,7 +5,7 @@ import { ROOM_ID_PATTERN, WS_PATH } from "../../shared/src/constants.ts";
 import { readServerClusterConfig } from "./cluster/config.ts";
 import { readJoinRequest, readLimited, rejectWithoutHealthToken } from "./http.ts";
 import { CLIENT_DIR, COLLISION_FILE } from "./paths.ts";
-import { Room, type Peer, type PeerEvents, type Publish } from "./room.ts";
+import { Room, type Peer, type PeerEvents, type Publish, type RoomSync } from "./room.ts";
 import { StatsSampler } from "./stats.ts";
 import { createStaticHandler } from "./static.ts";
 
@@ -69,6 +69,23 @@ export function usePlayerHooks(h: PlayerHooks): void {
   hooks = h;
 }
 
+/** Cluster mode: rooms are mirrored to other servers hosting them (mesh). */
+export interface ClusterRooms {
+  syncFor(room: string): RoomSync;
+  roomOpened(room: string): void;
+  roomClosed(room: string): void;
+}
+let clusterRooms: ClusterRooms | null = null;
+export function useClusterRooms(c: ClusterRooms): void {
+  clusterRooms = c;
+}
+
+/** Rooms hosted here, for the mesh. */
+export const hostedRooms = {
+  get: (room: string) => rooms.get(room),
+  names: () => rooms.keys(),
+};
+
 /** Room id for a WebSocket upgrade URL (/ws?room=<id>), or null if invalid. */
 export function roomIdFor(url: URL): string | null {
   const roomId = url.searchParams.get("room") ?? "";
@@ -81,7 +98,11 @@ export function connect(roomId: string, peer: Peer, playerId?: number): PeerEven
   if (!room) {
     room = new Room(roomId, {
       map: collision,
-      onEmpty: () => rooms.delete(roomId),
+      onEmpty: () => {
+        rooms.delete(roomId);
+        clusterRooms?.roomClosed(roomId);
+      },
+      sync: clusterRooms?.syncFor(roomId),
       publish: publisherFor?.(roomId) ?? null,
       onJoined: (player) => hooks?.joined(roomId, player),
       onLeft: (player) => hooks?.left(roomId, player),
@@ -89,6 +110,7 @@ export function connect(roomId: string, peer: Peer, playerId?: number): PeerEven
       keepChatHistory: !cluster,
     });
     rooms.set(roomId, room);
+    clusterRooms?.roomOpened(roomId);
   }
   sockets++;
   const events = room.accept(peer, playerId);

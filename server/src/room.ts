@@ -15,6 +15,7 @@ import {
   encodeServerMessage,
   type ChatMessage,
   type PlayerInfo,
+  type PlayerState,
   type ServerMessage,
 } from "../../shared/src/protocol.ts";
 
@@ -46,9 +47,24 @@ export interface PeerEvents {
   close(): void;
 }
 
+/**
+ * Cluster: where the room sends what happens to its *local* players so servers
+ * hosting the same room can mirror them (docs/cluster.md "Mesh sync").
+ */
+export interface RoomSync {
+  joined(player: PlayerInfo): void;
+  left(id: number): void;
+  /** Local players that changed during one tick. */
+  moves(players: PlayerState[]): void;
+  chat(message: ChatMessage): void;
+}
+
 interface Player {
   id: number;
-  peer: Peer;
+  /** null: this server holds the player's socket and is authoritative. Else the owning server. */
+  owner: number | null;
+  /** The socket, for local players only. */
+  peer: Peer | null;
   name: string;
   character: CharacterId;
   x: number;
@@ -68,6 +84,8 @@ export interface RoomOptions {
   /** Cluster: report local players to the agent. */
   onJoined?(player: number): void;
   onLeft?(player: number): void;
+  /** Cluster: mirror local players to other servers hosting this room. */
+  sync?: RoomSync;
   /** Cluster: chat ids are `chatIdBase | counter` (serverId << 24) so servers never collide. */
   chatIdBase?: number;
   /**
@@ -79,13 +97,15 @@ export interface RoomOptions {
 
 export class Room {
   readonly id: string;
+  /** Local players and replicas of players connected to other servers. */
   private readonly players = new Map<number, Player>();
+  private localCount = 0;
   private readonly chat: ChatMessage[] = [];
   /** Open sockets, including ones that have not joined yet. */
   private connections = 0;
   private nextPlayerId = 1;
   private nextChatId = 1;
-  /** Players whose position or motion changed since the last snapshot. */
+  /** Players (local or replicated) whose position or motion changed since the last snapshot. */
   private readonly changed = new Set<Player>();
   private ticker: ReturnType<typeof setInterval> | null = null;
   private readonly map: CollisionMap;
@@ -99,12 +119,19 @@ export class Room {
     this.opts = opts;
   }
 
+  /** Players connected to this server (replicas excluded). */
   get playerCount(): number {
-    return this.players.size;
+    return this.localCount;
   }
 
+  /** Ids of players connected to this server. */
   playerIds(): number[] {
-    return [...this.players.keys()];
+    return [...this.players.values()].filter((p) => p.owner === null).map((p) => p.id);
+  }
+
+  /** Full state of the local players, for a peer that starts mirroring this room. */
+  localState(): PlayerInfo[] {
+    return [...this.players.values()].filter((p) => p.owner === null).map(toInfo);
   }
 
   /**
@@ -138,6 +165,55 @@ export class Room {
     };
   }
 
+  // ------------------------------------------------------------ remote (mesh) side
+
+  /** A player of another server appeared (or its full state arrived). */
+  remoteJoined(owner: number, info: PlayerInfo): void {
+    const existing = this.players.get(info.id);
+    if (existing?.owner === null) return; // ours; a stale message
+    const player: Player = { ...info, owner, peer: null, lastMoveAt: Date.now(), chatTimes: [] };
+    this.players.set(info.id, player);
+    if (existing) {
+      // Already shown to our clients: refresh its state instead of a second join.
+      this.changed.add(player);
+      this.changed.delete(existing);
+    } else {
+      this.broadcast({ t: "player_joined", player: info });
+    }
+  }
+
+  remoteLeft(owner: number, id: number): void {
+    const p = this.players.get(id);
+    if (!p || p.owner !== owner) return;
+    this.players.delete(id);
+    this.changed.delete(p);
+    this.broadcast({ t: "player_left", id });
+  }
+
+  /** Replicated moves go out to our clients with our next tick. */
+  remoteMoves(owner: number, states: PlayerState[]): void {
+    for (const s of states) {
+      const p = this.players.get(s.id);
+      if (!p || p.owner !== owner) continue;
+      p.x = s.x;
+      p.y = s.y;
+      p.dir = s.dir;
+      p.moving = s.moving;
+      this.changed.add(p);
+    }
+  }
+
+  remoteChat(message: ChatMessage): void {
+    this.broadcast({ t: "chat", message });
+  }
+
+  /** A server went away: its players leave this room for our clients. */
+  dropOwner(owner: number): void {
+    for (const p of [...this.players.values()]) if (p.owner === owner) this.remoteLeft(owner, p.id);
+  }
+
+  // ------------------------------------------------------------ local side
+
   private join(peer: Peer, rawName: unknown, character: unknown, assignedId?: number): Player | null {
     const name = typeof rawName === "string" ? rawName.trim().slice(0, MAX_NAME_LENGTH) : "";
     if (!name || !isCharacterId(character)) {
@@ -145,7 +221,7 @@ export class Room {
       peer.close();
       return null;
     }
-    if (assignedId !== undefined && this.players.has(assignedId)) {
+    if (assignedId !== undefined && this.players.get(assignedId)?.owner === null) {
       send(peer, { t: "error", message: "This seat is already taken; please rejoin." });
       peer.close();
       return null;
@@ -155,6 +231,7 @@ export class Room {
     const spawn = findSpawn(this.map, collisionOffsetY(character));
     const player: Player = {
       id,
+      owner: null,
       peer,
       name,
       character,
@@ -166,12 +243,9 @@ export class Room {
       chatTimes: [],
     };
 
-    send(peer, {
-      t: "welcome",
-      selfId: player.id,
-      players: [...this.players.values(), player].map(toInfo),
-      chat: this.chat,
-    });
+    // A stale replica with our id (its old server lost it) is replaced silently.
+    const others = [...this.players.values()].filter((p) => p.id !== id);
+    send(peer, { t: "welcome", selfId: player.id, players: [...others, player].map(toInfo), chat: this.chat });
     this.broadcast({ t: "player_joined", player: toInfo(player) });
     // Subscribe after the announcement so the newcomer does not receive its own join.
     if (this.publish) {
@@ -179,8 +253,10 @@ export class Room {
       peer.subscribe();
     }
     this.players.set(player.id, player);
+    this.localCount++;
     this.startTicker();
     this.opts.onJoined?.(player.id);
+    this.opts.sync?.joined(toInfo(player));
     return player;
   }
 
@@ -194,10 +270,13 @@ export class Room {
   }
 
   private leave(player: Player): void {
+    if (this.players.get(player.id) !== player) return;
     this.players.delete(player.id);
+    this.localCount--;
     this.changed.delete(player);
     this.broadcast({ t: "player_left", id: player.id });
     this.opts.onLeft?.(player.id);
+    this.opts.sync?.left(player.id);
   }
 
   private handleMove(player: Player, move: { x: number; y: number; dir: Direction; moving: boolean }): void {
@@ -207,7 +286,7 @@ export class Room {
     const distance = Math.hypot(move.x - player.x, move.y - player.y);
 
     if (distance > maxDistance || !this.map.canStandAt(move.x, move.y, collisionOffsetY(player.character))) {
-      send(player.peer, { t: "correction", x: player.x, y: player.y });
+      send(player.peer!, { t: "correction", x: player.x, y: player.y });
       return;
     }
 
@@ -227,7 +306,7 @@ export class Room {
     const now = Date.now();
     player.chatTimes = player.chatTimes.filter((t) => now - t < CHAT_WINDOW_MS);
     if (player.chatTimes.length >= CHAT_BURST) {
-      send(player.peer, { t: "error", message: "You are sending messages too fast." });
+      send(player.peer!, { t: "error", message: "You are sending messages too fast." });
       return;
     }
     player.chatTimes.push(now);
@@ -240,6 +319,7 @@ export class Room {
       if (this.chat.length > CHAT_HISTORY_SIZE) this.chat.shift();
     }
     this.broadcast({ t: "chat", message });
+    this.opts.sync?.chat(message);
   }
 
   private startTicker(): void {
@@ -255,6 +335,7 @@ export class Room {
    * Send only the players that changed; idle players cost nothing. The stream
    * is reliable and ordered, and "welcome" carries everyone's full state, so
    * clients can keep the last known state of anyone missing from a snapshot.
+   * Local changes are also mirrored to other servers, once per tick.
    */
   private tick(): void {
     if (this.changed.size === 0) return;
@@ -262,15 +343,19 @@ export class Room {
     const players = [...this.changed];
     this.changed.clear();
     this.broadcast({ t: "snapshot", players });
+    if (this.opts.sync) {
+      const local = players.filter((p) => p.owner === null);
+      if (local.length > 0) this.opts.sync.moves(local.map(toState));
+    }
     recordTick(performance.now() - start);
   }
 
-  /** Encode once, send to every joined player. */
+  /** Encode once, send to every local player. */
   private broadcast(msg: ServerMessage): void {
-    if (this.players.size === 0) return;
+    if (this.localCount === 0) return;
     const data = encodeServerMessage(msg);
     if (this.publish) this.publish(data);
-    else for (const p of this.players.values()) p.peer.send(data);
+    else for (const p of this.players.values()) p.peer?.send(data);
   }
 }
 
@@ -280,6 +365,10 @@ function send(peer: Peer, msg: ServerMessage): void {
 
 function toInfo(p: Player): PlayerInfo {
   return { id: p.id, name: p.name, character: p.character, x: p.x, y: p.y, dir: p.dir, moving: p.moving };
+}
+
+function toState(p: Player): PlayerState {
+  return { id: p.id, x: p.x, y: p.y, dir: p.dir, moving: p.moving };
 }
 
 function findSpawn(map: CollisionMap, offsetY: number): { x: number; y: number } {

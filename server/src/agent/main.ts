@@ -24,11 +24,8 @@ if (!SECRET) throw new Error("The agent needs CLUSTER_SECRET");
 
 /** How long a client has to connect with its ticket. */
 const TICKET_TTL_MS = 30_000;
-/**
- * Whether a room may span several servers. Off until servers sync rooms over the
- * mesh (milestone 3); until then a room always stays on one server.
- */
-const ALLOW_SPAN = false;
+/** Rooms may span several servers; their servers sync over the mesh. */
+const ALLOW_SPAN = true;
 const HISTORY = 300;
 
 const registry = new Registry();
