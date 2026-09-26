@@ -40,11 +40,19 @@ bun run typecheck
 bun run build && bun start   # production mode on :3000
 ```
 
+## Cluster
+
+`bun run cluster` starts an agent (`:3000`) and 4 game servers (`:3001`–`:3004`);
+clients ask the agent where to connect, rooms can span servers, and overloaded
+servers hand players over. Design, configuration and Coolify setup:
+[docs/cluster.md](docs/cluster.md). The Docker image runs standalone unless
+`CLUSTER_SERVERS` is set.
+
 ## Layout
 
 ```
 shared/src/     protocol, character definitions, collision (used by client and server)
-server/src/     HTTP static server, WebSocket rooms
+server/src/     game server (main.ts), rooms, agent/, cluster/ (tickets, mesh), supervisor.ts
 client/src/     lobby, chat UI, Pixi game (camera, avatars, input)
 client/public/  generated game assets (spritesheets, map)
 assets/         raw source art (not shipped)

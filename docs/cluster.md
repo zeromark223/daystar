@@ -1,6 +1,6 @@
 # Cluster design
 
-Status: implemented on branch `scale-out` (fallback: `master`); milestones 1-4 done.
+Status: implemented on branch `scale-out` (fallback: `master`).
 
 ## Goal
 
@@ -69,8 +69,10 @@ everything exactly like today. This is the in-code fallback besides the `master`
 
 ### Supervisor
 
-`bun run cluster` (and the container entry point) starts the agent and N servers
-(`CLUSTER_SERVERS`, default 4) as child processes and restarts any that crash.
+`server/src/supervisor.ts` is the container entry point. With `CLUSTER_SERVERS=0`
+(the image default) it runs one standalone server; with N > 0 it starts the agent and
+N game servers as child processes, prefixes their logs (`[agent]`, `[s1]`, …) and
+restarts any that exit (backoff up to 10 s). `bun run cluster` runs it locally with 4.
 
 ## Placement
 
@@ -164,30 +166,43 @@ client has a single code path.
 
 ## Configuration
 
-| Variable | Used by | Meaning |
+Set on the container (the supervisor derives the per-process ones):
+
+| Variable | Default | Meaning |
 |---|---|---|
-| `CLUSTER_SECRET` | agent, servers | HMAC key for tickets and mesh auth; its presence enables cluster mode |
-| `CLUSTER_SERVERS` | supervisor | number of game servers (default 4) |
-| `AGENT_URL` | servers | internal agent WebSocket URL |
-| `SERVER_ID` | server | 1..N |
-| `SERVER_PUBLIC_URL` | server | URL clients connect to, e.g. `wss://s1.talk.ptnn.dev/ws` |
-| `SERVER_MESH_URL` | server | URL peers connect to, e.g. `ws://127.0.0.1:3001/mesh` |
-| `SERVER_CAPACITY` | server | players at 100% load |
-| `PORT` | all | as today; agent 3000, servers 3001..300N by default |
+| `CLUSTER_SERVERS` | `0` | number of game servers; `0` = standalone |
+| `CLUSTER_SECRET` | random per container | HMAC key for tickets and mesh auth |
+| `SERVER_CAPACITY` | `2000` | players per server at 100% load (tune per machine with the load test) |
+| `SERVER_PUBLIC_URL_TEMPLATE` | `ws://localhost:{port}/ws` | client-facing server URL; `{id}` and `{port}` are replaced |
+| `SERVER_BASE_PORT` | `PORT + 1` | first game server port |
+| `PORT` | `3000` | agent (or standalone server) port |
+| `HEALTH_TOKEN` | unset | protects `/api/health` |
+
+Derived per process by the supervisor: `SERVER_ID`, `SERVER_PUBLIC_URL`,
+`SERVER_MESH_URL` (`ws://127.0.0.1:<port>/mesh`), `AGENT_URL`
+(`ws://127.0.0.1:<PORT>/internal`), and `PORT` for each game server.
 
 ## Deployment (Coolify)
 
-- One container runs the supervisor (agent + 4 servers).
-- Domains on the Coolify service, one per container port:
-  `https://talk.ptnn.dev:3000`, `https://s1.talk.ptnn.dev:3001` … `https://s4.talk.ptnn.dev:3004`.
-- Cloudflare DNS: `s1`..`s4` records (or `*.talk`), proxied.
-- `HEALTH_TOKEN` protects the agent's cluster `/api/health` as it does today.
+One container, same image as standalone:
+
+1. Environment: `CLUSTER_SERVERS=4`, `CLUSTER_SECRET=<random>`, `SERVER_CAPACITY=<n>`,
+   `SERVER_PUBLIC_URL_TEMPLATE=wss://talk-s{id}.ptnn.dev/ws`, `HEALTH_TOKEN=<token>`.
+2. Domains on the Coolify service, one per container port:
+   `https://talk.ptnn.dev:3000,https://talk-s1.ptnn.dev:3001,…,https://talk-s4.ptnn.dev:3004`.
+3. Cloudflare DNS: `talk-s1` … `talk-s4` records, proxied.
+
+Server hostnames must be **first-level** subdomains (`talk-s1.ptnn.dev`, not
+`s1.talk.ptnn.dev`): Cloudflare's free Universal SSL certificate only covers the apex
+and first-level subdomains, so a proxied second-level name fails TLS.
 
 ## Load test
 
-- Bots join through the agent (`/api/join`), follow `migrate`, and rejoin on server loss.
-- Server columns come from the agent's aggregated `/api/health` (per server and total).
-- The tooling moves to Bun as well (`--runtime`/`--bot-runtime` choices go away).
+- Bots join through the agent (`/api/join`), follow `migrate`, and rejoin on server loss
+  (`migr` and `rejoin` columns).
+- Server columns come from the agent's aggregated `/api/health`; a second line per step
+  shows each server's players, CPU and loop p99.
+- `--cluster N [--capacity C]` spawns a local cluster; `--target` tests a deployed one.
 
 ## Milestones
 

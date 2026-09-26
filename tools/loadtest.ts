@@ -383,6 +383,8 @@ interface StatsSample {
 interface HealthReport {
   runtime?: string;
   now: number;
+  /** Cluster agents only: every server's own view. */
+  servers?: { server: number; alive: boolean; players: number; latest: StatsSample | null }[];
   latest: StatsSample | null;
   samples: StatsSample[];
 }
@@ -400,7 +402,9 @@ const USAGE = `Usage: bun run loadtest [options]
   --target <url>       test a running server instead of spawning one,
                        e.g. https://meet.example.com
   --health-token <s>   token for the server's /api/health, if it sets HEALTH_TOKEN
-  --port <n>           port for the spawned server               (default 3300)
+  --cluster <n>        spawn a local cluster (agent + n servers) instead of one server
+  --capacity <n>       players per server for --cluster          (default 2000)
+  --port <n>           port for the spawned server or agent      (default 3300)
   --room-prefix <s>    rooms are <prefix>-all or <prefix>-0, -1, ... (default load)
   --keep-going         continue ramping after a failed step
   --last               reuse the options of the previous run; options given with it
@@ -419,6 +423,9 @@ interface Options {
   chatEveryMs: number;
   movingRatio: number;
   port: number;
+  /** Game servers in a spawned local cluster; 0 = one standalone server. */
+  cluster: number;
+  capacity: number;
   roomPrefix: string;
   keepGoing: boolean;
   healthToken: string;
@@ -470,6 +477,8 @@ function parseOptions(): Options {
         target: { type: "string" },
         "health-token": { type: "string", default: "" },
         port: { type: "string", default: "3300" },
+        cluster: { type: "string", default: "0" },
+        capacity: { type: "string", default: "2000" },
         "room-prefix": { type: "string", default: "load" },
         "keep-going": { type: "boolean", default: false },
         help: { type: "boolean", short: "h", default: false },
@@ -502,6 +511,7 @@ function parseOptions(): Options {
   const steps = values.steps.split(",").map((s) => int("steps", s.trim(), 1));
   if (steps.some((n, i) => i > 0 && n <= steps[i - 1])) fail("--steps must be increasing");
   if (!ROOM_ID_PATTERN.test(`${values["room-prefix"]}-all`)) fail("--room-prefix may only use a-z, 0-9 and -");
+  if (values.target !== undefined && Number(values.cluster) > 0) fail("--cluster spawns a local cluster; it cannot be combined with --target");
 
   const options: Options = {
     steps,
@@ -512,6 +522,8 @@ function parseOptions(): Options {
     chatEveryMs: int("chat-every", values["chat-every"], 1) * 1000,
     movingRatio: ratio("moving", values.moving),
     port: int("port", values.port, 1),
+    cluster: int("cluster", values.cluster, 0),
+    capacity: int("capacity", values.capacity, 1),
     roomPrefix: values["room-prefix"],
     keepGoing: values["keep-going"],
     healthToken: values["health-token"],
@@ -605,7 +617,8 @@ async function runOrchestrator(): Promise<void> {
   } else {
     wsUrl = `ws://127.0.0.1:${opts.port}${WS_PATH}`;
     httpUrl = `http://127.0.0.1:${opts.port}`;
-    server = spawn(BUN, ["server/src/main.ts"], {
+    // The supervisor runs one standalone server, or the agent plus --cluster servers.
+    server = spawn(BUN, ["server/src/supervisor.ts"], {
       cwd: ROOT,
       env: {
         ...process.env,
@@ -613,6 +626,8 @@ async function runOrchestrator(): Promise<void> {
         HOST: "0.0.0.0",
         HEALTH_TOKEN: opts.healthToken,
         NODE_ENV: "production",
+        CLUSTER_SERVERS: String(opts.cluster),
+        SERVER_CAPACITY: String(opts.capacity),
         // JavaScriptCore prints one line per collection with its pause ("p=<ms>").
         BUN_JSC_logGC: "1",
       },
@@ -621,7 +636,7 @@ async function runOrchestrator(): Promise<void> {
     createInterface({ input: server.stderr! }).on("line", (line) => {
       const gc = line.match(/=> (Eden|Full)Collection.*\bp=([\d.]+)ms/);
       if (gc) gcEvents.push({ t: Date.now(), pauseMs: Number(gc[2]), full: gc[1] === "Full" });
-      else if (!/^(\[GC<|GC END!|Requesting GC)/.test(line)) process.stderr.write(line + "\n");
+      else if (!/(\[GC<|GC END!|Requesting GC)/.test(line)) process.stderr.write(line + "\n");
     });
   }
   const health = new HealthClient(httpUrl, opts.healthToken);
@@ -682,11 +697,13 @@ async function runOrchestrator(): Promise<void> {
     const elapsed = (t1 - t0) / 1000;
     let samples: StatsSample[] = [];
     let latest: StatsSample | null = null;
+    let perServer: HealthReport["servers"];
     if (serverFrom !== null) {
       try {
         const report = await health.fetch(serverFrom);
         samples = report.samples;
         latest = report.latest;
+        perServer = report.servers;
       } catch (err) {
         healthProblem = (err as Error).message;
       }
@@ -760,6 +777,16 @@ async function runOrchestrator(): Promise<void> {
       verdict,
     ].join(" | ");
     console.log(row);
+    if (perServer?.length) {
+      const parts = perServer
+        .sort((a, b) => a.server - b.server)
+        .map((s) =>
+          s.alive && s.latest
+            ? `s${s.server} ${s.players}p ${(s.latest.cpu * 100).toFixed(0)}% cpu loop ${s.latest.loopP99Ms}ms`
+            : `s${s.server} down`,
+        );
+      console.log(`       ${parts.join(" | ")}`);
+    }
     if (problems.length && !opts.keepGoing) break;
   }
 

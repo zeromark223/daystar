@@ -15,7 +15,8 @@
     "typecheck": "tsc -p client && tsc -p server",
     "test": "bun test",
     "assets": "python3 tools/build_sprites.py",
-    "loadtest": "bun tools/loadtest.ts"
+    "loadtest": "bun tools/loadtest.ts",
+    "cluster": "CLUSTER_SERVERS=4 bun server/src/supervisor.ts"
   },
   "devDependencies": {
     "@types/bun": "^1.4.2",
