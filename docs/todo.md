@@ -36,3 +36,15 @@ LZ4 is not worth it: the packed binary has almost no repeats. Plan instead:
 Over WebSocket (TCP) nothing is lost or reordered inside a connection; the real risks
 are server-side frame drops under backpressure and implementation bugs, both covered
 above. An unreliable transport (QUIC datagrams, WebRTC) would need acked baselines instead.
+
+## Chat rides the tick frame
+
+On the Coolify host (Xeon E5-2680 v4, ~21 µs per message vs ~2.5 µs on the dev laptop)
+a 1,000-player room holds when chat is off, but with every bot chatting once per 90 s
+the loop p99 doubles (800 players: 66 ms with chat, 34 ms without; move p99 989 ms vs
+105 ms). Each chat line is its own broadcast to the whole room (~7k extra sends/s at
+800 players), and each broadcast is a burst on the event loop that stacks on the tick's.
+
+Plan: queue chat lines per room and send them inside the next tick's frame (snapshot +
+chat in one message per player), so a tick costs exactly N sends however chatty the room
+is. Chat gains at most 50 ms of latency. Same idea later for joins and leaves.
