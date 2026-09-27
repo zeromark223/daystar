@@ -83,21 +83,23 @@ tools/          load test
 ## Load testing
 
 ```bash
-bun run loadtest --steps 500,1000,2000 --room-size 20
+bun tools/loadtest.ts --steps 500,1000,2000 --room-size 20
 ```
 
 Spawns a server, ramps up bot players that walk non-stop and chat, and prints per
 step: server players, CPU, event loop utilization and delay (read from the server's
 `/api/health`), snapshot arrival gaps, chat round-trip and bandwidth. `--room-size 0` puts everyone in one
-room. `bun run loadtest --help` lists all options.
+room. `bun tools/loadtest.ts --help` lists all options. (`bun run loadtest …` also works
+on Linux and macOS; on Windows call the file directly, since Bun's script shell can
+drop flags there.)
 
 To test a deployed server from this machine, point it at the public URL. Server
 columns come from its `/api/health`; if the server sets `HEALTH_TOKEN`, pass it:
 
 ```bash
-bun run loadtest --target https://meet.example.com --health-token $TOKEN --steps 200,500,1000 --room-size 20
-bun run loadtest --last               # same options again
-bun run loadtest --last --hold 60     # same, with one option changed
+bun tools/loadtest.ts --target https://meet.example.com --health-token $TOKEN --steps 200,500,1000 --room-size 20
+bun tools/loadtest.ts --last               # same options again
+bun tools/loadtest.ts --last --hold 60     # same, with one option changed
 ```
 
 A spawned server runs with `BUN_JSC_logGC` so the `gc/s` and `gc max ms` columns are

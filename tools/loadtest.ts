@@ -3,8 +3,11 @@
  * stays healthy. Bots join, walk non-stop (worst case: everyone moving) using
  * the world's real limits (sun and edge), send positions at the client rate and chat now and then.
  *
- *   bun run loadtest --steps 100,200,400 --room-size 20
- *   bun run loadtest --target https://meet.example.com --steps 200,500
+ *   bun tools/loadtest.ts --steps 100,200,400 --room-size 20
+ *   bun tools/loadtest.ts --target https://meet.example.com --steps 200,500
+ *
+ * `bun run loadtest …` works too on Linux and macOS; on Windows Bun's script shell
+ * can drop flags, so call the file directly there.
  *
  * Run with --help for the options (USAGE below).
  */
@@ -388,7 +391,7 @@ interface HealthReport {
   samples: StatsSample[];
 }
 
-const USAGE = `Usage: bun run loadtest [options]
+const USAGE = `Usage: bun tools/loadtest.ts [options]   (or: bun run loadtest [options], not on Windows)
 
   --steps <n,n,...>    total bot counts to ramp through         (default 50,100,200)
   --room-size <n>      bots per room; 0 = everyone in one room   (default 0)
@@ -490,7 +493,12 @@ function parseOptions(): Options {
       },
     }));
   } catch (err) {
-    fail((err as Error).message);
+    const message = (err as Error).message;
+    // Windows: "bun run loadtest --opt value" can reach us as just "value".
+    const hint = /Unexpected argument/.test(message)
+      ? `\nIf you used "bun run loadtest …" (notably on Windows), run "bun tools/loadtest.ts …" instead; Bun's script shell can drop flags.`
+      : "";
+    fail(message + hint);
   }
   if (values.help) {
     console.log(USAGE);
@@ -501,7 +509,7 @@ function parseOptions(): Options {
   for (const t of tokens) if (t.kind === "option") given.set(t.name, t.value);
   const reusedLast = process.argv.includes("--last");
   argv = [...given].flatMap(([name, value]) => (value === undefined ? [`--${name}`] : [`--${name}`, value]));
-  console.log(`${reusedLast ? "Re-running" : "Running"}: bun run loadtest ${describe(argv) || "(defaults)"}`);
+  console.log(`${reusedLast ? "Re-running" : "Running"}: bun tools/loadtest.ts ${describe(argv) || "(defaults)"}`);
 
   const int = (name: string, raw: string, min: number): number => {
     const n = Number(raw);
