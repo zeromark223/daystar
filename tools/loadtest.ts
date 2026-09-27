@@ -446,13 +446,19 @@ function describe(argv: string[]): string {
 
 function parseOptions(): Options {
   let argv = process.argv.slice(2);
+  const hadOptions = argv.length > 0;
   if (argv.includes("--last")) {
-    let saved: string[];
+    let saved: unknown;
     try {
-      saved = JSON.parse(readFileSync(LAST_FILE, "utf8")).argv;
+      // Tolerate a UTF-8 BOM (files copied through some Windows editors).
+      saved = JSON.parse(readFileSync(LAST_FILE, "utf8").replace(/^\uFEFF/, "")).argv;
     } catch {
-      fail(`--last: no previous run saved (${LAST_FILE})`);
+      fail(`--last: no saved options in ${LAST_FILE}`);
     }
+    if (!Array.isArray(saved) || saved.length === 0 || !saved.every((a) => typeof a === "string")) {
+      fail(`--last: ${LAST_FILE} holds no options (expected {"argv": ["--steps", "…", …]})`);
+    }
+    console.log(`Options from ${LAST_FILE}`);
     // Later occurrences win in parseArgs, so explicit options override the saved ones.
     argv = [...saved, ...argv.filter((a) => a !== "--last")];
   }
@@ -495,7 +501,7 @@ function parseOptions(): Options {
   for (const t of tokens) if (t.kind === "option") given.set(t.name, t.value);
   const reusedLast = process.argv.includes("--last");
   argv = [...given].flatMap(([name, value]) => (value === undefined ? [`--${name}`] : [`--${name}`, value]));
-  if (reusedLast) console.log(`Re-running: bun run loadtest ${describe(argv)}`);
+  console.log(`${reusedLast ? "Re-running" : "Running"}: bun run loadtest ${describe(argv) || "(defaults)"}`);
 
   const int = (name: string, raw: string, min: number): number => {
     const n = Number(raw);
@@ -531,7 +537,8 @@ function parseOptions(): Options {
   // The server keeps 5 minutes of samples; a longer window would be cut short.
   if (options.hold / 2 > 290) fail("--hold must be at most 580 seconds");
 
-  writeFileSync(LAST_FILE, JSON.stringify({ argv, savedAt: new Date().toISOString() }, null, 2) + "\n");
+  // A bare run (no options) keeps the saved ones instead of erasing them.
+  if (hadOptions) writeFileSync(LAST_FILE, JSON.stringify({ argv, savedAt: new Date().toISOString() }, null, 2) + "\n");
   return options;
 }
 
