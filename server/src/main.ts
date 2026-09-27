@@ -21,7 +21,9 @@ import {
 import { AgentLink } from "./cluster/agent-link.ts";
 import { Mesh } from "./cluster/mesh.ts";
 import { verifyPlayer, verifyServer } from "./cluster/ticket.ts";
+import { CLIENT_DIR } from "./paths.ts";
 import type { PeerEvents } from "./room.ts";
+import { warnIfClientMissing } from "./static.ts";
 
 /** A client socket, or (cluster) a mesh link from another game server. */
 type SocketData =
@@ -139,3 +141,4 @@ if (cluster) {
 }
 
 console.log(startupMessage());
+warnIfClientMissing(CLIENT_DIR);

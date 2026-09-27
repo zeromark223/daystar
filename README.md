@@ -4,6 +4,22 @@ A tiny meeting app that plays like a game: every person is a glowing star or pla
 drifting around a shared sun in a 10,000 px disc of space. Move freely and chat; the
 world is drawn entirely in code with PixiJS (no image assets). Voice chat comes later.
 
+## Quick start
+
+Daystar runs on [Bun](https://bun.sh) (1.4.2 or newer); install it first.
+
+```bash
+git clone https://github.com/zeromark223/daystar && cd daystar
+bun install          # dependencies (Vite, PixiJS, TypeScript)
+bun run build        # builds the web client into client/dist
+bun start            # http://localhost:3000
+```
+
+The built client is not committed, so `bun start` on a fresh clone without
+`bun run build` shows an "Almost there" page instead of the game.
+
+## Stack
+
 - **Client:** PixiJS v8 + Vite (TypeScript)
 - **Server:** Bun (`Bun.serve`, native WebSockets and topic pub/sub), TypeScript
   executed directly; it also serves the built client. The project is Bun-only

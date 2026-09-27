@@ -12,7 +12,7 @@ import type { AgentToServer, ServerToAgent } from "../cluster/control.ts";
 import { sign, verifyPlayer, verifyServer } from "../cluster/ticket.ts";
 import { readJoinRequest, readLimited, rejectWithoutHealthToken } from "../http.ts";
 import { CLIENT_DIR } from "../paths.ts";
-import { createStaticHandler } from "../static.ts";
+import { createStaticHandler, warnIfClientMissing } from "../static.ts";
 import type { StatsSample } from "../stats.ts";
 import { HARD_LIMIT } from "./placement.ts";
 import { Registry } from "./registry.ts";
@@ -276,3 +276,4 @@ Bun.serve<LinkData>({
 });
 
 console.log(`daystar agent on http://${HOST}:${PORT} (${runtime})`);
+warnIfClientMissing(CLIENT_DIR);
