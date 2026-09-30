@@ -9,6 +9,7 @@ import { runLobby, type LobbyChoice } from "./ui/lobby.ts";
 import { PeoplePanel } from "./ui/people.ts";
 import { unlockAudio } from "./voice/audio.ts";
 import { Microphone } from "./voice/microphone.ts";
+import { voiceProblem } from "./voice/support.ts";
 import { VoicePlayer } from "./voice/voice-player.ts";
 
 /** The room in the URL (/r/<id>), or null on the home page (create a room). */
@@ -152,7 +153,8 @@ async function main(): Promise<void> {
           msg.chat.forEach((m) => chat!.addMessage(m));
           chat.addSystem(`You joined ${roomId}.`);
           if (selfRole === "host") chat.addSystem("You are the host. Tap a player, or open People, to choose speakers.");
-          if (!VoicePlayer.supported()) chat.addSystem("This browser cannot play voice; try a recent Chrome, Edge or Firefox.");
+          const problem = voiceProblem("play");
+          if (problem) chat.addSystem(problem);
         }
         updateCount();
         joined = true;

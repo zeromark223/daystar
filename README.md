@@ -39,6 +39,22 @@ Open http://localhost:5173 and create a room: you become its host and land on
 `/r/<room-id>`. Share that URL to invite others. Add `?debug` to expose the game,
 voice player and microphone objects in the console.
 
+### Testing voice from a phone
+
+Browsers only allow the microphone and WebCodecs on secure pages (HTTPS or
+`localhost`), so `http://<your-lan-ip>:3000` on a phone gets no voice. Serve HTTPS
+with a self-signed certificate instead (standalone mode only):
+
+```bash
+openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj "/CN=daystar-dev" \
+  -addext "subjectAltName=IP:192.168.1.20" -keyout dev-key.pem -out dev-cert.pem
+bun run build
+TLS_CERT=dev-cert.pem TLS_KEY=dev-key.pem bun start
+```
+
+Replace the IP with your machine's LAN IP, open `https://<that-ip>:3000` on the phone
+and accept the certificate warning. (Chrome also has the
+`chrome://flags/#unsafely-treat-insecure-origin-as-secure` flag for a quick test.)
 
 ## Cluster
 

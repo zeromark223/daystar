@@ -3,6 +3,7 @@ import { audioContext } from "./audio.ts";
 import { post } from "./engine.ts";
 import type { PlaybackStats, ToWorkletNode } from "./messages.ts";
 import playbackUrl from "./playback.worklet.ts?worker&url";
+import { voiceProblem } from "./support.ts";
 
 /**
  * Plays every speaker: frames go to the voice worker for decoding, and the PCM
@@ -20,7 +21,7 @@ export class VoicePlayer {
   private muted = false;
 
   static supported(): boolean {
-    return typeof AudioDecoder !== "undefined" && typeof AudioWorkletNode !== "undefined";
+    return voiceProblem("play") === null;
   }
 
   constructor() {

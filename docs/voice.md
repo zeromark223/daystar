@@ -117,7 +117,11 @@ output: roughly 200-300 ms.
 
 WebCodecs `AudioEncoder`/`AudioDecoder` with Opus (recent Chrome, Edge, Firefox;
 Safari not verified), in a worker, plus AudioWorklet; HTTPS (or localhost) for the
-microphone. Unsupported browsers see a message and can still chat. The AudioContext
+microphone. A page opened over plain `http://` by IP address has none of these APIs
+(checked in Chrome: `AudioDecoder`, `AudioEncoder` and `getUserMedia` are all
+undefined), so testing from a phone needs HTTPS (README, "Testing voice from a
+phone"). Unsupported pages see why (not secure, or which API is missing) and can
+still chat. The AudioContext
 starts inside the Join / Create click, the one moment browsers allow it.
 
 ### Cost

@@ -2,7 +2,7 @@ import { ROOM_ID_PATTERN, WS_PATH } from "../../shared/src/constants.ts";
 import type { PlayerInfo } from "../../shared/src/protocol.ts";
 import { readServerClusterConfig } from "./cluster/config.ts";
 import { createRoom, hostKeySecret, isHostKey } from "./host-key.ts";
-import { readJoinRequest, rejectWithoutHealthToken } from "./http.ts";
+import { readJoinRequest, rejectWithoutHealthToken, scheme } from "./http.ts";
 import { CLIENT_DIR } from "./paths.ts";
 import { Room, type Peer, type PeerEvents, type Publish, type RoomSync } from "./room.ts";
 import { StatsSampler } from "./stats.ts";
@@ -40,8 +40,8 @@ export const stats = new StatsSampler(
 
 export const startupMessage = () =>
   cluster
-    ? `daystar server ${cluster.server} on http://${HOST}:${PORT} (${stats.report().runtime}, cluster, public ${cluster.publicUrl})`
-    : `daystar on http://${HOST}:${PORT} (${stats.report().runtime}, standalone)`;
+    ? `daystar server ${cluster.server} on ${scheme()}://${HOST}:${PORT} (${stats.report().runtime}, cluster, public ${cluster.publicUrl})`
+    : `daystar on ${scheme()}://${HOST}:${PORT} (${stats.report().runtime}, standalone)`;
 
 /**
  * Runtimes with native pub/sub (Bun) register how to publish to a room's

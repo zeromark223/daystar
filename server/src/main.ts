@@ -21,6 +21,7 @@ import {
 import { AgentLink } from "./cluster/agent-link.ts";
 import { Mesh } from "./cluster/mesh.ts";
 import { verifyPlayer, verifyServer } from "./cluster/ticket.ts";
+import { tlsFromEnv } from "./http.ts";
 import { CLIENT_DIR } from "./paths.ts";
 import type { PeerEvents } from "./room.ts";
 import { warnIfClientMissing } from "./static.ts";
@@ -39,6 +40,9 @@ type SocketData =
   | { kind: "mesh"; server: number; events?: { message(data: Uint8Array): void; close(): void } };
 
 const MESH_PATH = "/mesh";
+const tls = tlsFromEnv();
+// Cluster links (agent, mesh) and the agent's URLs are plain ws:// inside the container.
+if (tls && cluster) throw new Error("TLS_CERT / TLS_KEY are for standalone testing, not cluster mode");
 const mesh = cluster ? new Mesh(cluster.server, cluster.secret, hostedRooms) : null;
 if (mesh) useClusterRooms(mesh);
 
@@ -57,6 +61,7 @@ function admit(url: URL, roomId: string): SocketData | Response {
 const server = Bun.serve<SocketData>({
   port: PORT,
   hostname: HOST,
+  tls,
   fetch(req, server) {
     const url = new URL(req.url);
     if (mesh && url.pathname === MESH_PATH) {

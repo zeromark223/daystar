@@ -7,3 +7,4 @@ client/dist
 # Leftover art from the pixel version (no longer used; everything is drawn in code)
 assets/
 client/public/assets/
+*.pem

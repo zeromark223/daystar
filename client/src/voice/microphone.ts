@@ -3,6 +3,7 @@ import { audioContext } from "./audio.ts";
 import captureUrl from "./capture.worklet.ts?worker&url";
 import { listenEncoded, post } from "./engine.ts";
 import type { ToWorkletNode } from "./messages.ts";
+import { voiceProblem } from "./support.ts";
 
 let captureLoaded: Promise<void> | null = null;
 
@@ -29,7 +30,7 @@ export class Microphone {
 
   /** Whether this browser can capture and encode voice. */
   static supported(): boolean {
-    return typeof AudioEncoder !== "undefined" && !!navigator.mediaDevices?.getUserMedia && isSecureContext;
+    return voiceProblem("send") === null;
   }
 
   get live(): boolean {
@@ -42,7 +43,8 @@ export class Microphone {
       this.setMuted(false);
       return;
     }
-    if (!Microphone.supported()) throw new Error("This browser cannot send voice (it needs WebCodecs over HTTPS).");
+    const problem = voiceProblem("send");
+    if (problem) throw new Error(problem);
     const support = await AudioEncoder.isConfigSupported({
       codec: "opus",
       sampleRate: VOICE_SAMPLE_RATE,

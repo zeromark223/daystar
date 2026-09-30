@@ -11,6 +11,22 @@ export function rejectWithoutHealthToken(req: Request, url: URL): Response | nul
   return new Response("Unauthorized", { status: 401, headers: { "content-type": "text/plain" } });
 }
 
+/**
+ * Optional HTTPS, e.g. to test voice from a phone on the LAN (browsers only allow
+ * the microphone and WebCodecs on secure pages): TLS_CERT and TLS_KEY are paths
+ * to PEM files. Standalone only; in production the proxy (Coolify) terminates TLS.
+ */
+export function tlsFromEnv(): { cert: ReturnType<typeof Bun.file>; key: ReturnType<typeof Bun.file> } | undefined {
+  const cert = process.env.TLS_CERT;
+  const key = process.env.TLS_KEY;
+  if (!cert && !key) return undefined;
+  if (!cert || !key) throw new Error("Set both TLS_CERT and TLS_KEY (or neither)");
+  return { cert: Bun.file(cert), key: Bun.file(key) };
+}
+
+/** "https" when tlsFromEnv() is set, for startup messages. */
+export const scheme = () => (tlsFromEnv() ? "https" : "http");
+
 /** Request body as text, or null once it exceeds `limit` bytes. */
 export async function readLimited(req: Request, limit: number): Promise<string | null> {
   if (!req.body) return "";
