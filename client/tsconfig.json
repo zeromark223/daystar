@@ -13,5 +13,5 @@
     "skipLibCheck": true
   },
   "include": ["src", "../shared/src"],
-  "exclude": ["../shared/src/**/*.test.ts"]
+  "exclude": ["../shared/src/**/*.test.ts", "src/**/*.test.ts"]
 }

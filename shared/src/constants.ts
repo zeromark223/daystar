@@ -40,5 +40,10 @@ export const VOICE_FRAME_MS = 20;
 export const VOICE_BITRATE = 24_000;
 /** Largest Opus frame accepted from a client (24 kbps x 20 ms is ~60 B). */
 export const MAX_VOICE_FRAME_BYTES = 512;
+/**
+ * In a room where nobody moves, voice waits for this long and goes out in its own
+ * frame (5 Opus frames); otherwise it rides the next snapshot (every 50 ms).
+ */
+export const VOICE_FLUSH_MS = 100;
 /** Voice bytes a speaker may send per second before frames are dropped (~64 kbps). */
 export const VOICE_BYTES_PER_SEC = 8_000;

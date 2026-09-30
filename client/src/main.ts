@@ -192,7 +192,7 @@ async function main(): Promise<void> {
         break;
       case "snapshot":
         game.applySnapshot(msg.players);
-        for (const frame of msg.voice) if (frame.id !== selfId) player.push(frame);
+        player.push(msg.voice.filter((frame) => frame.id !== selfId));
         break;
       case "correction":
         game.applyCorrection(msg.x, msg.y);

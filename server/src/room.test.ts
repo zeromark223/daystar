@@ -288,7 +288,8 @@ const HOST_KEY = "secret-key";
 
 function hostedRoom(opts: { sync?: ConstructorParameters<typeof Room>[1]["sync"] } = {}) {
   const room = new Room("hosted", { onEmpty: () => {}, isHostKey: (k) => k === HOST_KEY, sync: opts.sync });
-  const tick = () => (room as unknown as { tick(): void }).tick();
+  /** Run a tick `later` ms from now (idle-room voice waits VOICE_FLUSH_MS). */
+  const tick = (later = 0) => (room as unknown as { tick(now: number): void }).tick(Date.now() + later);
   const join = (name: string, hostKey = "", id?: number) => {
     const s = new FakeSocket();
     s.events = room.accept(s, id);
@@ -312,7 +313,7 @@ test("the host key makes the host, who sits in the sun and cannot move", () => {
   assert.equal(guest.self.role, "guest");
   everyone(host.s, guest.s);
   host.s.deliver({ t: "move", x: 5000, y: 5300, dir: "south", moving: true });
-  tick();
+  tick(100);
   assert.deepEqual(guest.s.take(), []);
 });
 
@@ -343,7 +344,7 @@ test("voice from the host and speakers rides the next snapshot; guests are muted
   host.s.deliver({ t: "voice", seq: 1, data });
   a.s.deliver({ t: "voice", seq: 7, data });
   b.s.deliver({ t: "voice", seq: 9, data }); // a guest: dropped
-  tick();
+  tick(100);
   for (const s of [host.s, a.s, b.s]) {
     assert.deepEqual(voiceIn(s.take()), [
       [host.self.id, 1],
@@ -353,7 +354,7 @@ test("voice from the host and speakers rides the next snapshot; guests are muted
   // Back to guest: the next frame is dropped.
   host.s.deliver({ t: "set_role", id: a.self.id, role: "guest" });
   a.s.deliver({ t: "voice", seq: 8, data });
-  tick();
+  tick(100);
   assert.deepEqual(voiceIn(b.s.take()), []);
 });
 
@@ -363,11 +364,11 @@ test("oversized and too frequent voice frames are dropped", () => {
   const a = join("Ann");
   everyone(host.s, a.s);
   host.s.deliver({ t: "voice", seq: 1, data: new Uint8Array(513) });
-  tick();
+  tick(100);
   assert.deepEqual(voiceIn(a.s.take()), []);
   // 8000 B/s budget: 500 B frames sent at once, only 16 get through.
   for (let i = 0; i < 40; i++) host.s.deliver({ t: "voice", seq: i, data: new Uint8Array(500) });
-  tick();
+  tick(100);
   assert.equal(voiceIn(a.s.take()).length, 16);
 });
 
@@ -425,7 +426,7 @@ test("cluster: roles and voice cross servers through the owner", () => {
   local.s.deliver({ t: "voice", seq: 1, data: new Uint8Array([1]) });
   room.remoteVoice(5, [{ id: 42, seq: 1, data: new Uint8Array([2]) }]);
   room.remoteVoice(6, [{ id: 42, seq: 2, data: new Uint8Array([3]) }]); // wrong owner
-  tick();
+  tick(100);
   assert.deepEqual(voiceIn(host.s.take()), [
     [2, 1],
     [42, 1],
@@ -444,4 +445,44 @@ test("a migrating speaker stays a speaker", async () => {
   await Promise.resolve();
   const welcome = moved.take().find((m) => m.t === "welcome");
   assert.equal(welcome?.t === "welcome" && welcome.players.find((p) => p.id === 42)?.role, "speaker");
+});
+
+test("idle rooms batch voice every 100 ms; a snapshot carries it at once", () => {
+  const { tick, join, everyone } = hostedRoom();
+  const host = join("Hana", HOST_KEY);
+  const a = join("Ann");
+  everyone(host.s, a.s);
+  const data = new Uint8Array([1]);
+  host.s.deliver({ t: "voice", seq: 1, data });
+  tick(20);
+  tick(50);
+  assert.deepEqual(a.s.take(), []); // nobody moved: still waiting
+  host.s.deliver({ t: "voice", seq: 2, data });
+  tick(100);
+  assert.deepEqual(voiceIn(a.s.take()), [
+    [host.self.id, 1],
+    [host.self.id, 2],
+  ]);
+  // Someone moves: the pending frame goes out with that tick's snapshot.
+  host.s.deliver({ t: "voice", seq: 3, data });
+  a.s.deliver({ t: "move", x: a.self.x + 1, y: a.self.y, dir: "east", moving: true });
+  tick(0);
+  const got = a.s.take();
+  assert.equal(got.length, 1);
+  assert.deepEqual(voiceIn(got), [[host.self.id, 3]]);
+});
+
+test("cluster: local voice goes to peers every tick, even while clients wait", () => {
+  const frames: number[][] = [];
+  const noop = () => {};
+  const { tick, join } = hostedRoom({
+    sync: { joined: noop, left: noop, moves: noop, chat: noop, role: noop, setRole: noop, voice: (f) => frames.push(f.map((x) => x.seq)) },
+  });
+  const host = join("Hana", HOST_KEY, 1);
+  host.s.deliver({ t: "voice", seq: 1, data: new Uint8Array([1]) });
+  tick(0);
+  host.s.deliver({ t: "voice", seq: 2, data: new Uint8Array([1]) });
+  tick(0);
+  tick(0);
+  assert.deepEqual(frames, [[1], [2]]);
 });

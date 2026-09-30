@@ -20,6 +20,7 @@
   "include": [
     "src",
     "../shared/src",
-    "../tools"
+    "../tools",
+    "../client/src/**/*.test.ts"
   ]
 }

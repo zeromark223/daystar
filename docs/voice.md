@@ -47,43 +47,85 @@ role.
 
 ## Voice
 
-Plain WebSocket, no WebRTC: the audio goes through the same connection and the same
-tick as positions.
+Plain WebSocket, no WebRTC: the audio goes through the same connection as positions.
 
 ```
-mic ─► AudioWorklet (20 ms frames, 48 kHz mono) ─► voice gate ─► WebCodecs Opus 24 kbps
-    ─► WS "voice {seq, data}" ─► server (role check, rate limit, queue)
-    ─► next tick: snapshot { players, voice[] } to everyone in the room (and mesh "voice")
-    ─► WebCodecs Opus decoder per speaker ─► playout buffer (120 ms) ─► speakers
+mic ─► capture worklet (20 ms frames, 48 kHz mono) ─► voice worker: gate + Opus 24 kbps
+    ─► main: WS "voice {seq, data}" ─► server (role check, rate limit, queue)
+    ─► snapshot { players, voice[] } to the room (and mesh "voice" every tick)
+    ─► main ─► voice worker: Opus decoder per speaker ─► playback worklet: adaptive delay, mix
 ```
+
+### Threads
+
+Voice must not depend on the main thread, which also renders the game: in a test
+where the page only managed 8 frames per second, decoding on the main thread
+delivered 8 audio frames per second (50 needed) because every decoder callback waited
+for a render. So:
+
+- a **capture worklet** (audio thread) posts 20 ms frames straight to the **voice
+  worker**, which runs the gate and the Opus encoder; encoded frames reach the main
+  thread in batches with one message in flight at a time (a busy main thread gets
+  bigger batches, never a backlog);
+- the main thread forwards each server message's frames to the worker in one post;
+  the worker decodes and posts PCM straight to the **playback worklet** (audio
+  thread), which schedules, mixes and reports speaking levels a few times a second.
+
+With the page rendering at 5-7 fps, playback kept up at ~50 frames per second.
+
+### Sending
 
 - **Capture:** `getUserMedia` with echo cancellation, noise suppression and auto gain.
-  An AudioWorklet cuts the signal into 20 ms frames.
 - **Voice gate:** only frames while someone is talking are encoded and sent (RMS above
   a threshold, 400 ms hangover, 60 ms pre-roll so the first syllable is kept). Silent
   speakers cost nothing, like idle players.
-- **Relay:** the server drops frames from guests, frames over 512 B, and anything above
-  8 KB/s per speaker (token bucket). Frames are queued and sent **inside the next
-  snapshot**, so a room with people talking costs exactly one frame per listener per
-  tick, however many speakers there are. Latency: up to one tick (50 ms), plus one
-  more across the mesh.
-- **Playback:** one decoder per speaker; each decoded frame is scheduled right after the
-  previous one, 120 ms behind real time. Running dry (a pause) or more than 500 ms
-  behind restarts at 120 ms. The speaking glow (speaker ring, or the sun for the host)
-  follows the decoded level.
-- **Browsers:** needs WebCodecs `AudioEncoder`/`AudioDecoder` with Opus (recent Chrome,
-  Edge, Firefox; Safari's support is not verified) and HTTPS (or localhost) for the
-  microphone. Unsupported browsers see a message and can still chat.
-- **Audio unlock:** the AudioContext starts inside the Join / Create click, the one
-  moment browsers allow it.
+- **seq = microphone time:** a frame's seq is its index in 20 ms steps of mic time,
+  counted even while the gate is closed or muted, so a jump in seq tells listeners a
+  new talk spurt started (rather than a stall).
+
+### Relay (server)
+
+- Drops frames from guests, frames over 512 B, and anything above 8 KB/s per speaker
+  (token bucket).
+- **Rides the snapshot when there is one:** in a tick where someone moved, the queued
+  frames go out inside that snapshot, costing no extra send.
+- **Idle rooms batch to 100 ms:** when nobody moves, frames wait until the oldest is
+  100 ms old (`VOICE_FLUSH_MS`) and go out alone, so a listening room gets 10 frames
+  per second per listener instead of 20. Never more sends than one per tick.
+- Mesh peers get local frames every tick (few peers; the receiving server batches again).
+
+### Playback: adaptive delay (`client/src/voice/playout.ts`)
+
+Each speaker is played `target` behind the arrival of the first frame of a talk spurt:
+
+- an underrun in the middle of a spurt (the queue ran dry) raises the target by 40 ms;
+- if, over 8 s, the queue never dropped below 50 ms when frames arrived, the target
+  shrinks by up to 10 ms;
+- changes apply at the start of the next spurt, so speech is never stretched or cut;
+- bounds 80-400 ms, start 150 ms; more than 1 s queued (a backlog after a stall) and
+  newer frames are dropped.
+
+Simulated (see `playout.test.ts`): a clean network settles at 80 ms with 50 ms bursts
+and ~110 ms with 100 ms bursts, gap-free; 0-180 ms jitter settles near 200 ms with
+about one gap per two minutes; 3% of bursts stalled by 300 ms push it to ~380 ms.
+
+Mouth-to-ear latency on a good network: ~25 ms capture and encode, ~30 ms up, 0-50
+(or 0-100 in idle rooms) waiting for the flush, ~30 ms down, 80-110 ms playout, ~20 ms
+output: roughly 200-300 ms.
+
+### Browsers
+
+WebCodecs `AudioEncoder`/`AudioDecoder` with Opus (recent Chrome, Edge, Firefox;
+Safari not verified), in a worker, plus AudioWorklet; HTTPS (or localhost) for the
+microphone. Unsupported browsers see a message and can still chat. The AudioContext
+starts inside the Join / Create click, the one moment browsers allow it.
 
 ### Cost
 
-One speaker talking: ~50 frames/s × ~60 B up to the server. Down: the frames ride the
-snapshot, adding ~2.5 frames × ~65 B ≈ 160 B per tick per listener while they talk
-(~3.2 KB/s, 26 kbps). A 1,000-listener room with one speaker is ~3.2 MB/s extra egress,
-and the message count only grows when the room was otherwise idle (a talking speaker
-makes every tick send, like a moving player).
+One speaker talking: ~50 frames/s × ~60 B up to the server. Down, per listener: ~165 B
+more per snapshot (2.5 frames × 66 B), ~3.3 KB/s (26 kbps). A 1,000-listener room
+with one speaker is ~3.3 MB/s extra egress. Messages: unchanged while people move;
+10 per second per listener in an otherwise idle room.
 
 ### Why not WebRTC (for now)
 

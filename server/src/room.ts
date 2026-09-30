@@ -8,6 +8,7 @@ import {
   MOVE_SPEED,
   TICK_RATE,
   VOICE_BYTES_PER_SEC,
+  VOICE_FLUSH_MS,
   WORLD_CENTER,
 } from "../../shared/src/constants.ts";
 import type { Direction } from "../../shared/src/direction.ts";
@@ -129,6 +130,8 @@ export class Room {
   private readonly changed = new Set<Player>();
   /** Voice frames for the next tick (local and replicated), and the local ones to mirror. */
   private voice: VoiceFrame[] = [];
+  /** When the oldest frame in `voice` arrived (Date.now()). */
+  private voiceSince = 0;
   private localVoice: VoiceFrame[] = [];
   private ticker: ReturnType<typeof setInterval> | null = null;
   /** Local players asked to migrate, and when they may be asked again. */
@@ -444,11 +447,12 @@ export class Room {
     if (player.voiceBudget < data.byteLength) return;
     player.voiceBudget -= data.byteLength;
     const frame = { id: player.id, seq, data };
-    if (this.queueVoice(frame)) this.localVoice.push(frame);
+    if (this.queueVoice(frame) && this.opts.sync) this.localVoice.push(frame);
   }
 
   private queueVoice(frame: VoiceFrame): boolean {
     if (this.voice.length >= MAX_PENDING_VOICE) return false;
+    if (this.voice.length === 0) this.voiceSince = Date.now();
     this.voice.push(frame);
     return true;
   }
@@ -529,23 +533,28 @@ export class Room {
    * Send only the players that changed; idle players cost nothing. The stream
    * is reliable and ordered, and "welcome" carries everyone's full state, so
    * clients can keep the last known state of anyone missing from a snapshot.
-   * Voice frames ride the same frame, so a talking speaker costs no extra sends.
-   * Local changes and voice are also mirrored to other servers, once per tick.
+   * Voice frames ride the snapshot when there is one, so a talking speaker costs
+   * no extra sends; in a room where nobody moves they wait up to VOICE_FLUSH_MS
+   * and go out alone, half as many sends as one per tick (docs/voice.md).
+   * Local changes and voice are also mirrored to other servers every tick (a
+   * handful of peers, and the receiving server batches again for its clients).
    */
-  private tick(): void {
-    if (this.changed.size === 0 && this.voice.length === 0) return;
+  private tick(now = Date.now()): void {
     const start = performance.now();
+    if (this.opts.sync && this.localVoice.length > 0) {
+      this.opts.sync.voice(this.localVoice);
+      this.localVoice = [];
+    }
+    const voiceDue = this.voice.length > 0 && (this.changed.size > 0 || now - this.voiceSince >= VOICE_FLUSH_MS);
+    if (this.changed.size === 0 && !voiceDue) return;
     const players = [...this.changed];
     this.changed.clear();
     const voice = this.voice;
-    const localVoice = this.localVoice;
     this.voice = [];
-    this.localVoice = [];
     this.broadcast({ t: "snapshot", players, voice });
     if (this.opts.sync) {
       const local = players.filter((p) => p.owner === null);
       if (local.length > 0) this.opts.sync.moves(local.map(toState));
-      if (localVoice.length > 0) this.opts.sync.voice(localVoice);
     }
     recordTick(performance.now() - start);
   }
