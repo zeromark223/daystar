@@ -831,12 +831,19 @@ async function runOrchestrator(): Promise<void> {
   }
   const health = new HealthClient(httpUrl, opts.healthToken);
   let runtimeLabel = "unknown runtime";
+  /** A protected remote server without --health-token: run on the bots' own measurements. */
+  let noServerStats = false;
   try {
     await health.waitReady(opts.target ? 0 : 60_000);
     runtimeLabel = (await health.fetch(Date.now())).runtime ?? runtimeLabel;
   } catch (err) {
-    server?.kill();
-    fail((err as Error).message);
+    if (opts.target && !opts.healthToken && (err as Error).message.includes("needs a token")) {
+      noServerStats = true;
+      console.warn(`${(err as Error).message}; continuing without server columns`);
+    } else {
+      server?.kill();
+      fail((err as Error).message);
+    }
   }
   console.log(opts.target ? `Target ${wsUrl} (${runtimeLabel})` : `Spawned ${runtimeLabel} server on port ${opts.port}`);
   console.log(`Bots walk ${Math.round(opts.movingRatio * 100)}% of the time${chatEveryMs ? "" : ", no chat"}`);
@@ -921,10 +928,12 @@ async function runOrchestrator(): Promise<void> {
     window = [];
     let serverFrom: number | null = null;
     let healthProblem = "";
-    try {
-      serverFrom = (await health.fetch(Date.now())).now;
-    } catch (err) {
-      healthProblem = (err as Error).message;
+    if (!noServerStats) {
+      try {
+        serverFrom = (await health.fetch(Date.now())).now;
+      } catch (err) {
+        healthProblem = (err as Error).message;
+      }
     }
     const t0 = Date.now();
     await sleep((hold / 2) * 1000);
