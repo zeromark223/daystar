@@ -1,8 +1,9 @@
 # Daystar
 
 A tiny meeting app that plays like a game: every person is a glowing star or planet
-drifting around a shared sun in a 10,000 px disc of space. Move freely and chat; the
-world is drawn entirely in code with PixiJS (no image assets). Voice chat comes later.
+drifting around a shared sun in a 10,000 px disc of space. Move freely, chat, and
+listen: whoever creates a room is its host (the sun itself) and chooses who may speak.
+The world is drawn entirely in code with PixiJS (no image assets).
 
 ## Quick start
 
@@ -34,8 +35,9 @@ bun install
 bun run dev          # server on :3000 (watch) + Vite on :5173 (proxies /ws)
 ```
 
-Open http://localhost:5173 — you get redirected to a random room (`/r/<room-id>`).
-Share the URL to invite others. Add `?debug` to expose the game object in the console.
+Open http://localhost:5173 and create a room: you become its host and land on
+`/r/<room-id>`. Share that URL to invite others. Add `?debug` to expose the game,
+voice player and microphone objects in the console.
 
 
 ## Cluster
@@ -67,6 +69,14 @@ tools/          load test
 - Newcomers appear near someone already in the room, or on a ring around the sun.
 - Sky, nebulae, sun, glows and trails are generated at startup (canvas gradients and
   PixiJS graphics); the minimap and wheel / `+` `-` zoom help finding people.
+
+## Roles and voice
+
+- **Host:** creates the room (`POST /api/rooms` hands out a host key), is drawn as the
+  sun, and taps a player (or uses the People panel) to make them a speaker or a guest.
+- **Speakers** (up to 8) and the host can turn their mic on; **guests** listen.
+- Voice is Opus (WebCodecs) over the same WebSocket, only while someone is talking,
+  relayed inside the 20 Hz snapshot. Details: [docs/voice.md](docs/voice.md).
 
 ## Networking
 
@@ -122,6 +132,8 @@ Build from the `Dockerfile` (Bun). The container listens on `PORT` (default 3000
 exposes `GET /healthz` (plain liveness) and `GET /api/health` (JSON load stats: rooms,
 players, CPU, event loop, memory, last 5 minutes of 1 s samples). Set `HEALTH_TOKEN`
 to require `Authorization: Bearer <token>` on `/api/health` in production. WebSockets go through the normal HTTP proxy on `/ws`.
+Set `ROOM_SECRET` (any long random string) so hosts keep their rooms across restarts
+(a cluster uses `CLUSTER_SECRET` for this). The microphone needs HTTPS.
 
 ## License
 

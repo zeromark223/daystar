@@ -14,7 +14,7 @@
  * - Writes into one growable buffer with DataView instead of one Buffer per field.
  * - Structs are compiled once (cached) instead of re-walked with for-in per call.
  * - Strings are UTF-8 with a UInt16 byte-length prefix (was UTF-16, zero-terminated).
- * - Object16 added; counts that overflow throw instead of silently writing 0.
+ * - Object16 and Bytes added; counts that overflow throw instead of silently writing 0.
  * - Int64 / UInt64 use BigInt DataView accessors (the old math was lossy).
  * - Little-endian, the original default.
  */
@@ -35,6 +35,8 @@ export const Type = {
   Array8: 13,
   Array16: 14,
   Object16: 15,
+  /** Raw bytes with a UInt16 length prefix (decoded as a Uint8Array copy). */
+  Bytes: 16,
 } as const;
 
 export type TypeId = (typeof Type)[keyof typeof Type];
@@ -166,6 +168,15 @@ class Writer {
         this.pos += 2 + written;
         return;
       }
+      case Type.Bytes: {
+        const b = v as Uint8Array;
+        if (b.byteLength > 0xffff) throw new RangeError("Schema: bytes longer than 65535");
+        this.ensure(2 + b.byteLength);
+        this.view.setUint16(this.pos, b.byteLength, true);
+        this.bytes.set(b, this.pos + 2);
+        this.pos += 2 + b.byteLength;
+        return;
+      }
       default:
         throw new Error(`Schema: type ${type} is not a primitive`);
     }
@@ -257,6 +268,13 @@ class Reader {
         if (start + len > this.bytes.byteLength) throw new RangeError("Schema: string past end of buffer");
         this.pos = start + len;
         return utf8Decoder.decode(this.bytes.subarray(start, start + len));
+      }
+      case Type.Bytes: {
+        const len = v.getUint16(p, true);
+        const start = p + 2;
+        if (start + len > this.bytes.byteLength) throw new RangeError("Schema: bytes past end of buffer");
+        this.pos = start + len;
+        return this.bytes.slice(start, start + len);
       }
       default:
         throw new Error(`Schema: type ${type} is not a primitive`);

@@ -5,14 +5,17 @@ import {
   infoToWire,
   PlayerInfoStruct,
   PlayerStateStruct,
+  VoiceFrameStruct,
   stateFromWire,
   stateToWire,
   type ChatMessage,
   type PlayerInfo,
   type PlayerState,
+  type VoiceFrame,
   type WireInfo,
   type WireState,
 } from "../../../shared/src/protocol.ts";
+import { roleFromIndex, roleIndex, type Role } from "../../../shared/src/roles.ts";
 
 /**
  * Server-to-server room sync (docs/cluster.md "Mesh sync"): binary frames with
@@ -35,9 +38,29 @@ export type MeshMessage =
    * Reply to takeover: the player's last state, or null if the sender did not
    * have it. The sender now treats the player as a replica of the requester.
    */
-  | { t: "handoff"; room: string; id: number; player: PlayerInfo | null };
+  | { t: "handoff"; room: string; id: number; player: PlayerInfo | null }
+  /** The sender's player `id` has a new role. */
+  | { t: "role"; room: string; id: number; role: Role }
+  /** Ask the receiver (the player's server) to change the role of its player `id`. */
+  | { t: "set_role"; room: string; id: number; role: Role }
+  /** Voice frames from the sender's speakers during one tick. */
+  | { t: "voice"; room: string; frames: VoiceFrame[] };
 
-const Op = { interest: 100, room_state: 101, joined: 102, left: 103, moves: 104, chat: 105, takeover: 106, handoff: 107 } as const;
+const Op = {
+  interest: 100,
+  room_state: 101,
+  joined: 102,
+  left: 103,
+  moves: 104,
+  chat: 105,
+  takeover: 106,
+  handoff: 107,
+  role: 108,
+  set_role: 109,
+  voice: 110,
+} as const;
+
+const RoleStruct: Struct = { room: Type.String, id: Type.UInt16, role: Type.UInt8 };
 
 const Schemas: Record<number, Struct> = {
   [Op.interest]: { room: Type.String, on: Type.UInt8 },
@@ -48,6 +71,9 @@ const Schemas: Record<number, Struct> = {
   [Op.chat]: { room: Type.String, message: Type.Object8, message_Struct: ChatStruct },
   [Op.takeover]: { room: Type.String, id: Type.UInt16 },
   [Op.handoff]: { room: Type.String, id: Type.UInt16, player: Type.Object8, player_Struct: PlayerInfoStruct },
+  [Op.role]: RoleStruct,
+  [Op.set_role]: RoleStruct,
+  [Op.voice]: { room: Type.String, frames: Type.Object8, frames_Struct: VoiceFrameStruct },
 };
 
 export function encodeMesh(msg: MeshMessage): Uint8Array<ArrayBuffer> {
@@ -74,6 +100,11 @@ export function encodeMesh(msg: MeshMessage): Uint8Array<ArrayBuffer> {
         { room: msg.room, id: msg.id, player: msg.player ? [infoToWire(msg.player)] : [] },
         Op.handoff,
       );
+    case "role":
+    case "set_role":
+      return encode(Schemas[Op[msg.t]], { room: msg.room, id: msg.id, role: roleIndex(msg.role) }, Op[msg.t]);
+    case "voice":
+      return encode(Schemas[Op.voice], msg, Op.voice);
   }
 }
 
@@ -112,6 +143,15 @@ export function decodeMesh(bytes: Uint8Array): MeshMessage | null {
         if (m.player.length > 1) return null;
         return { t: "handoff", room: m.room, id: m.id, player: m.player[0] ? infoFromWire(m.player[0]) : null };
       }
+      case Op.role:
+      case Op.set_role: {
+        const m = decode<{ room: string; id: number; role: number }>(schema, bytes, 1);
+        const role = roleFromIndex(m.role);
+        if (!role) return null;
+        return { t: op === Op.role ? "role" : "set_role", room: m.room, id: m.id, role };
+      }
+      case Op.voice:
+        return { t: "voice", ...decode<{ room: string; frames: VoiceFrame[] }>(schema, bytes, 1) };
       default:
         return null;
     }

@@ -10,13 +10,17 @@ import {
   type ServerMessage,
 } from "./protocol.ts";
 
-const player = { id: 7, name: "Mochi", appearance: 5, x: 540.5, y: 600.25, dir: "west" as const, moving: true };
+const player = { id: 7, name: "Mochi", appearance: 5, x: 540.5, y: 600.25, dir: "west" as const, moving: true, role: "speaker" as const };
 
 test("client messages round-trip", () => {
   const messages: ClientMessage[] = [
-    { t: "join", name: "Mochi 🌟", appearance: 23 },
+    { t: "join", name: "Mochi 🌟", appearance: 23, hostKey: "" },
+    { t: "join", name: "Host", appearance: 0, hostKey: "k3y" },
     { t: "chat", text: "Xin chào mọi người" },
     { t: "move", x: 123.25, y: 9876.75, dir: "north", moving: false },
+    { t: "set_role", id: 9, role: "speaker" },
+    { t: "set_role", id: 9, role: "guest" },
+    { t: "voice", seq: 65535, data: new Uint8Array([1, 2, 3]) },
   ];
   for (const m of messages) assert.deepEqual(decodeClientMessage(encodeClientMessage(m)), m);
 });
@@ -30,8 +34,10 @@ test("server messages round-trip", () => {
     { t: "chat", message: chat },
     { t: "correction", x: 10, y: 20.5 },
     { t: "error", message: "nope" },
-    { t: "snapshot", players: [{ id: 1, x: 9999.75, y: 0, dir: "south", moving: true }] },
+    { t: "snapshot", players: [{ id: 1, x: 9999.75, y: 0, dir: "south", moving: true }], voice: [] },
+    { t: "snapshot", players: [], voice: [{ id: 2, seq: 4, data: new Uint8Array([9, 8]) }] },
     { t: "migrate" },
+    { t: "role", id: 7, role: "host" },
   ];
   for (const m of messages) assert.deepEqual(decodeServerMessage(encodeServerMessage(m)), m);
 });
@@ -46,7 +52,7 @@ test("positions are quantized to the wire grid", () => {
 
 test("snapshot costs 7 bytes per player", () => {
   const players = Array.from({ length: 100 }, (_, i) => ({ id: i, x: i, y: i, dir: "south" as const, moving: false }));
-  assert.equal(encodeServerMessage({ t: "snapshot", players }).length, 1 + 2 + 100 * 7);
+  assert.equal(encodeServerMessage({ t: "snapshot", players, voice: [] }).length, 1 + 2 + 100 * 7 + 1);
 });
 
 test("malformed or unknown frames decode to null", () => {
@@ -55,7 +61,9 @@ test("malformed or unknown frames decode to null", () => {
   const move = encodeClientMessage({ t: "move", x: 1, y: 2, dir: "south", moving: false });
   assert.equal(decodeClientMessage(move.subarray(0, move.length - 1)), null);
   // Unknown appearance index.
-  assert.equal(decodeClientMessage(new Uint8Array([1, 1, 0, 65, 200])), null);
+  assert.equal(decodeClientMessage(new Uint8Array([1, 1, 0, 65, 200, 0, 0])), null);
+  // A client cannot ask for the host role.
+  assert.equal(decodeClientMessage(new Uint8Array([4, 1, 0, 2])), null);
   // Server-only opcode sent by a client.
   assert.equal(decodeClientMessage(encodeServerMessage({ t: "player_left", id: 1 })), null);
 });

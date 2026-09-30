@@ -10,6 +10,7 @@
 import { ROOM_ID_PATTERN } from "../../../shared/src/constants.ts";
 import type { AgentToServer, ServerToAgent } from "../cluster/control.ts";
 import { sign, verifyPlayer, verifyServer } from "../cluster/ticket.ts";
+import { createRoom } from "../host-key.ts";
 import { readJoinRequest, readLimited, rejectWithoutHealthToken } from "../http.ts";
 import { CLIENT_DIR } from "../paths.ts";
 import { createStaticHandler, warnIfClientMissing } from "../static.ts";
@@ -233,6 +234,8 @@ async function handleHttp(req: Request): Promise<Response> {
         return await handleJoin(req);
       case "/api/migrate":
         return await handleMigrate(req);
+      case "/api/rooms":
+        return createRoom(req, SECRET);
       default:
         return await serveStatic(req);
     }

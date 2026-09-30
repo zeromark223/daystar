@@ -1,8 +1,9 @@
 import { Container, Graphics, Sprite, Text } from "pixi.js";
 import { appearanceOf, type AppearanceId, type BodyKind } from "../../../shared/src/appearance.ts";
-import { TICK_RATE } from "../../../shared/src/constants.ts";
+import { SUN_RADIUS, TICK_RATE, WORLD_CENTER } from "../../../shared/src/constants.ts";
 import type { Direction } from "../../../shared/src/direction.ts";
 import type { PlayerInfo } from "../../../shared/src/protocol.ts";
+import { ROLE_LABELS, type Role } from "../../../shared/src/roles.ts";
 import { brightnessAt } from "../../../shared/src/space.ts";
 import { glowTexture, planetTexture } from "./textures.ts";
 
@@ -17,6 +18,7 @@ const TRAIL_POINTS = 14;
 const TRAIL_EVERY_MS = 45;
 /** Bodies never shrink below this share of their size when the camera zooms out. */
 const MIN_SCREEN_SCALE = 0.55;
+const ROLE_COLOR = 0xffd166;
 
 /** Size of each kind of body, in world pixels at zoom 1. */
 const SIZES: Record<BodyKind, { core: number; glow: number }> = {
@@ -87,7 +89,8 @@ function drawBody(kind: BodyKind, color: number): Container {
 
 /**
  * One player: a glowing body (and its trail) in the world layer; the name tag
- * and chat bubble live in the unscaled overlay so text stays crisp.
+ * and chat bubble live in the unscaled overlay so text stays crisp. The host has
+ * no body of its own: it is the sun, and its tag sits on top of it.
  */
 export class Avatar {
   readonly id: number;
@@ -97,6 +100,7 @@ export class Avatar {
   y: number;
   dir: Direction;
   moving: boolean;
+  role: Role;
 
   private readonly isSelf: boolean;
   private readonly color: number;
@@ -108,8 +112,13 @@ export class Avatar {
   private lastTrailAt = 0;
   /** Only for the local player: a faint marker once it has faded near the edge. */
   private readonly marker: Graphics | null = null;
+  /** Speakers wear a ring that swells while they talk. */
+  private readonly ring: Graphics;
+  /** How loud this player is talking, 0..1, set every frame. */
+  private voiceLevel = 0;
   private readonly tag = new Container();
   private readonly label: Text;
+  private readonly roleTag: Text;
   private bubble: Container | null = null;
   private bubbleUntil = 0;
   private readonly samples: Sample[] = [];
@@ -122,6 +131,7 @@ export class Avatar {
     this.y = info.y;
     this.dir = info.dir;
     this.moving = info.moving;
+    this.role = info.role;
     this.isSelf = isSelf;
 
     const look = appearanceOf(info.appearance);
@@ -131,7 +141,8 @@ export class Avatar {
     const glow = new Sprite({ texture: glowTexture(), anchor: 0.5, blendMode: "add", tint: this.color });
     glow.width = glow.height = SIZES[this.kind].glow;
     this.core = drawBody(this.kind, this.color);
-    this.body.addChild(glow, this.core);
+    this.ring = new Graphics().circle(0, 0, SIZES[this.kind].core * 2.4).stroke({ color: ROLE_COLOR, width: 2, alpha: 0.9 });
+    this.body.addChild(glow, this.ring, this.core);
     bodies.addChild(this.body);
     if (isSelf) {
       // Outside the body so it does not fade with it.
@@ -153,10 +164,46 @@ export class Avatar {
       },
     });
     this.label.anchor.set(0.5, 1);
-    this.tag.addChild(this.label);
+    this.roleTag = new Text({
+      text: "",
+      style: {
+        fontFamily: "Space Grotesk, system-ui, sans-serif",
+        fontSize: 10,
+        fontWeight: "700",
+        letterSpacing: 1.2,
+        fill: ROLE_COLOR,
+        stroke: { color: 0x05060d, width: 3, join: "round" },
+      },
+    });
+    this.roleTag.anchor.set(0.5, 1);
+    this.tag.addChild(this.roleTag, this.label);
     overlay.addChild(this.tag);
+    this.setRole(info.role);
 
     this.pushSample(performance.now(), info);
+  }
+
+  setRole(role: Role): void {
+    this.role = role;
+    const host = role === "host";
+    this.body.visible = !host;
+    this.trail.visible = !host;
+    this.ring.visible = role === "speaker";
+    this.roleTag.visible = role !== "guest";
+    this.roleTag.text = ROLE_LABELS[role].toUpperCase();
+    this.label.style.fontSize = host ? 16 : 13;
+    this.label.style.fill = host || this.isSelf ? 0xffe9a8 : 0xe8ecff;
+    this.roleTag.y = -this.label.height - 1;
+    if (host) {
+      this.x = WORLD_CENTER.x;
+      this.y = WORLD_CENTER.y;
+      this.trailPoints.length = 0;
+    }
+  }
+
+  /** How loud the player is talking right now (0..1); drives the speaking glow. */
+  setVoiceLevel(level: number): void {
+    this.voiceLevel = Math.min(1, level);
   }
 
   /** Update facing and motion (drives the trail). */
@@ -222,19 +269,32 @@ export class Avatar {
 
     this.bubble = new Container();
     this.bubble.addChild(bg, content);
-    this.bubble.y = -this.label.height - 4;
+    this.bubble.y = this.headroom();
     this.tag.addChild(this.bubble);
     this.bubbleUntil = performance.now() + BUBBLE_MS;
   }
 
+  /** Where the bubble starts above the tag's anchor. */
+  private headroom(): number {
+    return -this.label.height - (this.roleTag.visible ? this.roleTag.height : 0) - 4;
+  }
+
   /** Sync the drawing with the current position; call once per frame after the camera moves. */
   render(now: number, worldX: number, worldY: number, zoom: number): void {
+    if (this.role === "host") {
+      this.renderOnSun(now, worldX, worldY, zoom);
+      return;
+    }
     const brightness = brightnessAt(this.x, this.y);
     const scale = Math.max(1, MIN_SCREEN_SCALE / zoom);
     this.body.position.set(this.x, this.y);
     this.body.scale.set(scale);
     this.body.alpha = brightness;
     if (this.kind === "star") this.core.rotation = now * 0.0006;
+    if (this.ring.visible) {
+      this.ring.scale.set(1 + this.voiceLevel * 0.45);
+      this.ring.alpha = 0.45 + this.voiceLevel * 0.55;
+    }
     if (this.marker) {
       this.marker.position.set(this.x, this.y);
       this.marker.scale.set(scale);
@@ -248,7 +308,23 @@ export class Avatar {
     // Faded players disappear from view, name and bubble included; you still see your own.
     this.tag.alpha = this.isSelf ? Math.max(brightness, 0.6) : brightness;
     this.tag.visible = this.tag.alpha > 0.02;
+    this.renderBubble(now);
+  }
 
+  /** The host's name and bubble float above the sun. */
+  private renderOnSun(now: number, worldX: number, worldY: number, zoom: number): void {
+    this.marker?.position.set(this.x, this.y);
+    if (this.marker) this.marker.alpha = 0;
+    this.tag.position.set(
+      Math.round(worldX + WORLD_CENTER.x * zoom),
+      Math.round(worldY + (WORLD_CENTER.y - SUN_RADIUS * 0.85) * zoom - 8),
+    );
+    this.tag.alpha = 1;
+    this.tag.visible = true;
+    this.renderBubble(now);
+  }
+
+  private renderBubble(now: number): void {
     if (this.bubble) {
       const left = this.bubbleUntil - now;
       if (left <= 0) {
@@ -256,6 +332,7 @@ export class Avatar {
         this.bubble = null;
       } else {
         this.bubble.alpha = Math.min(1, left / 400);
+        this.bubble.y = this.headroom();
       }
     }
   }

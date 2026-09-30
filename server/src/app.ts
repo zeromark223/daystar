@@ -1,6 +1,7 @@
 import { ROOM_ID_PATTERN, WS_PATH } from "../../shared/src/constants.ts";
 import type { PlayerInfo } from "../../shared/src/protocol.ts";
 import { readServerClusterConfig } from "./cluster/config.ts";
+import { createRoom, hostKeySecret, isHostKey } from "./host-key.ts";
 import { readJoinRequest, rejectWithoutHealthToken } from "./http.ts";
 import { CLIENT_DIR } from "./paths.ts";
 import { Room, type Peer, type PeerEvents, type Publish, type RoomSync } from "./room.ts";
@@ -21,6 +22,7 @@ export const MAX_FRAME_BYTES = 4 * 1024;
 export const IDLE_TIMEOUT_SEC = 60;
 
 export const cluster = readServerClusterConfig();
+const hostSecret = hostKeySecret(cluster?.secret);
 
 const rooms = new Map<string, Room>();
 const serveStatic = createStaticHandler(CLIENT_DIR);
@@ -101,6 +103,7 @@ export function connect(roomId: string, peer: Peer, playerId?: number, resume?: 
       onLeft: (player) => hooks?.left(roomId, player),
       chatIdBase: cluster ? cluster.server * 0x1000000 : 0,
       keepChatHistory: !cluster,
+      isHostKey: (key) => isHostKey(roomId, key, hostSecret),
     });
     rooms.set(roomId, room);
     clusterRooms?.roomOpened(roomId);
@@ -139,6 +142,9 @@ export async function handleHttp(req: Request): Promise<Response> {
       }
       case "/api/join":
         return await handleJoin(req);
+      case "/api/rooms":
+        // In a cluster the agent creates rooms (the same secret makes the same keys).
+        return cluster ? new Response("Ask the agent", { status: 404 }) : createRoom(req, hostSecret);
       case WS_PATH:
         return new Response("WebSocket upgrade required", { status: 426 });
       default:

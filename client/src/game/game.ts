@@ -3,6 +3,7 @@ import { appearanceOf } from "../../../shared/src/appearance.ts";
 import { MOVE_SPEED, TICK_RATE } from "../../../shared/src/constants.ts";
 import { facing, type Direction } from "../../../shared/src/direction.ts";
 import { quantize, type PlayerInfo, type PlayerState } from "../../../shared/src/protocol.ts";
+import type { Role } from "../../../shared/src/roles.ts";
 import { canBeAt, moveInSpace } from "../../../shared/src/space.ts";
 import { Avatar } from "./avatar.ts";
 import { KeyboardInput } from "./input.ts";
@@ -11,12 +12,20 @@ import { SpaceScene } from "./space-scene.ts";
 
 export interface GameCallbacks {
   sendMove(x: number, y: number, dir: Direction, moving: boolean): void;
+  /** How loud a player is talking right now, 0..1. */
+  voiceLevel(id: number): number;
+  /** The host tapped a player (screen coordinates of the tap). */
+  pick(id: number, screenX: number, screenY: number): void;
 }
 
 const SEND_INTERVAL_MS = 1000 / TICK_RATE;
 const ARRIVE_DISTANCE = 3;
 const MIN_ZOOM = 0.12;
 const MAX_ZOOM = 2.5;
+/** The host sees more of the room around the sun. */
+const HOST_ZOOM = 0.45;
+/** A tap this close to a player (screen px) picks it. */
+const PICK_RADIUS = 34;
 
 export class Game {
   private readonly app: Application;
@@ -75,9 +84,41 @@ export class Game {
     this.selfId = id;
   }
 
+  get selfIsHost(): boolean {
+    return this.self?.role === "host";
+  }
+
   addPlayer(info: PlayerInfo): void {
     this.avatars.get(info.id)?.destroy();
     this.avatars.set(info.id, new Avatar(info, this.trails, this.bodies, this.overlay, info.id === this.selfId));
+    if (info.id === this.selfId && info.role === "host") this.becameHost();
+  }
+
+  setRole(id: number, role: Role): void {
+    const avatar = this.avatars.get(id);
+    if (!avatar || avatar.role === role) return;
+    avatar.setRole(role);
+    if (id === this.selfId && role === "host") this.becameHost();
+  }
+
+  private becameHost(): void {
+    this.tapTarget = null;
+    this.zoom = Math.min(this.zoom, HOST_ZOOM);
+  }
+
+  /** The player drawn nearest to a screen point, within PICK_RADIUS; the host (the sun) excluded. */
+  private playerAt(sx: number, sy: number): Avatar | null {
+    let best: Avatar | null = null;
+    let bestD = PICK_RADIUS;
+    for (const a of this.avatars.values()) {
+      if (a.role === "host" || a.id === this.selfId) continue;
+      const d = Math.hypot(this.world.x + a.x * this.zoom - sx, this.world.y + a.y * this.zoom - sy);
+      if (d < bestD) {
+        best = a;
+        bestD = d;
+      }
+    }
+    return best;
   }
 
   removePlayer(id: number): void {
@@ -117,6 +158,12 @@ export class Game {
     this.app.stage.hitArea = new Rectangle(0, 0, 1e6, 1e6);
     this.app.stage.on("pointertap", (e) => {
       (document.activeElement as HTMLElement | null)?.blur();
+      if (this.selfIsHost) {
+        // The host does not move; a tap picks a player instead.
+        const picked = this.playerAt(e.global.x, e.global.y);
+        if (picked) this.callbacks.pick(picked.id, e.global.x, e.global.y);
+        return;
+      }
       this.tapTarget = {
         x: (e.global.x - this.world.x) / this.zoom,
         y: (e.global.y - this.world.y) / this.zoom,
@@ -153,11 +200,20 @@ export class Game {
     }
     this.updateCamera();
     const { width, height } = this.app.screen;
+    let hostLevel = 0;
+    for (const avatar of this.avatars.values()) {
+      if (avatar.role === "guest") continue;
+      const level = this.callbacks.voiceLevel(avatar.id);
+      if (avatar.role === "host") hostLevel = level;
+      else avatar.setVoiceLevel(level);
+    }
+    this.scene.setHostVoiceLevel(hostLevel);
     this.scene.update(now, this.world.x, this.world.y, this.zoom, width, height);
     for (const avatar of this.avatars.values()) avatar.render(now, this.world.x, this.world.y, this.zoom);
     this.minimap.update(
       now,
-      [...this.avatars.values()].map((a) => ({
+      // The host is the sun, already on the map.
+      [...this.avatars.values()].filter((a) => a.role !== "host").map((a) => ({
         x: a.x,
         y: a.y,
         color: appearanceOf(a.appearance).color,
@@ -169,7 +225,7 @@ export class Game {
 
   private updateSelf(dt: number, now: number): void {
     const self = this.self;
-    if (!self) return;
+    if (!self || self.role === "host") return;
 
     let { x: vx, y: vy } = this.keyboard.vector();
     if (vx !== 0 || vy !== 0) {

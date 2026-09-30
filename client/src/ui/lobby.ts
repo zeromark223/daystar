@@ -92,10 +92,16 @@ export interface LobbyChoice {
 }
 
 /**
- * Show the join form and resolve with the player's choice.
+ * Show the join form and resolve with the player's choice. Without a room id the
+ * form creates a new room (whose creator becomes the host); `isHost` means this
+ * browser holds the room's host key.
  * `join` should reject with a user-facing message to keep the form open.
  */
-export async function runLobby(roomId: string, join: (choice: LobbyChoice) => Promise<void>): Promise<void> {
+export async function runLobby(
+  roomId: string | null,
+  isHost: boolean,
+  join: (choice: LobbyChoice) => Promise<void>,
+): Promise<void> {
   const lobby = document.getElementById("lobby")!;
   const form = document.getElementById("join-form") as HTMLFormElement;
   const nameInput = document.getElementById("name-input") as HTMLInputElement;
@@ -104,7 +110,18 @@ export async function runLobby(roomId: string, join: (choice: LobbyChoice) => Pr
   const button = document.getElementById("join-button") as HTMLButtonElement;
   const error = document.getElementById("join-error")!;
 
-  document.getElementById("lobby-room")!.textContent = roomId;
+  const note = document.getElementById("lobby-note")!;
+  document.getElementById("room-line")!.hidden = roomId === null;
+  document.getElementById("lobby-room")!.textContent = roomId ?? "";
+  if (roomId === null) {
+    button.textContent = "Create a room";
+    note.textContent = "You will host it: you become the sun at the center, and choose who may speak.";
+    note.hidden = false;
+  } else if (isHost) {
+    button.textContent = "Join as host";
+    note.textContent = "You created this room, so you are its host.";
+    note.hidden = false;
+  }
   nameInput.value = load(NAME_KEY) ?? "";
 
   const stored = Number(load(APPEARANCE_KEY));

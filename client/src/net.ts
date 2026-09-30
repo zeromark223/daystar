@@ -28,6 +28,13 @@ async function post(path: string, body: object): Promise<Placement> {
   return { wsUrl, ticket: ticket ?? null };
 }
 
+/** Ask for a new room; its creator gets the host key (the agent answers in a cluster). */
+export async function createRoom(): Promise<{ room: string; hostKey: string }> {
+  const res = await fetch("/api/rooms", { method: "POST" }).catch(() => null);
+  if (!res?.ok) throw new Error("Could not create a room right now.");
+  return (await res.json()) as { room: string; hostKey: string };
+}
+
 export class Connection {
   private readonly ws: WebSocket;
   readonly ticket: string | null;

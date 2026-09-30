@@ -29,3 +29,16 @@ export const CHAT_HISTORY_SIZE = 100;
 export const ROOM_ID_PATTERN = /^[a-z0-9-]{1,32}$/;
 
 export const WS_PATH = "/ws";
+
+/** The host may choose at most this many speakers at once. */
+export const MAX_SPEAKERS = 8;
+
+// Voice: Opus via WebCodecs, 20 ms frames at 48 kHz mono, relayed by the server
+// inside the tick frame (see docs/voice.md).
+export const VOICE_SAMPLE_RATE = 48_000;
+export const VOICE_FRAME_MS = 20;
+export const VOICE_BITRATE = 24_000;
+/** Largest Opus frame accepted from a client (24 kbps x 20 ms is ~60 B). */
+export const MAX_VOICE_FRAME_BYTES = 512;
+/** Voice bytes a speaker may send per second before frames are dropped (~64 kbps). */
+export const VOICE_BYTES_PER_SEC = 8_000;

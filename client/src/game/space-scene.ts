@@ -22,6 +22,10 @@ export class SpaceScene {
   private readonly sun = new Container();
   private readonly rays = new Graphics();
   private readonly corona: Sprite;
+  private readonly halo: Sprite;
+  /** The host's voice level (the host is the sun), 0..1, eased per frame. */
+  private hostLevel = 0;
+  private hostTarget = 0;
 
   constructor() {
     for (const spec of LAYERS) {
@@ -58,6 +62,7 @@ export class SpaceScene {
     this.corona.alpha = 0.9;
     const halo = new Sprite({ texture: glowTexture(), anchor: 0.5, blendMode: "add", tint: 0xffd27a });
     halo.width = halo.height = SUN_RADIUS * 3.4;
+    this.halo = halo;
     for (let i = 0; i < 28; i++) {
       const a = (i / 28) * Math.PI * 2;
       const long = i % 2 === 0 ? SUN_RADIUS * 2.1 : SUN_RADIUS * 1.55;
@@ -88,6 +93,11 @@ export class SpaceScene {
     this.backdrop.addChild(this.sun);
   }
 
+  /** The sun flares while the host talks. */
+  setHostVoiceLevel(level: number): void {
+    this.hostTarget = Math.min(1, level);
+  }
+
   /** Call every frame with the camera (world position and zoom) and screen size. */
   update(time: number, worldX: number, worldY: number, zoom: number, width: number, height: number): void {
     for (let i = 0; i < this.layers.length; i++) {
@@ -100,7 +110,9 @@ export class SpaceScene {
       layer.tileScale.set(0.75 + zoom * 0.25);
     }
     this.rays.rotation = time * 0.00004;
-    const pulse = 1 + Math.sin(time * 0.0012) * 0.035;
+    this.hostLevel += (this.hostTarget - this.hostLevel) * 0.25;
+    const pulse = 1 + Math.sin(time * 0.0012) * 0.035 + this.hostLevel * 0.18;
     this.corona.scale.set((SUN_RADIUS * 7 * pulse) / 256);
+    this.halo.scale.set((SUN_RADIUS * 3.4 * (1 + this.hostLevel * 0.12)) / 256);
   }
 }

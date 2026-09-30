@@ -19,7 +19,8 @@
       <div class="card">
         <h1>Daystar</h1>
         <p class="tagline">Meet in orbit around a shared sun.</p>
-        <p class="room-line">Room <code id="lobby-room"></code></p>
+        <p class="room-line" id="room-line">Room <code id="lobby-room"></code></p>
+        <p id="lobby-note" class="note" hidden></p>
         <form id="join-form">
           <label for="name-input">Your name</label>
           <input id="name-input" maxlength="20" autocomplete="nickname" placeholder="e.g. Mochi" required />
@@ -36,15 +37,30 @@
       <div class="room-chip">
         <span id="hud-room"></span>
         <span id="hud-count" class="count"></span>
+        <span id="hud-role" class="role-chip" hidden></span>
         <button id="copy-link" type="button">Copy invite link</button>
       </div>
+      <div class="voice-bar">
+        <button id="mic-button" type="button" class="mic" aria-pressed="false" hidden>Turn mic on</button>
+        <button id="sound-button" type="button" class="secondary" aria-pressed="true">Sound on</button>
+        <button id="people-toggle" type="button" class="secondary" aria-expanded="false" aria-controls="people">People</button>
+      </div>
+      <aside id="people" class="people" aria-label="People in this room" hidden>
+        <header>
+          <input id="people-filter" type="search" placeholder="Find someone" autocomplete="off" />
+          <button id="people-close" type="button" class="secondary" aria-label="Close">×</button>
+        </header>
+        <ul id="people-list"></ul>
+        <p id="people-more" class="more" hidden></p>
+      </aside>
+      <div id="pick-menu" class="pick-menu" role="dialog" hidden></div>
       <aside class="chat" aria-label="Chat">
         <ol id="chat-log" class="chat-log" aria-live="polite"></ol>
         <form id="chat-form" class="chat-form">
           <input id="chat-input" maxlength="280" autocomplete="off" placeholder="Press Enter to chat" />
         </form>
       </aside>
-      <p class="hint">WASD / arrows or tap to move · wheel or +/− to zoom · Enter to chat · Esc to stop typing</p>
+      <p class="hint" id="hint">WASD / arrows or tap to move · wheel or +/− to zoom · Enter to chat · Esc to stop typing</p>
     </section>
 
     <section id="disconnected" class="lobby" hidden>

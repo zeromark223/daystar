@@ -136,6 +136,15 @@ export class Mesh {
       case "chat":
         room?.remoteChat(msg.message);
         break;
+      case "role":
+        room?.remoteRole(server, msg.id, msg.role);
+        break;
+      case "set_role":
+        room?.remoteSetRole(msg.id, msg.role);
+        break;
+      case "voice":
+        room?.remoteVoice(server, msg.frames);
+        break;
       case "takeover": {
         // The player reconnected to `server`: stop owning it and send its state over.
         const player = room?.handOff(msg.id, server) ?? null;
@@ -193,6 +202,9 @@ export class Mesh {
       left: (id) => send({ t: "left", room, id }),
       moves: (players) => send({ t: "moves", room, players }),
       chat: (message) => send({ t: "chat", room, message }),
+      role: (id, role) => send({ t: "role", room, id, role }),
+      setRole: (owner, id, role) => this.links.get(owner)?.send(encodeMesh({ t: "set_role", room, id, role })),
+      voice: (frames) => send({ t: "voice", room, frames }),
     };
   }
 

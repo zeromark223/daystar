@@ -48,3 +48,13 @@ the loop p99 doubles (800 players: 66 ms with chat, 34 ms without; move p99 989 
 Plan: queue chat lines per room and send them inside the next tick's frame (snapshot +
 chat in one message per player), so a tick costs exactly N sends however chatty the room
 is. Chat gains at most 50 ms of latency. Same idea later for joins and leaves.
+
+## Voice follow-ups
+
+- Measure voice with the load test: a `--speakers N` option where some bots send
+  60 B frames at 50/s while "talking", to see the cost of a talking room on Coolify.
+- A speaker who reconnects comes back as a guest (roles live with the socket). Keep
+  the role for a short grace period, keyed by the player's name + a per-tab token.
+- Verify Safari (WebCodecs audio) and mobile browsers; fall back to a clear message.
+- If TCP stalls hurt on mobile networks, move voice to a WebRTC SFU (docs/voice.md
+  "Why not WebRTC").

@@ -75,3 +75,15 @@ test("malformed input throws", () => {
   assert.throws(() => encode(Item, { id: 1, score: 2 }), /label/);
   assert.throws(() => encode({ list: Type.Object8 }, { list: [] }), /list_Struct/);
 });
+
+test("bytes round-trip as a copy", () => {
+  const Blob: Struct = { id: Type.UInt16, data: Type.Bytes, tail: Type.UInt8 };
+  const data = new Uint8Array([0, 1, 254, 255]);
+  const bytes = encode(Blob, { id: 7, data, tail: 9 });
+  const out = decode<{ id: number; data: Uint8Array; tail: number }>(Blob, bytes);
+  assert.deepEqual([...out.data], [...data]);
+  assert.equal(out.tail, 9);
+  bytes[3] = 42; // the decoded bytes do not alias the frame
+  assert.equal(out.data[0], 0);
+  assert.throws(() => decode(Blob, bytes.subarray(0, 5)), RangeError);
+});

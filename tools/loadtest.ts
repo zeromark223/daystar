@@ -221,7 +221,7 @@ function runWorker(): void {
     bot.ws = ws;
     bot.pending = [];
     ws.addEventListener("open", () => {
-      ws.send(encodeClientMessage({ t: "join", name: bot.name, appearance: bot.appearance }));
+      ws.send(encodeClientMessage({ t: "join", name: bot.name, appearance: bot.appearance, hostKey: "" }));
       if (old && old !== ws) old.close();
     });
     ws.addEventListener("message", (event) => {

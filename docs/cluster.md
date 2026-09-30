@@ -134,9 +134,13 @@ client has a single code path.
   - `moves`: the locally owned players that changed, **one frame per room per peer per
     tick**, merged into the receiver's next tick. Cross-server visibility therefore
     costs up to one extra tick (≤ 50 ms), accepted to keep message counts flat,
-  - `chat` (live messages only).
+  - `chat` (live messages only),
+  - `role` (a local player's role changed) and `voice` (frames from local speakers,
+    one frame per room per peer per tick, like `moves`).
+- `set_role` goes to one server only: the owner of the player whose role the host
+  changes (see [voice.md](voice.md)).
 - **Authority**: the server holding a player's socket owns that player (move
-  validation, chat rate limit). Other servers keep a read-only replica and never
+  validation, chat rate limit, role, voice rate limit). Other servers keep a read-only replica and never
   forward replicas (no echo).
 - `welcome` lists local and replicated players.
 - **Peer lost**: players owned by that server are removed from every room, with the
@@ -169,7 +173,7 @@ Set on the container (the supervisor derives the per-process ones):
 | Variable | Default | Meaning |
 |---|---|---|
 | `CLUSTER_SERVERS` | `0` | number of game servers; `0` = standalone |
-| `CLUSTER_SECRET` | random per container | HMAC key for tickets and mesh auth |
+| `CLUSTER_SECRET` | random per container | HMAC key for tickets, mesh auth and host keys (set it, or hosts lose their rooms on restart) |
 | `SERVER_CAPACITY` | `2000` | players per server at 100% load (tune per machine with the load test) |
 | `SERVER_PUBLIC_URL_TEMPLATE` | `ws://localhost:{port}/ws` | client-facing server URL; `{id}` and `{port}` are replaced |
 | `SERVER_BASE_PORT` | `PORT + 1` | first game server port |

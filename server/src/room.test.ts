@@ -54,7 +54,7 @@ function setup(topic?: ReturnType<typeof fakeTopic>) {
     const s = new FakeSocket();
     topic?.sockets.push(s);
     s.events = room.accept(s);
-    s.deliver({ t: "join", name, appearance: 0 });
+    s.deliver({ t: "join", name, appearance: 0, hostKey: "" });
     return s;
   });
   const welcome = sockets[0].received.find((m) => m.t === "welcome")!;
@@ -119,7 +119,7 @@ test("with publish, a newcomer gets welcome but not its own join", () => {
   const late = new FakeSocket();
   topic.sockets.push(late);
   late.events = room.accept(late);
-  late.deliver({ t: "join", name: "Dan", appearance: 9 });
+  late.deliver({ t: "join", name: "Dan", appearance: 9, hostKey: "" });
   assert.deepEqual(
     late.take().map((m) => m.t),
     ["welcome"],
@@ -142,18 +142,30 @@ function syncedRoom() {
       left: (id) => sent.left.push(id),
       moves: (players) => sent.moves.push(players.map((p) => p.id)),
       chat: (m) => sent.chat.push(m.text),
+      role: () => {},
+      setRole: () => {},
+      voice: () => {},
     },
   });
   const tick = () => (room as unknown as { tick(): void }).tick();
   const local = new FakeSocket();
   local.events = room.accept(local, 7);
-  local.deliver({ t: "join", name: "Ann", appearance: 0 });
+  local.deliver({ t: "join", name: "Ann", appearance: 0, hostKey: "" });
   const welcome = local.take().find((m) => m.t === "welcome")!;
   const self = welcome.t === "welcome" ? welcome.players.find((p) => p.id === 7)! : null!;
   return { room, tick, local, self, sent };
 }
 
-const remoteInfo = { id: 42, name: "Zed", appearance: 9, x: 6200, y: 5000, dir: "south" as const, moving: false };
+const remoteInfo = {
+  id: 42,
+  name: "Zed",
+  appearance: 9,
+  x: 6200,
+  y: 5000,
+  dir: "south" as const,
+  moving: false,
+  role: "guest" as const,
+};
 
 test("local joins, moves, chat and leaves are mirrored; remote ones are not echoed", () => {
   const { room, tick, local, self, sent } = syncedRoom();
@@ -200,7 +212,7 @@ test("a newcomer's welcome lists replicas, and full state for a peer lists only 
   room.remoteJoined(2, remoteInfo);
   const late = new FakeSocket();
   late.events = room.accept(late, 8);
-  late.deliver({ t: "join", name: "Bo", appearance: 9 });
+  late.deliver({ t: "join", name: "Bo", appearance: 9, hostKey: "" });
   const welcome = late.take().find((m) => m.t === "welcome");
   assert.deepEqual(welcome?.t === "welcome" && welcome.players.map((p) => p.id).sort(byNumber), [7, 8, 42]);
   assert.deepEqual(room.localState().map((p) => p.id).sort(byNumber), [7, 8]);
@@ -258,7 +270,7 @@ test("a migrating player joins where it was, without a second join announcement"
   const moved = new FakeSocket();
   const resume = Promise.resolve({ ...remoteInfo, x: 6300, y: 5100, dir: "west" as const });
   moved.events = room.accept(moved, 42, resume);
-  moved.deliver({ t: "join", name: "Zed", appearance: 9 });
+  moved.deliver({ t: "join", name: "Zed", appearance: 9, hostKey: "" });
   await resume;
   await Promise.resolve();
   const welcome = moved.take().find((m) => m.t === "welcome");
@@ -268,4 +280,168 @@ test("a migrating player joins where it was, without a second join announcement"
   assert.equal(room.playerCount, 4);
   moved.close();
   done();
+});
+
+// ------------------------------------------------------------ roles and voice
+
+const HOST_KEY = "secret-key";
+
+function hostedRoom(opts: { sync?: ConstructorParameters<typeof Room>[1]["sync"] } = {}) {
+  const room = new Room("hosted", { onEmpty: () => {}, isHostKey: (k) => k === HOST_KEY, sync: opts.sync });
+  const tick = () => (room as unknown as { tick(): void }).tick();
+  const join = (name: string, hostKey = "", id?: number) => {
+    const s = new FakeSocket();
+    s.events = room.accept(s, id);
+    s.deliver({ t: "join", name, appearance: 0, hostKey });
+    const welcome = s.received.find((m) => m.t === "welcome");
+    const self = welcome?.t === "welcome" ? welcome.players.find((p) => p.id === welcome.selfId) : undefined;
+    return { s, self: self! };
+  };
+  const everyone = (...sockets: FakeSocket[]) => sockets.forEach((s) => s.take());
+  return { room, tick, join, everyone };
+}
+
+const voiceIn = (s: ServerMessage[]) => s.flatMap((m) => (m.t === "snapshot" ? m.voice.map((v) => [v.id, v.seq]) : []));
+
+test("the host key makes the host, who sits in the sun and cannot move", () => {
+  const { tick, join, everyone } = hostedRoom();
+  const host = join("Hana", HOST_KEY);
+  const guest = join("Gus", "wrong-key");
+  assert.equal(host.self.role, "host");
+  assert.deepEqual([host.self.x, host.self.y], [5000, 5000]);
+  assert.equal(guest.self.role, "guest");
+  everyone(host.s, guest.s);
+  host.s.deliver({ t: "move", x: 5000, y: 5300, dir: "south", moving: true });
+  tick();
+  assert.deepEqual(guest.s.take(), []);
+});
+
+test("only the host chooses speakers, and everyone hears about it", () => {
+  const { join, everyone } = hostedRoom();
+  const host = join("Hana", HOST_KEY);
+  const a = join("Ann");
+  const b = join("Ben");
+  everyone(host.s, a.s, b.s);
+  a.s.deliver({ t: "set_role", id: b.self.id, role: "speaker" });
+  assert.deepEqual(a.s.take().map((m) => m.t), ["error"]);
+  assert.deepEqual(b.s.take(), []);
+  host.s.deliver({ t: "set_role", id: b.self.id, role: "speaker" });
+  for (const s of [host.s, a.s, b.s]) assert.deepEqual(s.take(), [{ t: "role", id: b.self.id, role: "speaker" }]);
+  // Nobody can take the host role away through set_role.
+  host.s.deliver({ t: "set_role", id: host.self.id, role: "guest" });
+  assert.deepEqual(a.s.take(), []);
+});
+
+test("voice from the host and speakers rides the next snapshot; guests are muted", () => {
+  const { tick, join, everyone } = hostedRoom();
+  const host = join("Hana", HOST_KEY);
+  const a = join("Ann");
+  const b = join("Ben");
+  host.s.deliver({ t: "set_role", id: a.self.id, role: "speaker" });
+  everyone(host.s, a.s, b.s);
+  const data = new Uint8Array([1, 2, 3]);
+  host.s.deliver({ t: "voice", seq: 1, data });
+  a.s.deliver({ t: "voice", seq: 7, data });
+  b.s.deliver({ t: "voice", seq: 9, data }); // a guest: dropped
+  tick();
+  for (const s of [host.s, a.s, b.s]) {
+    assert.deepEqual(voiceIn(s.take()), [
+      [host.self.id, 1],
+      [a.self.id, 7],
+    ]);
+  }
+  // Back to guest: the next frame is dropped.
+  host.s.deliver({ t: "set_role", id: a.self.id, role: "guest" });
+  a.s.deliver({ t: "voice", seq: 8, data });
+  tick();
+  assert.deepEqual(voiceIn(b.s.take()), []);
+});
+
+test("oversized and too frequent voice frames are dropped", () => {
+  const { tick, join, everyone } = hostedRoom();
+  const host = join("Hana", HOST_KEY);
+  const a = join("Ann");
+  everyone(host.s, a.s);
+  host.s.deliver({ t: "voice", seq: 1, data: new Uint8Array(513) });
+  tick();
+  assert.deepEqual(voiceIn(a.s.take()), []);
+  // 8000 B/s budget: 500 B frames sent at once, only 16 get through.
+  for (let i = 0; i < 40; i++) host.s.deliver({ t: "voice", seq: i, data: new Uint8Array(500) });
+  tick();
+  assert.equal(voiceIn(a.s.take()).length, 16);
+});
+
+test("the number of speakers is capped", () => {
+  const { join, everyone } = hostedRoom();
+  const host = join("Hana", HOST_KEY);
+  const guests = Array.from({ length: 9 }, (_, i) => join(`G${i}`));
+  everyone(host.s);
+  for (const g of guests) host.s.deliver({ t: "set_role", id: g.self.id, role: "speaker" });
+  const msgs = host.s.take();
+  assert.equal(msgs.filter((m) => m.t === "role").length, 8);
+  assert.deepEqual(msgs.at(-1)?.t, "error");
+});
+
+test("a second host tab takes over; the first one leaves the sun as a guest", () => {
+  const { join, everyone } = hostedRoom();
+  const first = join("Hana", HOST_KEY);
+  everyone(first.s);
+  const second = join("Hana", HOST_KEY);
+  assert.equal(second.self.role, "host");
+  const got = first.s.take();
+  const correction = got.find((m) => m.t === "correction");
+  assert.ok(correction?.t === "correction" && Math.hypot(correction.x - 5000, correction.y - 5000) > 200);
+  assert.deepEqual(got.find((m) => m.t === "role"), { t: "role", id: first.self.id, role: "guest" });
+});
+
+test("cluster: roles and voice cross servers through the owner", () => {
+  const sent = { roles: [] as unknown[], setRoles: [] as unknown[], voice: [] as number[][] };
+  const { room, tick, join, everyone } = hostedRoom({
+    sync: {
+      joined: () => {},
+      left: () => {},
+      moves: () => {},
+      chat: () => {},
+      role: (id, role) => sent.roles.push([id, role]),
+      setRole: (owner, id, role) => sent.setRoles.push([owner, id, role]),
+      voice: (frames) => sent.voice.push(frames.map((f) => f.id)),
+    },
+  });
+  const host = join("Hana", HOST_KEY, 1);
+  const local = join("Ann", "", 2);
+  room.remoteJoined(5, remoteInfo); // id 42, a guest on server 5
+  everyone(host.s, local.s);
+  // Our host picks a remote player: the request goes to its server...
+  host.s.deliver({ t: "set_role", id: 42, role: "speaker" });
+  assert.deepEqual(sent.setRoles, [[5, 42, "speaker"]]);
+  // ...which applies it and announces the change.
+  room.remoteRole(5, 42, "speaker");
+  assert.deepEqual(local.s.take(), [{ t: "role", id: 42, role: "speaker" }]);
+  // A remote host picks our player.
+  room.remoteSetRole(2, "speaker");
+  assert.deepEqual(sent.roles, [[2, "speaker"]]);
+  // Voice: local frames are mirrored; remote ones are relayed only for speakers of that server.
+  local.s.take();
+  local.s.deliver({ t: "voice", seq: 1, data: new Uint8Array([1]) });
+  room.remoteVoice(5, [{ id: 42, seq: 1, data: new Uint8Array([2]) }]);
+  room.remoteVoice(6, [{ id: 42, seq: 2, data: new Uint8Array([3]) }]); // wrong owner
+  tick();
+  assert.deepEqual(voiceIn(host.s.take()), [
+    [2, 1],
+    [42, 1],
+  ]);
+  assert.deepEqual(sent.voice, [[2]]);
+});
+
+test("a migrating speaker stays a speaker", async () => {
+  const { room, join } = hostedRoom();
+  join("Hana", HOST_KEY, 1);
+  const moved = new FakeSocket();
+  const resume = Promise.resolve({ ...remoteInfo, role: "speaker" as const });
+  moved.events = room.accept(moved, 42, resume);
+  moved.deliver({ t: "join", name: "Zed", appearance: 9, hostKey: "" });
+  await resume;
+  await Promise.resolve();
+  const welcome = moved.take().find((m) => m.t === "welcome");
+  assert.equal(welcome?.t === "welcome" && welcome.players.find((p) => p.id === 42)?.role, "speaker");
 });

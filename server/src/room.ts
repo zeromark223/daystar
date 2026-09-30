@@ -1,6 +1,17 @@
 import { isAppearanceId, type AppearanceId } from "../../shared/src/appearance.ts";
-import { CHAT_HISTORY_SIZE, MAX_CHAT_LENGTH, MAX_NAME_LENGTH, MOVE_SPEED, TICK_RATE } from "../../shared/src/constants.ts";
+import {
+  CHAT_HISTORY_SIZE,
+  MAX_CHAT_LENGTH,
+  MAX_NAME_LENGTH,
+  MAX_SPEAKERS,
+  MAX_VOICE_FRAME_BYTES,
+  MOVE_SPEED,
+  TICK_RATE,
+  VOICE_BYTES_PER_SEC,
+  WORLD_CENTER,
+} from "../../shared/src/constants.ts";
 import type { Direction } from "../../shared/src/direction.ts";
+import { canSpeak, type Role } from "../../shared/src/roles.ts";
 import { canBeAt, spawnPoint } from "../../shared/src/space.ts";
 import { recordTick } from "./stats.ts";
 import {
@@ -10,6 +21,7 @@ import {
   type PlayerInfo,
   type PlayerState,
   type ServerMessage,
+  type VoiceFrame,
 } from "../../shared/src/protocol.ts";
 
 /** Extra distance tolerated per move to absorb network jitter. */
@@ -18,6 +30,8 @@ const CHAT_BURST = 5;
 const CHAT_WINDOW_MS = 5000;
 /** A player asked to migrate is not asked again for this long (and stays if it never moves). */
 const MIGRATE_RETRY_MS = 30_000;
+/** Voice frames held for one tick at most (a tick normally carries 2-3 per speaker). */
+const MAX_PENDING_VOICE = 200;
 
 /** A connected client, whatever the runtime's WebSocket implementation is. */
 export interface Peer {
@@ -52,6 +66,12 @@ export interface RoomSync {
   /** Local players that changed during one tick. */
   moves(players: PlayerState[]): void;
   chat(message: ChatMessage): void;
+  /** A local player's role changed. */
+  role(id: number, role: Role): void;
+  /** Ask server `owner` to change the role of its player `id` (the host is elsewhere). */
+  setRole(owner: number, id: number, role: Role): void;
+  /** Voice frames from local speakers during one tick. */
+  voice(frames: VoiceFrame[]): void;
 }
 
 interface Player {
@@ -66,8 +86,12 @@ interface Player {
   y: number;
   dir: Direction;
   moving: boolean;
+  role: Role;
   lastMoveAt: number;
   chatTimes: number[];
+  /** Voice rate limit: a byte budget refilled at VOICE_BYTES_PER_SEC. */
+  voiceBudget: number;
+  voiceAt: number;
 }
 
 export interface RoomOptions {
@@ -87,6 +111,8 @@ export interface RoomOptions {
    * (future: chat history in a separate database service, docs/cluster.md).
    */
   keepChatHistory?: boolean;
+  /** Whether a key presented on join is this room's host key. Without it nobody can be host. */
+  isHostKey?(key: string): boolean;
 }
 
 export class Room {
@@ -101,6 +127,9 @@ export class Room {
   private nextChatId = 1;
   /** Players (local or replicated) whose position or motion changed since the last snapshot. */
   private readonly changed = new Set<Player>();
+  /** Voice frames for the next tick (local and replicated), and the local ones to mirror. */
+  private voice: VoiceFrame[] = [];
+  private localVoice: VoiceFrame[] = [];
   private ticker: ReturnType<typeof setInterval> | null = null;
   /** Local players asked to migrate, and when they may be asked again. */
   private readonly migrating = new Map<number, number>();
@@ -149,15 +178,19 @@ export class Room {
           this.handleMove(player, msg);
         } else if (msg.t === "join" && !player && !joining) {
           if (!resume) {
-            player = this.join(peer, msg.name, msg.appearance, playerId);
+            player = this.join(peer, msg, playerId);
             return;
           }
           joining = true;
           void resume.then((state) => {
-            if (joining) player = this.join(peer, msg.name, msg.appearance, playerId, state);
+            if (joining) player = this.join(peer, msg, playerId, state);
           });
+        } else if (msg.t === "voice" && player) {
+          this.handleVoice(player, msg.seq, msg.data);
         } else if (msg.t === "chat" && player) {
           this.handleChat(player, msg.text);
+        } else if (msg.t === "set_role" && player) {
+          this.handleSetRole(player, msg.id, msg.role);
         }
       },
       close: () => {
@@ -177,7 +210,7 @@ export class Room {
   remoteJoined(owner: number, info: PlayerInfo): void {
     const existing = this.players.get(info.id);
     if (existing?.owner === null) return; // ours; a stale message
-    const player: Player = { ...info, owner, peer: null, lastMoveAt: Date.now(), chatTimes: [] };
+    const player: Player = { ...info, owner, peer: null, ...fresh() };
     this.players.set(info.id, player);
     if (existing) {
       // Already shown to our clients: refresh its state instead of a second join.
@@ -211,6 +244,32 @@ export class Room {
 
   remoteChat(message: ChatMessage): void {
     this.broadcast({ t: "chat", message });
+  }
+
+  /** The owner of a replica changed its role. */
+  remoteRole(owner: number, id: number, role: Role): void {
+    const p = this.players.get(id);
+    if (!p || p.owner !== owner || p.role === role) return;
+    p.role = role;
+    this.broadcast({ t: "role", id, role });
+  }
+
+  /**
+   * Another server asks us to change the role of one of our players: its host
+   * chose (or dropped) a speaker, or a new host took over from ours. Servers
+   * trust each other; the requesting server checked the host.
+   */
+  remoteSetRole(id: number, role: Role): void {
+    const p = this.players.get(id);
+    if (p?.owner === null && role !== "host") this.applyRole(p, role);
+  }
+
+  /** Voice frames from speakers connected to server `owner`, relayed with our next tick. */
+  remoteVoice(owner: number, frames: VoiceFrame[]): void {
+    for (const f of frames) {
+      const p = this.players.get(f.id);
+      if (p && p.owner === owner && canSpeak(p.role)) this.queueVoice(f);
+    }
   }
 
   /** A server went away: its players leave this room for our clients. */
@@ -257,11 +316,11 @@ export class Room {
 
   private join(
     peer: Peer,
-    rawName: unknown,
-    appearance: unknown,
+    request: { name: unknown; appearance: unknown; hostKey: string },
     assignedId?: number,
     resume?: PlayerInfo | null,
   ): Player | null {
+    const { name: rawName, appearance, hostKey } = request;
     const name = typeof rawName === "string" ? rawName.trim().slice(0, MAX_NAME_LENGTH) : "";
     if (!name || !isAppearanceId(appearance)) {
       send(peer, { t: "error", message: "Invalid name or appearance." });
@@ -275,11 +334,18 @@ export class Room {
     }
     const id = assignedId ?? this.nextLocalId();
 
-    // A migrating player continues where it was; others appear near someone in the room.
-    const start =
-      resume && canBeAt(resume.x, resume.y)
+    // The host key makes this player the host (the sun); a migrating speaker stays one.
+    const isHost = hostKey !== "" && (this.opts.isHostKey?.(hostKey) ?? false);
+    const role: Role = isHost ? "host" : resume?.role === "speaker" ? "speaker" : "guest";
+    if (isHost) this.dethroneHosts(id);
+
+    // The host sits in the sun; a migrating player continues where it was; others
+    // appear near someone in the room.
+    const start = isHost
+      ? { ...WORLD_CENTER, dir: "south" as const }
+      : resume && canBeAt(resume.x, resume.y)
         ? resume
-        : { ...spawnPoint([...this.players.values()].filter((p) => p.id !== id)), dir: "south" as const };
+        : { ...this.spawnFor(id), dir: "south" as const };
     const wasReplica = this.players.get(id)?.owner != null;
     const player: Player = {
       id,
@@ -291,8 +357,8 @@ export class Room {
       y: start.y,
       dir: start.dir,
       moving: false,
-      lastMoveAt: Date.now(),
-      chatTimes: [],
+      role,
+      ...fresh(),
     };
 
     // A replica with our id (a migration, or a stale copy) is replaced in place.
@@ -312,6 +378,79 @@ export class Room {
     this.opts.onJoined?.(player.id);
     this.opts.sync?.joined(toInfo(player));
     return player;
+  }
+
+  /** Somewhere near a player of the room (never the host, who sits in the sun). */
+  private spawnFor(id: number): { x: number; y: number } {
+    return spawnPoint([...this.players.values()].filter((p) => p.id !== id && p.role !== "host"));
+  }
+
+  /** Only one host at a time: whoever presented the key last wins (e.g. a second tab). */
+  private dethroneHosts(newHost: number): void {
+    for (const p of [...this.players.values()]) {
+      if (p.role !== "host" || p.id === newHost) continue;
+      if (p.owner === null) this.applyRole(p, "guest");
+      else this.opts.sync?.setRole(p.owner, p.id, "guest");
+    }
+  }
+
+  private speakerCount(): number {
+    let n = 0;
+    for (const p of this.players.values()) if (p.role === "speaker") n++;
+    return n;
+  }
+
+  private handleSetRole(requester: Player, id: number, role: "speaker" | "guest"): void {
+    if (requester.role !== "host") {
+      send(requester.peer!, { t: "error", message: "Only the host can choose speakers." });
+      return;
+    }
+    const target = this.players.get(id);
+    if (!target || target.role === "host" || target.role === role) return;
+    if (role === "speaker" && this.speakerCount() >= MAX_SPEAKERS) {
+      send(requester.peer!, { t: "error", message: `There can be at most ${MAX_SPEAKERS} speakers.` });
+      return;
+    }
+    if (target.owner === null) this.applyRole(target, role);
+    else this.opts.sync?.setRole(target.owner, id, role);
+  }
+
+  /** Change a local player's role and tell everyone. */
+  private applyRole(p: Player, role: Role): void {
+    if (p.role === role) return;
+    const wasHost = p.role === "host";
+    p.role = role;
+    if (wasHost) {
+      // A former host leaves the sun for a spot near the others.
+      const spot = this.spawnFor(p.id);
+      p.x = spot.x;
+      p.y = spot.y;
+      p.lastMoveAt = Date.now();
+      this.changed.add(p);
+      send(p.peer!, { t: "correction", x: p.x, y: p.y });
+    }
+    this.broadcast({ t: "role", id: p.id, role });
+    this.opts.sync?.role(p.id, role);
+  }
+
+  private handleVoice(player: Player, seq: number, data: Uint8Array): void {
+    if (!canSpeak(player.role) || data.byteLength === 0 || data.byteLength > MAX_VOICE_FRAME_BYTES) return;
+    const now = Date.now();
+    player.voiceBudget = Math.min(
+      VOICE_BYTES_PER_SEC,
+      player.voiceBudget + ((now - player.voiceAt) / 1000) * VOICE_BYTES_PER_SEC,
+    );
+    player.voiceAt = now;
+    if (player.voiceBudget < data.byteLength) return;
+    player.voiceBudget -= data.byteLength;
+    const frame = { id: player.id, seq, data };
+    if (this.queueVoice(frame)) this.localVoice.push(frame);
+  }
+
+  private queueVoice(frame: VoiceFrame): boolean {
+    if (this.voice.length >= MAX_PENDING_VOICE) return false;
+    this.voice.push(frame);
+    return true;
   }
 
   /** Standalone ids: a per-room counter that skips ids still in use. */
@@ -334,6 +473,7 @@ export class Room {
   }
 
   private handleMove(player: Player, move: { x: number; y: number; dir: Direction; moving: boolean }): void {
+    if (player.role === "host") return; // the sun does not move
     const now = Date.now();
     const elapsed = Math.min((now - player.lastMoveAt) / 1000, 1);
     const maxDistance = MOVE_SPEED * elapsed + MOVE_SLACK;
@@ -389,17 +529,23 @@ export class Room {
    * Send only the players that changed; idle players cost nothing. The stream
    * is reliable and ordered, and "welcome" carries everyone's full state, so
    * clients can keep the last known state of anyone missing from a snapshot.
-   * Local changes are also mirrored to other servers, once per tick.
+   * Voice frames ride the same frame, so a talking speaker costs no extra sends.
+   * Local changes and voice are also mirrored to other servers, once per tick.
    */
   private tick(): void {
-    if (this.changed.size === 0) return;
+    if (this.changed.size === 0 && this.voice.length === 0) return;
     const start = performance.now();
     const players = [...this.changed];
     this.changed.clear();
-    this.broadcast({ t: "snapshot", players });
+    const voice = this.voice;
+    const localVoice = this.localVoice;
+    this.voice = [];
+    this.localVoice = [];
+    this.broadcast({ t: "snapshot", players, voice });
     if (this.opts.sync) {
       const local = players.filter((p) => p.owner === null);
       if (local.length > 0) this.opts.sync.moves(local.map(toState));
+      if (localVoice.length > 0) this.opts.sync.voice(localVoice);
     }
     recordTick(performance.now() - start);
   }
@@ -418,7 +564,13 @@ function send(peer: Peer, msg: ServerMessage): void {
 }
 
 function toInfo(p: Player): PlayerInfo {
-  return { id: p.id, name: p.name, appearance: p.appearance, x: p.x, y: p.y, dir: p.dir, moving: p.moving };
+  return { id: p.id, name: p.name, appearance: p.appearance, x: p.x, y: p.y, dir: p.dir, moving: p.moving, role: p.role };
+}
+
+/** Per-player bookkeeping that starts over on every server. */
+function fresh() {
+  const now = Date.now();
+  return { lastMoveAt: now, chatTimes: [] as number[], voiceBudget: VOICE_BYTES_PER_SEC, voiceAt: now };
 }
 
 function toState(p: Player): PlayerState {
