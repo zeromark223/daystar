@@ -134,7 +134,8 @@ A spawned server runs with `BUN_JSC_logGC` so the `gc/s` and `gc max ms` columns
 filled (they show `-` with `--target`). `tick p99` is the
 time a room tick spends encoding and sending its snapshot (the budget at 20 Hz is 50 ms).
 
-`--last` reads `.loadtest-last.json` (git-ignored; it stores the token in plain text).
+`--last` reads `.loadtest-last.json` (git-ignored; it stores the token in plain text). Instead of `--health-token`, you can put `HEALTH_TOKEN=…` in a
+git-ignored `.env` file at the repo root; Bun loads it and the load test uses it.
 
 Bots use rooms named `<room-prefix>-all` / `<room-prefix>-0..n` (default `load`).
 

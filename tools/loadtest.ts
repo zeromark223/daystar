@@ -573,6 +573,7 @@ const USAGE = `Usage: bun tools/loadtest.ts [options]   (or: bun run loadtest [o
   --target <url>       test a running server instead of spawning one,
                        e.g. https://meet.example.com
   --health-token <s>   token for the server's /api/health, if it sets HEALTH_TOKEN
+                       (default: HEALTH_TOKEN from the environment or .env)
   --cluster <n>        spawn a local cluster (agent + n servers) instead of one server
   --capacity <n>       players per server for --cluster          (default 2000)
   --port <n>           port for the spawned server or agent      (default 3300)
@@ -655,7 +656,8 @@ function parseOptions(): Options {
         speakers: { type: "string", default: "0" },
         moving: { type: "string", default: "1" },
         target: { type: "string" },
-        "health-token": { type: "string", default: "" },
+        // Bun loads .env, so HEALTH_TOKEN there works without putting it on the command line.
+        "health-token": { type: "string", default: process.env.HEALTH_TOKEN ?? "" },
         port: { type: "string", default: "3300" },
         cluster: { type: "string", default: "0" },
         capacity: { type: "string", default: "2000" },
