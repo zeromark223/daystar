@@ -96,6 +96,16 @@ tools/          load test
 - Voice works in Chrome and Safari on phones, and Chrome, Edge and Firefox on
   computers (not yet Firefox on Android). It needs HTTPS.
 
+## Capacity
+
+Tested stable at **800 CCU in one room on a single core of a Xeon E5-2680 v4**
+(Coolify, bots on a separate wired machine): a host and two speakers talking in turns,
+listeners walking 20% of the time, no chat. At 800 the server used 44% of that core
+with an event loop p99 of 36 ms; move p99 109 ms, voice p99 126 ms (through the
+server), every voice frame delivered. Around 1,000 it still works but tail latency
+passes the targets (move p99 ~200 ms). The cluster mode spreads a room over more
+processes and cores.
+
 ## Networking
 
 - Every frame is binary: an opcode byte plus a body described by a schema
