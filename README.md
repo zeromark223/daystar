@@ -138,6 +138,19 @@ time a room tick spends encoding and sending its snapshot (the budget at 20 Hz i
 
 Bots use rooms named `<room-prefix>-all` / `<room-prefix>-0..n` (default `load`).
 
+`--speakers 3` makes each room a meeting: the load test creates the rooms with
+`POST /api/rooms`, the first bot of each room joins as host and promotes two
+speakers, and the three hold a conversation in turns with real Opus frames
+(`tools/voice/*.ogg`, synthetic speech from espeak-ng). The invite links are printed
+so you can join and listen. `voice p50/p99` is the time from the end of a spoken
+frame to a bot receiving it through the server (before the client's playout delay);
+`voice rx` is the share of expected frames that arrived. `--chat-every 0` turns chat off.
+
+```bash
+bun tools/loadtest.ts --target https://meet.example.com --health-token $TOKEN \
+  --steps 200,400,600,800 --room-size 0 --moving 0.2 --chat-every 0 --speakers 3
+```
+
 By default every bot walks non-stop (worst case). `--moving 0.2` makes each bot walk
 20% of the time and stand still (sending nothing) otherwise, closer to a real meeting.
 `move p50/p99` is the time from a bot sending a position to seeing it echoed back in

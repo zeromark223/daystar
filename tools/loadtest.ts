@@ -2,6 +2,8 @@
  * Load test: ramps up bot players in steps and reports whether each step
  * stays healthy. Bots join, walk non-stop (worst case: everyone moving) using
  * the world's real limits (sun and edge), send positions at the client rate and chat now and then.
+ * With --speakers, each room also gets a host and speakers who hold a conversation
+ * with real Opus frames (tools/voice/*.ogg), so a browser joining the room hears it.
  *
  *   bun tools/loadtest.ts --steps 100,200,400 --room-size 20
  *   bun tools/loadtest.ts --target https://meet.example.com --steps 200,500
@@ -19,7 +21,7 @@ import { resolve } from "node:path";
 import { APPEARANCE_COUNT, type AppearanceId } from "../shared/src/appearance.ts";
 import type { Direction } from "../shared/src/direction.ts";
 import { canBeAt, moveInSpace } from "../shared/src/space.ts";
-import { MOVE_SPEED, ROOM_ID_PATTERN, TICK_RATE, WS_PATH } from "../shared/src/constants.ts";
+import { MAX_SPEAKERS, MOVE_SPEED, ROOM_ID_PATTERN, TICK_RATE, VOICE_FRAME_MS, WS_PATH } from "../shared/src/constants.ts";
 import {
   decodeServerMessage,
   encodeClientMessage,
@@ -27,6 +29,7 @@ import {
   quantize,
   SNAPSHOT_OPCODE,
 } from "../shared/src/protocol.ts";
+import { readOpusPackets } from "./voice/ogg.ts";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const HIST_MAX_MS = 5000;
@@ -80,6 +83,12 @@ interface WorkerReport {
   migrations: number;
   /** Bots that rejoined after their socket dropped. */
   rejoins: number;
+  /** Voice frames sent by this worker's talkers, per room. */
+  voiceSent: [string, number][];
+  /** Voice frames received by this worker's bots. */
+  voiceRx: number;
+  /** Frame spoken (end of its 20 ms) -> received by a bot, through the server. */
+  voice: [number, number][];
 }
 
 // ---------------------------------------------------------------- worker
@@ -117,6 +126,35 @@ interface Bot {
   phaseUntil: number;
   /** Recently sent positions (wire units) awaiting their echo in a snapshot. */
   pending: { xw: number; yw: number; t: number }[];
+  /** What the bot is meant to be (--speakers); guests walk, talkers stand and talk. */
+  part: "host" | "speaker" | "guest";
+  hostKey: string;
+  /** Its role as the server last said. */
+  role: "host" | "speaker" | "guest";
+  /** Talkers: which voice sample, and the next packet in it. */
+  voice: number;
+  voicePos: number;
+}
+
+/**
+ * One room's conversation: one talker at a time in turns of 2-6 s with short
+ * pauses, and now and then a second one cutting in for a moment.
+ */
+interface Conversation {
+  talkers: Bot[];
+  current: number;
+  speakFrom: number;
+  turnUntil: number;
+  overlap: { talker: number; from: number; until: number } | null;
+  /** Last voice frame index handled (frames are numbered from the shared epoch). */
+  lastFrame: number;
+}
+
+/** Voice frames of the samples, loaded once per worker when needed. */
+let voiceSamples: Uint8Array[][] | null = null;
+function voiceSample(i: number): Uint8Array[] {
+  voiceSamples ??= [0, 1, 2].map((n) => readOpusPackets(resolve(ROOT, `tools/voice/speaker-${n}.ogg`)));
+  return voiceSamples[i % voiceSamples.length];
 }
 
 /** Snapshot body: UInt16 count, then per player id, x, y (UInt16 LE) and motion (UInt8). */
@@ -148,10 +186,30 @@ function runWorker(): void {
   let baseUrl = "";
   let chatEveryMs = 30_000;
   let movingRatio = 1;
+  /**
+   * Shared clock for voice (Date.now() at the start of the test): frame k covers
+   * [epoch + 20k, epoch + 20(k+1)) ms and is sent with seq = k & 0xffff, like the
+   * client's mic-time seq. Any bot can then tell when a frame was spoken.
+   */
+  let voiceEpoch = 0;
   let gaps = new Histogram();
   let chat = new Histogram();
   let move = new Histogram();
-  let counters = { snapshots: 0, bytesIn: 0, bytesOut: 0, corrections: 0, closes: 0, errors: 0, migrations: 0, rejoins: 0 };
+  let voiceLatency = new Histogram();
+  let voiceSent = new Map<string, number>();
+  const newCounters = () => ({
+    snapshots: 0,
+    bytesIn: 0,
+    bytesOut: 0,
+    corrections: 0,
+    closes: 0,
+    errors: 0,
+    migrations: 0,
+    rejoins: 0,
+    voiceRx: 0,
+  });
+  let counters = newCounters();
+  const conversations = new Map<string, Conversation>();
 
   /** Like the web client: ask the agent (or server) where to connect; retries a few times. */
   async function place(path: string, body: object): Promise<{ url: string; ticket: string | null } | null> {
@@ -178,22 +236,27 @@ function runWorker(): void {
     return null;
   }
 
-  async function addBot(room: string): Promise<void> {
+  async function addBot(room: string, name: string, part: Bot["part"], hostKey: string, voice: number): Promise<void> {
     const placed = await place("/api/join", { room });
     if (!placed) return;
     const appearance = Math.floor(Math.random() * APPEARANCE_COUNT);
     const bot: Bot = {
+      part,
+      hostKey,
+      role: "guest",
+      voice,
+      voicePos: Math.floor(Math.random() * 200),
       ws: null!,
       room,
       ticket: placed.ticket,
-      name: `bot${bots.length}`,
+      name,
       appearance,
       id: -1,
       x: 0,
       y: 0,
       heading: Math.floor(Math.random() * DIRS.length),
       nextTurn: 0,
-      nextChat: Date.now() + Math.random() * chatEveryMs,
+      nextChat: chatEveryMs > 0 && part === "guest" ? Date.now() + Math.random() * chatEveryMs : Infinity,
       lastSnapshot: 0,
       joined: false,
       switching: false,
@@ -202,7 +265,12 @@ function runWorker(): void {
       pending: [],
     };
     // Start at a random point of the walk/idle cycle so the room mixes both.
-    if (movingRatio <= 0 || movingRatio >= 1) {
+    if (part !== "guest") {
+      // Talkers stand still (the host cannot move anyway).
+      bot.walking = false;
+      bot.phaseUntil = Infinity;
+      joinConversation(bot);
+    } else if (movingRatio <= 0 || movingRatio >= 1) {
       bot.walking = movingRatio > 0;
       bot.phaseUntil = Infinity;
     } else {
@@ -221,7 +289,7 @@ function runWorker(): void {
     bot.ws = ws;
     bot.pending = [];
     ws.addEventListener("open", () => {
-      ws.send(encodeClientMessage({ t: "join", name: bot.name, appearance: bot.appearance, hostKey: "" }));
+      ws.send(encodeClientMessage({ t: "join", name: bot.name, appearance: bot.appearance, hostKey: bot.hostKey }));
       if (old && old !== ws) old.close();
     });
     ws.addEventListener("message", (event) => {
@@ -234,6 +302,7 @@ function runWorker(): void {
         counters.snapshots++;
         if (bot.lastSnapshot) gaps.add(now - bot.lastSnapshot);
         bot.lastSnapshot = now;
+        if (voiceEpoch) readVoice(new DataView(event.data));
         const own = bot.pending.length ? findInSnapshot(new DataView(event.data), bot.id) : null;
         if (own) {
           const i = bot.pending.findLastIndex((p) => p.xw === own.xw && p.yw === own.yw);
@@ -250,7 +319,12 @@ function runWorker(): void {
         bot.id = msg.selfId;
         bot.x = self.x;
         bot.y = self.y;
+        bot.role = self.role;
         bot.joined = true;
+        if (bot.part !== "guest") promoteSpeakers(bot.room);
+      } else if (msg?.t === "role" && msg.id === bot.id) {
+        bot.role = msg.role;
+        if (bot.part !== "guest") promoteSpeakers(bot.room);
       } else if (msg?.t === "chat" && msg.message.playerId === bot.id) {
         chat.add(Date.now() - Number(msg.message.text.split(" ")[1]));
       } else if (msg?.t === "correction") {
@@ -293,6 +367,91 @@ function runWorker(): void {
     counters.rejoins++;
     connect(bot, placed.url);
   }
+
+  // ------------------------------------------------------------ voice
+
+  /** Voice frames in a raw snapshot: after the players, a UInt8 count of {id, seq, len, data}. */
+  function readVoice(data: DataView): void {
+    let o = 3 + data.getUint16(1, true) * SNAPSHOT_ENTRY;
+    const count = data.getUint8(o);
+    o += 1;
+    if (count === 0) return;
+    const now = Date.now();
+    const current = Math.floor((now - voiceEpoch) / VOICE_FRAME_MS);
+    for (let i = 0; i < count; i++) {
+      const seq = data.getUint16(o + 2, true);
+      o += 6 + data.getUint16(o + 4, true);
+      // Unwrap the 16-bit seq to the latest frame index with those low bits.
+      const k = current - (((current & 0xffff) - seq + 0x10000) & 0xffff);
+      voiceLatency.add(now - (voiceEpoch + (k + 1) * VOICE_FRAME_MS));
+      counters.voiceRx++;
+    }
+  }
+
+  function joinConversation(bot: Bot): void {
+    let c = conversations.get(bot.room);
+    if (!c) {
+      c = { talkers: [], current: 0, speakFrom: 0, turnUntil: 0, overlap: null, lastFrame: -1 };
+      conversations.set(bot.room, c);
+    }
+    // The host talks first.
+    if (bot.part === "host") c.talkers.unshift(bot);
+    else c.talkers.push(bot);
+  }
+
+  /** The room's host promotes its speakers (again, after one of them rejoined). */
+  function promoteSpeakers(room: string): void {
+    const c = conversations.get(room);
+    const host = c?.talkers.find((b) => b.part === "host" && b.joined && b.role === "host");
+    if (!c || !host) return;
+    for (const b of c.talkers) {
+      if (b.part !== "speaker" || !b.joined || b.role === "speaker") continue;
+      host.ws.send(encodeClientMessage({ t: "set_role", id: b.id, role: "speaker" }));
+    }
+  }
+
+  /** Who talks during the frame ending at `t` (ms). */
+  function talkersAt(c: Conversation, t: number): number[] {
+    const n = c.talkers.length;
+    if (t >= c.turnUntil) {
+      if (n > 1) c.current = (c.current + 1 + Math.floor(Math.random() * (n - 1))) % n;
+      c.speakFrom = t + 300 + Math.random() * 700;
+      const turn = 2000 + Math.random() * 4000;
+      c.turnUntil = c.speakFrom + turn;
+      c.overlap = null;
+      if (n > 1 && Math.random() < 0.25) {
+        const other = (c.current + 1 + Math.floor(Math.random() * (n - 1))) % n;
+        const from = c.speakFrom + Math.random() * Math.max(0, turn - 1000);
+        c.overlap = { talker: other, from, until: from + 800 + Math.random() * 1200 };
+      }
+    }
+    const out: number[] = [];
+    if (t >= c.speakFrom) out.push(c.current);
+    if (c.overlap && t >= c.overlap.from && t < c.overlap.until) out.push(c.overlap.talker);
+    return out;
+  }
+
+  /** Every 20 ms: send the frames that just ended, for every room's current talkers. */
+  setInterval(() => {
+    if (!voiceEpoch) return;
+    const ended = Math.floor((Date.now() - voiceEpoch) / VOICE_FRAME_MS) - 1;
+    for (const c of conversations.values()) {
+      // After a stall, skip ahead instead of sending a burst of old frames.
+      if (c.lastFrame < ended - 10) c.lastFrame = ended - 10;
+      for (let k = c.lastFrame + 1; k <= ended; k++) {
+        for (const i of talkersAt(c, voiceEpoch + (k + 1) * VOICE_FRAME_MS)) {
+          const bot = c.talkers[i];
+          if (!bot.joined || bot.role === "guest" || bot.ws.readyState !== WebSocket.OPEN) continue;
+          const sample = voiceSample(bot.voice);
+          const frame = encodeClientMessage({ t: "voice", seq: k & 0xffff, data: sample[bot.voicePos++ % sample.length] });
+          bot.ws.send(frame);
+          counters.bytesOut += frame.byteLength;
+          voiceSent.set(bot.room, (voiceSent.get(bot.room) ?? 0) + 1);
+        }
+      }
+      c.lastFrame = ended;
+    }
+  }, VOICE_FRAME_MS);
 
   // Each bot sends once per tick; bots are spread over 5 phases to avoid bursts.
   const PHASES = 5;
@@ -347,24 +506,31 @@ function runWorker(): void {
       gaps: gaps.entries(),
       chat: chat.entries(),
       move: move.entries(),
+      voiceSent: [...voiceSent],
+      voice: voiceLatency.entries(),
     };
     // Workers talk to the orchestrator in JSON lines over stdio .
     process.stdout.write(JSON.stringify(report) + "\n");
     gaps = new Histogram();
     chat = new Histogram();
     move = new Histogram();
-    counters = { snapshots: 0, bytesIn: 0, bytesOut: 0, corrections: 0, closes: 0, errors: 0, migrations: 0, rejoins: 0 };
+    voiceLatency = new Histogram();
+    voiceSent = new Map();
+    counters = newCounters();
   }, 1000);
 
-  type Command = { cmd: "config"; baseUrl: string; chatEveryMs: number; movingRatio: number } | { cmd: "add"; room: string };
+  type Command =
+    | { cmd: "config"; baseUrl: string; chatEveryMs: number; movingRatio: number; voiceEpoch: number }
+    | { cmd: "add"; room: string; name: string; part?: Bot["part"]; hostKey?: string; voice?: number };
   createInterface({ input: process.stdin }).on("line", (line) => {
     const msg = JSON.parse(line) as Command;
     if (msg.cmd === "config") {
       baseUrl = msg.baseUrl;
       chatEveryMs = msg.chatEveryMs;
       movingRatio = msg.movingRatio;
+      voiceEpoch = msg.voiceEpoch;
     } else {
-      void addBot(msg.room);
+      void addBot(msg.room, msg.name, msg.part ?? "guest", msg.hostKey ?? "", msg.voice ?? 0);
     }
   });
 }
@@ -398,7 +564,10 @@ const USAGE = `Usage: bun tools/loadtest.ts [options]   (or: bun run loadtest [o
   --hold <s>           seconds at each step; 2nd half measured   (default 20)
   --ramp <n>           new connections per second                (default 100)
   --workers <n>        bot processes                             (default 6)
-  --chat-every <s>     seconds between chat messages per bot     (default 30)
+  --chat-every <s>     seconds between chat messages per bot; 0 = no chat (default 30)
+  --speakers <n>       talkers per room: a host plus n-1 speakers holding a
+                       conversation (real Opus frames); rooms are created with
+                       POST /api/rooms and printed as invite links (default 0)
   --moving <0..1>      share of time each bot spends walking; the rest it stands
                        still and sends nothing (default 1 = everyone always walking)
   --target <url>       test a running server instead of spawning one,
@@ -407,7 +576,8 @@ const USAGE = `Usage: bun tools/loadtest.ts [options]   (or: bun run loadtest [o
   --cluster <n>        spawn a local cluster (agent + n servers) instead of one server
   --capacity <n>       players per server for --cluster          (default 2000)
   --port <n>           port for the spawned server or agent      (default 3300)
-  --room-prefix <s>    rooms are <prefix>-all or <prefix>-0, -1, ... (default load)
+  --room-prefix <s>    rooms are <prefix>-all or <prefix>-0, -1, ... (default load;
+                       not used with --speakers)
   --keep-going         continue ramping after a failed step
   --last               reuse the options of the previous run; options given with it
                        override them, e.g. --last --hold 60
@@ -424,6 +594,7 @@ interface Options {
   workers: number;
   chatEveryMs: number;
   movingRatio: number;
+  speakers: number;
   port: number;
   /** Game servers in a spawned local cluster; 0 = one standalone server. */
   cluster: number;
@@ -481,6 +652,7 @@ function parseOptions(): Options {
         ramp: { type: "string", default: "100" },
         workers: { type: "string", default: "6" },
         "chat-every": { type: "string", default: "30" },
+        speakers: { type: "string", default: "0" },
         moving: { type: "string", default: "1" },
         target: { type: "string" },
         "health-token": { type: "string", default: "" },
@@ -532,8 +704,9 @@ function parseOptions(): Options {
     hold: int("hold", values.hold, 2),
     ramp: int("ramp", values.ramp, 1),
     workers: int("workers", values.workers, 1),
-    chatEveryMs: int("chat-every", values["chat-every"], 1) * 1000,
+    chatEveryMs: int("chat-every", values["chat-every"], 0) * 1000,
     movingRatio: ratio("moving", values.moving),
+    speakers: int("speakers", values.speakers, 0),
     port: int("port", values.port, 1),
     cluster: int("cluster", values.cluster, 0),
     capacity: int("capacity", values.capacity, 1),
@@ -542,6 +715,9 @@ function parseOptions(): Options {
     healthToken: values["health-token"],
     target: values.target === undefined ? null : parseTarget(values.target),
   };
+  if (options.speakers > MAX_SPEAKERS + 1) fail(`--speakers is at most ${MAX_SPEAKERS + 1} (the host plus ${MAX_SPEAKERS})`);
+  const perRoom = options.roomSize > 0 ? options.roomSize : Infinity;
+  if (options.speakers > Math.min(perRoom, options.steps[0])) fail("--speakers must fit in a room and in the first step");
   // The server keeps 5 minutes of samples; a longer window would be cut short.
   if (options.hold / 2 > 290) fail("--hold must be at most 580 seconds");
 
@@ -617,7 +793,7 @@ const BUN = process.execPath;
 
 async function runOrchestrator(): Promise<void> {
   const opts = parseOptions();
-  const { steps, roomSize, hold, ramp, chatEveryMs, roomPrefix } = opts;
+  const { steps, roomSize, hold, ramp, chatEveryMs, roomPrefix, speakers } = opts;
   const workerCount = opts.workers;
 
   // Either spawn a local server or use the remote one; both report through /api/health.
@@ -663,8 +839,26 @@ async function runOrchestrator(): Promise<void> {
     fail((err as Error).message);
   }
   console.log(opts.target ? `Target ${wsUrl} (${runtimeLabel})` : `Spawned ${runtimeLabel} server on port ${opts.port}`);
-  console.log(`Bots walk ${Math.round(opts.movingRatio * 100)}% of the time`);
-  console.log(`Rooms: /r/${roomSize > 0 ? `${roomPrefix}-0 .. ${roomPrefix}-${Math.ceil(steps.at(-1)! / roomSize) - 1}` : `${roomPrefix}-all`}`);
+  console.log(`Bots walk ${Math.round(opts.movingRatio * 100)}% of the time${chatEveryMs ? "" : ", no chat"}`);
+
+  // With --speakers the server creates the rooms, and hands out their host keys.
+  const roomCount = roomSize > 0 ? Math.ceil(steps.at(-1)! / roomSize) : 1;
+  const created: { room: string; hostKey: string }[] = [];
+  if (speakers > 0) {
+    for (let i = 0; i < roomCount; i++) {
+      const res = await fetch(`${httpUrl}/api/rooms`, { method: "POST" }).catch(() => null);
+      if (!res?.ok) {
+        server?.kill();
+        fail(`${httpUrl}/api/rooms failed (${res?.status ?? "unreachable"}); --speakers needs a server with roles`);
+      }
+      created.push((await res.json()) as { room: string; hostKey: string });
+    }
+    console.log(`Each room: a host + ${speakers - 1} speaker(s) talking in turns; the rest listen`);
+    const shown = created.slice(0, 3).map((c) => `${httpUrl}/r/${c.room}`);
+    console.log(`Invite link${created.length > 1 ? "s" : ""}: ${shown.join("  ")}${created.length > 3 ? `  (+${created.length - 3} more)` : ""}`);
+  } else {
+    console.log(`Rooms: /r/${roomSize > 0 ? `${roomPrefix}-0 .. ${roomPrefix}-${roomCount - 1}` : `${roomPrefix}-all`}`);
+  }
 
   const workers: ChildProcess[] = [];
   let window: WorkerReport[] = [];
@@ -678,20 +872,47 @@ async function runOrchestrator(): Promise<void> {
       connected.set(w, r.connected);
     });
     workers.push(w);
-    tell(w, { cmd: "config", baseUrl: httpUrl, chatEveryMs, movingRatio: opts.movingRatio });
   }
+  const voiceEpoch = Date.now();
+  for (const w of workers) tell(w, { cmd: "config", baseUrl: httpUrl, chatEveryMs, movingRatio: opts.movingRatio, voiceEpoch });
 
-  const roomFor = (i: number) => (roomSize > 0 ? `${roomPrefix}-${Math.floor(i / roomSize)}` : `${roomPrefix}-all`);
+  const roomIndex = (i: number) => (roomSize > 0 ? Math.floor(i / roomSize) : 0);
+  const roomFor = (i: number) =>
+    speakers > 0 ? created[roomIndex(i)].room : roomSize > 0 ? `${roomPrefix}-${roomIndex(i)}` : `${roomPrefix}-all`;
+  /** Bots sent to each room so far: every voice frame should reach all of them. */
+  const members = new Map<string, number>();
+  /** Bot `i`: its part, and the worker it goes to (a room's talkers share one, so the host can promote them). */
+  const assign = (i: number) => {
+    const r = roomIndex(i);
+    const seat = roomSize > 0 ? i % roomSize : i;
+    if (seat >= speakers) return { worker: workers[i % workerCount], cmd: { cmd: "add", room: roomFor(i), name: `Guest ${i}` } };
+    const part = seat === 0 ? "host" : "speaker";
+    return {
+      worker: workers[r % workerCount],
+      cmd: {
+        cmd: "add",
+        room: roomFor(i),
+        name: part === "host" ? "Host" : `Speaker ${seat}`,
+        part,
+        hostKey: part === "host" ? created[r].hostKey : "",
+        voice: seat,
+      },
+    };
+  };
   let total = 0;
   console.log(
-    "bots | rooms | srv players | srv CPU | loop p99 | tick p99 | gc/s | gc max ms | RSS MB | move p50/p99 ms | snap gap p50/p99/max ms | chat p50/p99 ms | in MB/s | corr | drops | migr | rejoin | verdict",
+    "bots | rooms | srv players | srv CPU | loop p99 | tick p99 | gc/s | gc max ms | RSS MB | move p50/p99 ms | snap gap p50/p99/max ms | chat p50/p99 ms | voice p50/p99 ms | voice rx | in MB/s | corr | drops | migr | rejoin | verdict",
   );
 
   for (const target of steps) {
     // Ramp up at a fixed connection rate.
     while (total < target) {
       const batch = Math.min(target - total, Math.max(1, Math.round(ramp / 10)));
-      for (let i = 0; i < batch; i++, total++) tell(workers[total % workerCount], { cmd: "add", room: roomFor(total) });
+      for (let i = 0; i < batch; i++, total++) {
+        const { worker, cmd } = assign(total);
+        tell(worker, cmd);
+        members.set(cmd.room, (members.get(cmd.room) ?? 0) + 1);
+      }
       await sleep(100);
     }
     await sleep((hold / 2) * 1000);
@@ -727,6 +948,9 @@ async function runOrchestrator(): Promise<void> {
     const gaps = new Histogram();
     const chat = new Histogram();
     const move = new Histogram();
+    const voice = new Histogram();
+    let voiceRx = 0;
+    let voiceExpected = 0;
     let bytesIn = 0;
     let corrections = 0;
     let drops = 0;
@@ -739,6 +963,9 @@ async function runOrchestrator(): Promise<void> {
       gaps.merge(r.gaps);
       chat.merge(r.chat);
       move.merge(r.move);
+      voice.merge(r.voice);
+      voiceRx += r.voiceRx;
+      for (const [room, n] of r.voiceSent) voiceExpected += n * (members.get(room) ?? 0);
       bytesIn += r.bytesIn;
       corrections += r.corrections;
       drops += r.closes;
@@ -765,6 +992,10 @@ async function runOrchestrator(): Promise<void> {
     // With idle bots, long snapshot gaps are expected (nothing to send), so only judge them when all walk.
     if (opts.movingRatio >= 1 && !(gapP99 <= 100)) problems.push("snapshots late");
     if (chat.total > 0 && chatP99 > 250) problems.push("chat slow");
+    const voiceP99 = voice.percentile(0.99);
+    const voiceShare = voiceExpected > 0 ? voiceRx / voiceExpected : NaN;
+    if (voice.total > 0 && voiceP99 > 300) problems.push("voice slow");
+    if (voiceShare < 0.97) problems.push("voice lost");
     if (drops > 0) problems.push("disconnects");
     if (socketErrors > 0) problems.push(`${socketErrors} socket errors`);
     if (loopP99 > 50) problems.push("event loop lag");
@@ -783,6 +1014,8 @@ async function runOrchestrator(): Promise<void> {
       (move.total ? `${move.percentile(0.5)}/${moveP99}` : "-").padStart(15),
       `${gaps.percentile(0.5)}/${gapP99}/${gaps.percentile(1)}`.padStart(23),
       (chat.total ? `${chat.percentile(0.5)}/${chatP99}` : "-").padStart(15),
+      (voice.total ? `${voice.percentile(0.5)}/${voiceP99}` : "-").padStart(16),
+      show(voiceShare, () => `${Math.min(100, voiceShare * 100).toFixed(1)}%`).padStart(8),
       (bytesIn / elapsed / 1e6).toFixed(1).padStart(7),
       String(corrections).padStart(4),
       String(drops).padStart(5),
