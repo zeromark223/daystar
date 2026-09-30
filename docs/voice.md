@@ -115,8 +115,13 @@ output: roughly 200-300 ms.
 
 ### Browsers
 
-WebCodecs `AudioEncoder`/`AudioDecoder` with Opus (recent Chrome, Edge, Firefox;
-Safari not verified), in a worker, plus AudioWorklet; HTTPS (or localhost) for the
+**Supported:** Chrome and Safari on phones; Chrome, Edge and Firefox on computers.
+**Not supported:** Firefox on Android (no WebCodecs audio); it shows a message and
+can still chat. A fallback is planned (docs/todo.md, "Voice in browsers without
+WebCodecs").
+
+Voice needs WebCodecs `AudioEncoder`/`AudioDecoder` with Opus, in a worker, plus
+AudioWorklet; HTTPS (or localhost) for the
 microphone. A page opened over plain `http://` by IP address has none of these APIs
 (checked in Chrome: `AudioDecoder`, `AudioEncoder` and `getUserMedia` are all
 undefined), so testing from a phone needs HTTPS (README, "Testing voice from a

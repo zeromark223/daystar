@@ -12,5 +12,5 @@ export function voiceProblem(direction: "play" | "send"): string | null {
   if (typeof AudioWorkletNode === "undefined") missing.push("AudioWorklet");
   if (direction === "send" && !navigator.mediaDevices?.getUserMedia) missing.push("microphone access");
   if (missing.length === 0) return null;
-  return `This browser cannot ${direction} voice (no ${missing.join(" or ")}); try a recent Chrome, Edge or Firefox.`;
+  return `This browser cannot ${direction} voice (no ${missing.join(" or ")}). Voice works in Chrome or Safari on phones, and Chrome, Edge or Firefox on computers.`;
 }

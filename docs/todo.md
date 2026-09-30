@@ -55,6 +55,24 @@ is. Chat gains at most 50 ms of latency. Same idea later for joins and leaves.
   60 B frames at 50/s while "talking", to see the cost of a talking room on Coolify.
 - A speaker who reconnects comes back as a guest (roles live with the socket). Keep
   the role for a short grace period, keyed by the player's name + a per-tab token.
-- Verify Safari (WebCodecs audio) and mobile browsers; fall back to a clear message.
 - If TCP stalls hurt on mobile networks, move voice to a WebRTC SFU (docs/voice.md
   "Why not WebRTC").
+
+## Voice in browsers without WebCodecs
+
+Supported today: Chrome and Safari on phones; Chrome, Edge and Firefox on computers.
+Firefox on Android has no WebCodecs audio, so it cannot play or send voice.
+
+Plan: libopus compiled to WebAssembly as a fallback inside the voice worker, loaded
+only when `AudioDecoder` / `AudioEncoder` are missing. Same Opus bitstream, so the
+server and other clients do not change.
+
+1. Decoding first (most people are guests who only listen): worker falls back to a
+   WASM Opus decoder and posts PCM to the same playback worklet.
+2. Then encoding, for hosts and speakers on those browsers.
+3. Before choosing a library: check it is maintained, license compatible with MIT
+   (libopus is BSD), download size (lazy-loaded), and CPU per stream on a phone.
+   Test by disabling WebCodecs in headless Chrome, then on a real Firefox Android.
+
+Rejected: MediaRecorder (container chunks of hundreds of ms, still needs a decoder),
+raw PCM (5x the bandwidth, two formats on the server), WebRTC just for Firefox.

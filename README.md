@@ -93,6 +93,8 @@ tools/          load test
 - **Speakers** (up to 8) and the host can turn their mic on; **guests** listen.
 - Voice is Opus (WebCodecs) over the same WebSocket, only while someone is talking,
   relayed inside the 20 Hz snapshot. Details: [docs/voice.md](docs/voice.md).
+- Voice works in Chrome and Safari on phones, and Chrome, Edge and Firefox on
+  computers (not yet Firefox on Android). It needs HTTPS.
 
 ## Networking
 
