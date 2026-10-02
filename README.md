@@ -98,13 +98,30 @@ tools/          load test
 
 ## Capacity
 
-Tested stable at **800 CCU in one room on a single core of a Xeon E5-2680 v4**
-(Coolify, bots on a separate wired machine): a host and two speakers talking in turns,
-listeners walking 20% of the time, no chat. At 800 the server used 44% of that core
-with an event loop p99 of 36 ms; move p99 109 ms, voice p99 126 ms (through the
-server), every voice frame delivered. Around 1,000 it still works but tail latency
-passes the targets (move p99 ~200 ms). The cluster mode spreads a room over more
-processes and cores.
+Measured on **one core of a Xeon E5-2680 v4** (a Coolify VM on Proxmox), bots on a
+separate wired machine. Scenario: one room, a host and two speakers talking in turns,
+listeners walking 20% of the time, no chat.
+
+| Kernel mitigations | Stable (all targets met) | Server at 1,400 in one room |
+|---|---|---|
+| on (default) | **800 CCU** (CPU 44%, event loop p99 36 ms, move p99 109 ms, voice p99 126 ms) | CPU 75%, loop p99 58 ms (over the 50 ms target) |
+| `mitigations=off` on the Proxmox host and in the VM | **1,000 CCU** end to end (1,200 at the edge of the p99 targets) | CPU 53%, loop p99 45 ms |
+
+- Turning the mitigations off cut the server's CPU by about 35% at every step, most of
+  it from the VM's own kernel (PTI makes each socket send's syscall more expensive).
+  It removes protections against Spectre/Meltdown-class attacks: only do it on a host
+  where you trust every VM and container.
+- With mitigations off, the end-to-end limit came from the test network, not the
+  server: inbound traffic topped out at ~60 MB/s (~480 Mbit/s) whatever the server
+  load, and two testers on the same home connection added nothing. The server itself
+  held ~2,000 players across two rooms at 69% CPU with a 34 ms loop p99, before the
+  proxy in front of it (Cloudflare / Traefik) started answering 502.
+- **Estimate** (not measured), with enough bandwidth: about **1,400-1,500 CCU stable in
+  one room** (ceiling ~1,700, needing ~70-90 MB/s out), or ~1,800 in rooms of ~100.
+  A single room costs more per player because every snapshot carries the 20% who
+  move, sent to everyone.
+- Voice adds almost nothing on the server: frames ride the snapshots that go out anyway.
+- The cluster mode spreads a room over more processes and cores.
 
 ## Networking
 
