@@ -555,6 +555,9 @@ interface StatsSample {
   loopP99Ms: number;
   tickP99Ms?: number;
   rssMb: number;
+  egressMbps?: number;
+  /** Overcharge load score (newer servers). */
+  load?: number;
 }
 
 interface HealthReport {
@@ -919,7 +922,7 @@ async function runOrchestrator(): Promise<void> {
   };
   let total = 0;
   console.log(
-    "bots | rooms | snap Hz | srv players | srv CPU | loop p99 | tick p99 | gc/s | gc max ms | RSS MB | move p50/p99 ms | snap gap p50/p99/max ms | chat p50/p99 ms | voice p50/p99 ms | voice rx | in MB/s | corr | drops | migr | rejoin | verdict",
+    "bots | rooms | snap Hz | srv players | srv CPU | load | out Mbps | loop p99 | tick p99 | gc/s | gc max ms | RSS MB | move p50/p99 ms | snap gap p50/p99/max ms | chat p50/p99 ms | voice p50/p99 ms | voice rx | in MB/s | corr | drops | migr | rejoin | verdict",
   );
 
   for (const target of steps) {
@@ -997,6 +1000,8 @@ async function runOrchestrator(): Promise<void> {
     const mean = (key: keyof StatsSample) => samples.reduce((a, s) => a + (s[key] ?? 0), 0) / samples.length;
     const have = samples.length > 0;
     const cpu = have ? mean("cpu") : NaN;
+    const load = have && samples[0].load !== undefined ? Math.max(...samples.map((s) => s.load ?? 0)) : NaN;
+    const egress = have && samples[0].egressMbps !== undefined ? mean("egressMbps") : NaN;
     const loopP99 = have ? Math.max(...samples.map((s) => s.loopP99Ms)) : NaN;
     const tickP99 = have && samples[0].tickP99Ms !== undefined ? Math.max(...samples.map((s) => s.tickP99Ms ?? 0)) : NaN;
     // GC comes from the spawned server's BUN_JSC_logGC output; unknown for --target.
@@ -1032,6 +1037,8 @@ async function runOrchestrator(): Promise<void> {
       (snapshotHz ? String(snapshotHz) : "-").padStart(7),
       String(latest?.players ?? "-").padStart(11),
       show(cpu, () => `${(cpu * 100).toFixed(0)}%`).padStart(7),
+      show(load, () => load.toFixed(2)).padStart(4),
+      show(egress, () => egress.toFixed(0)).padStart(8),
       show(loopP99, () => loopP99.toFixed(1)).padStart(8),
       show(tickP99, () => tickP99.toFixed(2)).padStart(8),
       show(gcPerSec, () => gcPerSec.toFixed(1)).padStart(4),

@@ -22,13 +22,17 @@ export const SPAWN_RING = { min: 900, max: 1_600 } as const;
 export const TICK_RATE = 20;
 
 /**
- * Snapshot groups: once a room has this many players on one server, the server
- * splits them in two groups served on alternate ticks, so each player gets
- * snapshots at TICK_RATE / 2 (half the sends and bytes, and half the players per
- * tick's burst). Below SNAPSHOT_GROUPS_OFF_BELOW everyone gets every tick again.
+ * Snapshot groups: once a room has this many players on one server, it splits
+ * them in two groups served on alternate ticks and ticks twice as often, so each
+ * player keeps the same snapshot rate while each tick's burst of sends covers
+ * half the room. Below SNAPSHOT_GROUPS_OFF_BELOW it goes back to one group.
+ * How many snapshots per second players get is the overcharge's call
+ * (server/src/overcharge.ts).
  */
-export const SNAPSHOT_GROUPS_AT = 700;
-export const SNAPSHOT_GROUPS_OFF_BELOW = 600;
+export const SNAPSHOT_GROUPS_AT = 200;
+export const SNAPSHOT_GROUPS_OFF_BELOW = 150;
+/** A room this big on one server gets at most 10 snapshots per second per player, whatever the load reads. */
+export const OVERCHARGE_FORCE_AT = 2000;
 
 export const MAX_NAME_LENGTH = 20;
 export const MAX_CHAT_LENGTH = 280;

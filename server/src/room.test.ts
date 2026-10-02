@@ -540,13 +540,14 @@ function bigRoom(n: number) {
 
 const snapshots = (msgs: ServerMessage[]) => msgs.filter((m) => m.t === "snapshot");
 
-test("from 700 players the room serves two groups on alternate ticks", () => {
-  const { room, topic, tick, a, b, selfOf, watch } = bigRoom(700);
-  assert.equal(room.snapshotHz, 10);
-  // Players already there were told; a newcomer's welcome says so.
-  assert.ok(a.received.some((m) => m.t === "rate" && m.snapshotHz === 10));
+test("from 200 players the room ticks at 40 Hz in two groups: still 20 Hz per player", () => {
+  const { room, topic, tick, a, b, selfOf, watch } = bigRoom(200);
+  assert.equal(room.snapshotHz, 20);
+  // The players' rate did not change, so nobody is told anything.
+  assert.ok(!a.received.some((m) => m.t === "rate"));
   const late = watch("Late");
-  assert.equal(late.received.find((m) => m.t === "welcome")?.t === "welcome" && (late.received.find((m) => m.t === "welcome") as { snapshotHz: number }).snapshotHz, 10);
+  const welcome = late.received.find((m) => m.t === "welcome");
+  assert.equal(welcome?.t === "welcome" && welcome.snapshotHz, 20);
 
   const ben = selfOf(b);
   a.take();
@@ -561,17 +562,28 @@ test("from 700 players the room serves two groups on alternate ticks", () => {
   tick();
   // The other group gets the same move one tick later (everything since its last snapshot).
   const second = [snapshots(a.take()), snapshots(b.take())];
-  const late2 = second[first[0] === 1 ? 1 : 0];
-  assert.equal(late2.length, 1);
-  assert.deepEqual(late2[0].t === "snapshot" && late2[0].players.map((p) => p.id), [ben.id]);
+  const later = second[first[0] === 1 ? 1 : 0];
+  assert.equal(later.length, 1);
+  assert.deepEqual(later[0].t === "snapshot" && later[0].players.map((p) => p.id), [ben.id]);
+});
+
+test("overcharge: a lower rate is announced and keeps the two groups", () => {
+  const { room, a, b } = bigRoom(200);
+  room.setRate(16);
+  assert.equal(room.snapshotHz, 16);
+  for (const s of [a, b]) assert.deepEqual(s.take().filter((m) => m.t === "rate"), [{ t: "rate", snapshotHz: 16 }]);
+  room.setRate(20);
+  assert.equal(room.snapshotHz, 20);
+  assert.deepEqual(a.take().filter((m) => m.t === "rate"), [{ t: "rate", snapshotHz: 20 }]);
 });
 
 test("in two groups, voice reaches each group at its own next tick", () => {
-  const { tick, a, b } = bigRoom(700);
+  const { room, tick, a, b } = bigRoom(200);
+  room.setRate(10); // 100 ms between a group's snapshots: voice rides every one
   a.take();
   b.take();
   a.deliver({ t: "voice", seq: 1, data: new Uint8Array([1]) });
-  tick(); // nobody moved: voice still goes out (no 100 ms wait on top of the group's)
+  tick();
   const first = [voiceIn(a.take()), voiceIn(b.take())];
   assert.equal(first[0].length + first[1].length, 1);
   tick();
@@ -579,13 +591,13 @@ test("in two groups, voice reaches each group at its own next tick", () => {
   assert.deepEqual([first[0].length + second[0].length, first[1].length + second[1].length], [1, 1]);
 });
 
-test("below 600 players the room goes back to one group, flushing both backlogs", () => {
-  const { room, tick, a, b, crowd, selfOf } = bigRoom(700);
+test("below 150 players the room goes back to one group, flushing both backlogs", () => {
+  const { room, tick, a, b, crowd, selfOf } = bigRoom(200);
   const ben = selfOf(b);
-  for (const s of crowd.slice(0, 101)) s.close();
-  assert.equal(room.playerCount, 599);
+  tick(); // the groups' backlogs now differ
+  for (const s of crowd.slice(0, 51)) s.close();
+  assert.equal(room.playerCount, 149);
   assert.equal(room.snapshotHz, 20);
-  assert.ok(b.received.some((m) => m.t === "rate" && m.snapshotHz === 20));
   a.take();
   b.take();
   b.deliver({ t: "move", x: ben.x + 1, y: ben.y, dir: "east", moving: true });

@@ -6,6 +6,7 @@ import {
   MAX_SPEAKERS,
   MAX_VOICE_FRAME_BYTES,
   MOVE_SPEED,
+  OVERCHARGE_FORCE_AT,
   SNAPSHOT_GROUPS_AT,
   SNAPSHOT_GROUPS_OFF_BELOW,
   TICK_RATE,
@@ -16,7 +17,7 @@ import {
 import type { Direction } from "../../shared/src/direction.ts";
 import { canSpeak, type Role } from "../../shared/src/roles.ts";
 import { canBeAt, spawnPoint } from "../../shared/src/space.ts";
-import { recordTick } from "./stats.ts";
+import { recordEgress, recordTick } from "./stats.ts";
 import {
   decodeClientMessage,
   encodeServerMessage,
@@ -138,6 +139,8 @@ export interface RoomOptions {
    * gets tickHz / groups snapshots per second.
    */
   schedule?: { tickHz: number; groups: 1 | 2 };
+  /** Snapshots per second per player the server's overcharge allows (default TICK_RATE). */
+  rate?: number;
 }
 
 export class Room {
@@ -156,7 +159,9 @@ export class Room {
    */
   private groups: number;
   /** Room ticks per second; each group gets tickHz / groups snapshots per second. */
-  private readonly tickHz: number;
+  private tickHz: number;
+  /** Snapshots per second per player allowed by the overcharge. */
+  private rate: number;
   private readonly groupSizes = [0, 0];
   private ticks = 0;
   /** Per group: players (local or replicated) changed and voice received since its last snapshot. */
@@ -176,8 +181,15 @@ export class Room {
     this.id = id;
     this.publish = opts.publish ?? null;
     this.opts = opts;
-    this.tickHz = opts.schedule?.tickHz ?? TICK_RATE;
+    this.rate = opts.rate ?? TICK_RATE;
+    this.tickHz = opts.schedule?.tickHz ?? this.rate;
     this.groups = opts.schedule?.groups ?? 1;
+  }
+
+  /** The overcharge changed the snapshot rate players may get. */
+  setRate(rate: number): void {
+    this.rate = rate;
+    this.applySchedule(this.localCount);
   }
 
   /** Players connected to this server (replicas excluded). */
@@ -353,7 +365,7 @@ export class Room {
     this.groupSizes[p.group]--;
     this.forget(p);
     this.migrating.delete(id);
-    this.updateGroups(this.localCount);
+    this.applySchedule(this.localCount);
     return info;
   }
 
@@ -410,7 +422,7 @@ export class Room {
     };
 
     // Others hear about a change of snapshot rate before the newcomer's welcome carries it.
-    this.updateGroups(this.localCount + 1);
+    this.applySchedule(this.localCount + 1);
     // A replica with our id (a migration, or a stale copy) is replaced in place.
     const others = [...this.players.values()].filter((p) => p.id !== id);
     send(peer, {
@@ -438,13 +450,25 @@ export class Room {
     return player;
   }
 
-  /** Two snapshot groups from SNAPSHOT_GROUPS_AT local players, back to one below SNAPSHOT_GROUPS_OFF_BELOW. */
-  private updateGroups(count: number): void {
+  /**
+   * Groups and tick rate for `count` local players: two groups from
+   * SNAPSHOT_GROUPS_AT (back to one below SNAPSHOT_GROUPS_OFF_BELOW), ticking
+   * groups x the per-player rate. Players hear about a change of their rate.
+   */
+  private applySchedule(count: number): void {
     if (this.opts.schedule) return;
-    const next = this.groups === 1 ? (count >= SNAPSHOT_GROUPS_AT ? 2 : 1) : count < SNAPSHOT_GROUPS_OFF_BELOW ? 1 : 2;
-    if (next === this.groups) return;
-    this.groups = next;
-    this.broadcast({ t: "rate", snapshotHz: this.snapshotHz });
+    const groups = this.groups === 1 ? (count >= SNAPSHOT_GROUPS_AT ? 2 : 1) : count < SNAPSHOT_GROUPS_OFF_BELOW ? 1 : 2;
+    const perPlayer = count >= OVERCHARGE_FORCE_AT ? Math.min(this.rate, TICK_RATE / 2) : this.rate;
+    const before = this.snapshotHz;
+    this.groups = groups;
+    if (perPlayer * groups !== this.tickHz) {
+      this.tickHz = perPlayer * groups;
+      if (this.ticker) {
+        this.stopTicker();
+        this.startTicker();
+      }
+    }
+    if (this.snapshotHz !== before) this.broadcast({ t: "rate", snapshotHz: this.snapshotHz });
   }
 
   private markChanged(p: Player): void {
@@ -551,7 +575,7 @@ export class Room {
     this.groupSizes[player.group]--;
     this.forget(player);
     this.broadcast({ t: "player_left", id: player.id });
-    this.updateGroups(this.localCount);
+    this.applySchedule(this.localCount);
     this.opts.onLeft?.(player.id);
     this.opts.sync?.left(player.id);
   }
@@ -665,18 +689,19 @@ export class Room {
     for (const g of groups) {
       this.pending[g].changed.clear();
       if (voiceDue) this.pending[g].voice = [];
-      this.publishTo(groupChannel(g), (q) => q.group === g, data);
+      this.publishTo(groupChannel(g), (q) => q.group === g, data, this.groupSizes[g]);
     }
     return true;
   }
 
   /** Encode once, send to every local player. */
   private broadcast(msg: ServerMessage): void {
-    this.publishTo(ROOM_CHANNEL, () => true, encodeServerMessage(msg));
+    this.publishTo(ROOM_CHANNEL, () => true, encodeServerMessage(msg), this.localCount);
   }
 
-  private publishTo(channel: string, member: (p: Player) => boolean, data: Uint8Array): void {
+  private publishTo(channel: string, member: (p: Player) => boolean, data: Uint8Array, recipients: number): void {
     if (this.localCount === 0) return;
+    recordEgress(data.byteLength * recipients);
     if (this.publish) this.publish(channel, data);
     else for (const p of this.players.values()) if (p.peer && member(p)) p.peer.send(data);
   }

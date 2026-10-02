@@ -3,6 +3,7 @@ import type { PlayerInfo } from "../../shared/src/protocol.ts";
 import { readServerClusterConfig } from "./cluster/config.ts";
 import { createRoom, hostKeySecret, isHostKey } from "./host-key.ts";
 import { readJoinRequest, rejectWithoutHealthToken, scheme } from "./http.ts";
+import { Overcharge } from "./overcharge.ts";
 import { CLIENT_DIR } from "./paths.ts";
 import { Room, type Peer, type PeerEvents, type Publish, type RoomSync } from "./room.ts";
 import { StatsSampler } from "./stats.ts";
@@ -42,6 +43,17 @@ const schedule = readSchedule();
 const hostSecret = hostKeySecret(cluster?.secret);
 
 const rooms = new Map<string, Room>();
+
+/**
+ * Overcharge (server/src/overcharge.ts): lowers every room's snapshot rate when
+ * the server runs hot. EGRESS_BUDGET_MBPS adds outgoing bandwidth to the load it
+ * watches, e.g. to stay under a link's capacity.
+ */
+const egressBudget = Number(process.env.EGRESS_BUDGET_MBPS ?? 0) || null;
+const overcharge = new Overcharge(egressBudget, (rate) => {
+  console.log(`overcharge: ${rate} snapshots/s per player (load ${overcharge.score.toFixed(2)})`);
+  for (const room of rooms.values()) room.setRate(rate);
+});
 const serveStatic = createStaticHandler(CLIENT_DIR);
 let sockets = 0;
 
@@ -49,11 +61,13 @@ export const stats = new StatsSampler(
   () => {
     let players = 0;
     for (const room of rooms.values()) players += room.playerCount;
-    return { rooms: rooms.size, players, sockets };
+    return { rooms: rooms.size, players, sockets, snapshotHz: overcharge.rate, load: Math.round(overcharge.score * 100) / 100 };
   },
   // LOG_STATS=1 also prints every sample as a JSON line.
   process.env.LOG_STATS === "1" ? (s) => console.log(JSON.stringify(s)) : undefined,
 );
+// Fixed schedules (A/B tests) leave the rate alone.
+if (!schedule) stats.listeners.add((sample) => overcharge.observe(sample));
 
 export const startupMessage = () =>
   cluster
@@ -122,6 +136,7 @@ export function connect(roomId: string, peer: Peer, playerId?: number, resume?: 
       keepChatHistory: !cluster,
       isHostKey: (key) => isHostKey(roomId, key, hostSecret),
       schedule,
+      rate: overcharge.rate,
     });
     rooms.set(roomId, room);
     clusterRooms?.roomOpened(roomId);

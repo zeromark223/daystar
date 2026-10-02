@@ -16,12 +16,19 @@ export interface StatsSample {
   tickMaxMs: number;
   rssMb: number;
   heapMb: number;
+  /** Bytes sent to players (snapshots and room events), in Mbit/s. */
+  egressMbps: number;
+  /** Overcharge: snapshots per second per player, and the load score behind it. */
+  snapshotHz?: number;
+  load?: number;
 }
 
 export interface Counts {
   rooms: number;
   players: number;
   sockets: number;
+  snapshotHz?: number;
+  load?: number;
 }
 
 const SAMPLE_MS = 1000;
@@ -31,6 +38,12 @@ const HISTORY = 300;
 const PROBE_MS = 20;
 
 let tickDurations: number[] = [];
+let egressBytes = 0;
+/** Rooms report what they send: frame size times recipients. */
+export function recordEgress(bytes: number): void {
+  egressBytes += bytes;
+}
+
 /** Rooms report how long each tick took (see Room.tick). */
 export function recordTick(ms: number): void {
   tickDurations.push(ms);
@@ -64,6 +77,8 @@ export class StatsSampler {
       this.lateness = [];
       const ticks = tickDurations.sort((a, b) => a - b);
       tickDurations = [];
+      const egressMbps = round((egressBytes * 8) / 1e6 / ((now - lastAt) / 1000), 1);
+      egressBytes = 0;
       const sample: StatsSample = {
         t: Date.now(),
         ...counts(),
@@ -75,6 +90,7 @@ export class StatsSampler {
         tickMaxMs: round(ticks.at(-1) ?? 0, 2),
         rssMb: Math.round(mem.rss / 1e6),
         heapMb: Math.round(mem.heapUsed / 1e6),
+        egressMbps,
       };
       lastCpu = process.cpuUsage();
       lastAt = now;

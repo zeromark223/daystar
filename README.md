@@ -137,12 +137,18 @@ traffic was ~93 MB/s, close to what the gigabit LAN and the test machine could t
 - Server validates speed and the world limits, sends a `correction` if a move is invalid,
   and broadcasts a binary snapshot at 20 Hz when anything changed.
 - Other players are rendered 100 ms in the past and interpolated between snapshots.
-- **Snapshot groups:** once a room has 700 players on one server, they are split in
-  two groups served on alternate ticks, so each player gets 10 Hz (back to 20 Hz below
-  600). That halves the sends and bytes, and each tick's burst of sends covers only
-  half the room, which keeps the event loop responsive; clients then interpolate
-  200 ms in the past. Measured locally at 1,000 players: 17.5 MB/s out instead of
-  ~32 MB/s. The capacity figures above were measured at 20 Hz, before this change.
+- **Snapshot groups:** from 200 players on one server, a room splits them in two
+  groups served on alternate ticks and ticks at 40 Hz, so everyone still gets 20 Hz
+  but each tick's burst of sends covers half the room (event loop p99 halved in a
+  local A/B at 2,000 players, GC unchanged, about 10% more CPU).
+- **Overcharge** (`server/src/overcharge.ts`): when the server runs hot, every room
+  sends fewer snapshots per player, 2 Hz at a time (20, 18, ... 10), and climbs back
+  when there is room again. The load score is the highest of event loop p99 / 50 ms,
+  CPU / one core and, if `EGRESS_BUDGET_MBPS` is set, outgoing traffic / that budget;
+  it steps down after 5 s at 0.75 or more, and back up only when the higher rate is
+  predicted to stay under 0.65 for 10 s. Rooms of 2,000+ players on one server are
+  capped at 10 Hz. Clients interpolate two snapshot intervals in the past (100 ms at
+  20 Hz, 200 ms at 10 Hz). The capacity figures above were measured before this.
 - Rooms live in memory and disappear when the last socket closes; each keeps the
   last 100 chat messages.
 
@@ -202,6 +208,8 @@ Build from the `Dockerfile` (Bun). The container listens on `PORT` (default 3000
 exposes `GET /healthz` (plain liveness) and `GET /api/health` (JSON load stats: rooms,
 players, CPU, event loop, memory, last 5 minutes of 1 s samples). Set `HEALTH_TOKEN`
 to require `Authorization: Bearer <token>` on `/api/health` in production. WebSockets go through the normal HTTP proxy on `/ws`.
+Set `EGRESS_BUDGET_MBPS` to the outgoing bandwidth the server may use (e.g. a bit under
+the link's capacity) so the overcharge lowers snapshot rates before the link saturates.
 Set `ROOM_SECRET` (any long random string) so hosts keep their rooms across restarts
 (a cluster uses `CLUSTER_SECRET` for this). The microphone needs HTTPS.
 

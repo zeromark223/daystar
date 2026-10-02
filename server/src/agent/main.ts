@@ -110,6 +110,7 @@ function aggregate(now: number): StatsSample | null {
     tickMaxMs: max("tickMaxMs"),
     rssMb: sum("rssMb"),
     heapMb: sum("heapMb"),
+    egressMbps: sum("egressMbps"),
   };
 }
 
