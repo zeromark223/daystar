@@ -137,6 +137,12 @@ traffic was ~93 MB/s, close to what the gigabit LAN and the test machine could t
 - Server validates speed and the world limits, sends a `correction` if a move is invalid,
   and broadcasts a binary snapshot at 20 Hz when anything changed.
 - Other players are rendered 100 ms in the past and interpolated between snapshots.
+- **Snapshot groups:** once a room has 700 players on one server, they are split in
+  two groups served on alternate ticks, so each player gets 10 Hz (back to 20 Hz below
+  600). That halves the sends and bytes, and each tick's burst of sends covers only
+  half the room, which keeps the event loop responsive; clients then interpolate
+  200 ms in the past. Measured locally at 1,000 players: 17.5 MB/s out instead of
+  ~32 MB/s. The capacity figures above were measured at 20 Hz, before this change.
 - Rooms live in memory and disappear when the last socket closes; each keeps the
   last 100 chat messages.
 

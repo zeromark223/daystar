@@ -10,9 +10,22 @@ import { glowTexture, planetTexture } from "./textures.ts";
 const BUBBLE_MS = 6000;
 const BUBBLE_MAX_WIDTH = 220;
 /** A gap longer than this between samples means the player was idle. */
-const SAMPLE_GAP_MS = 150;
+let sampleGapMs = 150;
 /** Remote players are drawn this far in the past so there are two samples to blend. */
-export const INTERPOLATION_DELAY_MS = 100;
+let interpolationDelayMs = 100;
+/** Time between snapshots, as announced by the server (see SNAPSHOT_GROUPS_AT). */
+let snapshotIntervalMs = 1000 / TICK_RATE;
+
+/**
+ * Snapshots arrive `hz` times a second: draw remote players two intervals in the
+ * past (two samples to blend), and treat three intervals without one as idle.
+ */
+export function setSnapshotRate(hz: number): void {
+  snapshotIntervalMs = 1000 / hz;
+  interpolationDelayMs = 2 * snapshotIntervalMs;
+  sampleGapMs = 3 * snapshotIntervalMs;
+}
+
 /** Trail: positions kept while moving, and how often one is recorded. */
 const TRAIL_POINTS = 14;
 const TRAIL_EVERY_MS = 45;
@@ -217,14 +230,14 @@ export class Avatar {
     // seconds old. Re-anchor it one tick back so the move starts from rest
     // instead of being blended across the whole pause.
     const last = this.samples.at(-1);
-    if (last && t - last.t > SAMPLE_GAP_MS) this.samples.push({ ...last, t: t - 1000 / TICK_RATE });
+    if (last && t - last.t > sampleGapMs) this.samples.push({ ...last, t: t - snapshotIntervalMs });
     this.samples.push({ t, x: s.x, y: s.y, dir: s.dir, moving: s.moving });
     if (this.samples.length > 30) this.samples.shift();
   }
 
   /** Blend buffered server samples for a remote player. */
   interpolate(now: number): void {
-    const renderT = now - INTERPOLATION_DELAY_MS;
+    const renderT = now - interpolationDelayMs;
     const s = this.samples;
     while (s.length >= 2 && s[1].t <= renderT) s.shift();
 

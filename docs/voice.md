@@ -92,6 +92,10 @@ With the page rendering at 5-7 fps, playback kept up at ~50 frames per second.
 - **Idle rooms batch to 100 ms:** when nobody moves, frames wait until the oldest is
   100 ms old (`VOICE_FLUSH_MS`) and go out alone, so a listening room gets 10 frames
   per second per listener instead of 20. Never more sends than one per tick.
+- **Big rooms (snapshot groups):** from 700 players on a server, each player gets
+  snapshots at 10 Hz on alternate ticks; voice rides every one of them, so each
+  listener receives voice in 100 ms batches (about +25 ms on average) and the
+  playout delay settles a little higher.
 - Mesh peers get local frames every tick (few peers; the receiving server batches again).
 
 ### Playback: adaptive delay (`client/src/voice/playout.ts`)

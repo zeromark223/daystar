@@ -13,9 +13,12 @@ import { Room, type PeerEvents } from "./room.ts";
 class FakeSocket {
   received: ServerMessage[] = [];
   events!: PeerEvents;
-  subscribed = false;
-  subscribe(): void {
-    this.subscribed = true;
+  readonly channels = new Set<string>();
+  get subscribed(): boolean {
+    return this.channels.size > 0;
+  }
+  subscribe(channel: string): void {
+    this.channels.add(channel);
   }
   send(data: Uint8Array): void {
     this.received.push(decodeServerMessage(data)!);
@@ -33,15 +36,15 @@ class FakeSocket {
   }
 }
 
-/** Fake Bun topic: fans a frame out to every subscribed socket, counting calls. */
+/** Fake Bun topics: fans a frame out to every socket subscribed to the channel, counting calls. */
 function fakeTopic() {
-  const sockets: FakeSocket[] = [];
+  const sockets: { channels: Set<string>; send(data: Uint8Array): void }[] = [];
   const topic = {
     publishes: 0,
     sockets,
-    publish: (data: Uint8Array) => {
+    publish: (channel: string, data: Uint8Array) => {
       topic.publishes++;
-      for (const s of sockets) if (s.subscribed) s.send(data);
+      for (const s of sockets) if (s.channels.has(channel)) s.send(data);
     },
   };
   return topic;
@@ -101,14 +104,16 @@ test("a player who stops is sent once more with moving=false", () => {
   done();
 });
 
-test("with publish, broadcasts go out once per frame to joined players only", () => {
+test("with publish, broadcasts go out once per channel to joined players only", () => {
   const topic = fakeTopic();
   const { tick, sockets, self, done } = setup(topic);
-  assert.ok(sockets.every((s) => s.subscribed));
+  // Everyone gets room events plus one of the two snapshot group channels.
+  assert.ok(sockets.every((s) => s.channels.has("") && s.channels.size === 2));
   const before = topic.publishes;
   sockets[0].deliver({ t: "move", x: self.x + 1, y: self.y, dir: "east", moving: true });
   tick();
-  assert.equal(topic.publishes, before + 1);
+  // One room, one group: the same snapshot goes to both group channels, every player once.
+  assert.equal(topic.publishes, before + 2);
   for (const s of sockets) assert.equal(s.take().filter((m) => m.t === "snapshot").length, 1);
   done();
 });
@@ -485,4 +490,106 @@ test("cluster: local voice goes to peers every tick, even while clients wait", (
   tick(0);
   tick(0);
   assert.deepEqual(frames, [[1], [2]]);
+});
+
+// ------------------------------------------------------------ snapshot groups
+
+/** A cheap peer for filling big rooms: counts frames instead of decoding them. */
+class CountingSocket {
+  readonly channels = new Set<string>();
+  frames = 0;
+  events!: PeerEvents;
+  send(): void {
+    this.frames++;
+  }
+  subscribe(channel: string): void {
+    this.channels.add(channel);
+  }
+  close(): void {
+    this.events.close();
+  }
+}
+
+/** A room with `n` players on a fake topic; `a` (the host) and `b` (decoded) land in groups 0 and 1. */
+function bigRoom(n: number) {
+  const topic = fakeTopic();
+  const room = new Room("big", { onEmpty: () => {}, publish: topic.publish, isHostKey: (k) => k === HOST_KEY });
+  const tick = (later = 0) => (room as unknown as { tick(now: number): void }).tick(Date.now() + later);
+  const watch = (name: string, hostKey = "") => {
+    const s = new FakeSocket();
+    topic.sockets.push(s);
+    s.events = room.accept(s);
+    s.deliver({ t: "join", name, appearance: 0, hostKey });
+    return s;
+  };
+  const a = watch("Ann", HOST_KEY);
+  const b = watch("Ben");
+  const crowd = Array.from({ length: n - 2 }, (_, i) => {
+    const s = new CountingSocket();
+    topic.sockets.push(s);
+    s.events = room.accept(s);
+    s.events.message(encodeClientMessage({ t: "join", name: `c${i}`, appearance: 0, hostKey: "" }));
+    return s;
+  });
+  const selfOf = (s: FakeSocket) => {
+    const w = s.received.find((m) => m.t === "welcome");
+    return w?.t === "welcome" ? w.players.find((p) => p.id === w.selfId)! : null!;
+  };
+  return { room, topic, tick, a, b, crowd, selfOf, watch };
+}
+
+const snapshots = (msgs: ServerMessage[]) => msgs.filter((m) => m.t === "snapshot");
+
+test("from 700 players the room serves two groups on alternate ticks", () => {
+  const { room, topic, tick, a, b, selfOf, watch } = bigRoom(700);
+  assert.equal(room.snapshotHz, 10);
+  // Players already there were told; a newcomer's welcome says so.
+  assert.ok(a.received.some((m) => m.t === "rate" && m.snapshotHz === 10));
+  const late = watch("Late");
+  assert.equal(late.received.find((m) => m.t === "welcome")?.t === "welcome" && (late.received.find((m) => m.t === "welcome") as { snapshotHz: number }).snapshotHz, 10);
+
+  const ben = selfOf(b);
+  a.take();
+  b.take();
+  const before = topic.publishes;
+  b.deliver({ t: "move", x: ben.x + 1, y: ben.y, dir: "east", moving: true });
+  tick();
+  // One group's channel per tick.
+  assert.equal(topic.publishes, before + 1);
+  const first = [snapshots(a.take()).length, snapshots(b.take()).length];
+  assert.equal(first[0] + first[1], 1);
+  tick();
+  // The other group gets the same move one tick later (everything since its last snapshot).
+  const second = [snapshots(a.take()), snapshots(b.take())];
+  const late2 = second[first[0] === 1 ? 1 : 0];
+  assert.equal(late2.length, 1);
+  assert.deepEqual(late2[0].t === "snapshot" && late2[0].players.map((p) => p.id), [ben.id]);
+});
+
+test("in two groups, voice reaches each group at its own next tick", () => {
+  const { tick, a, b } = bigRoom(700);
+  a.take();
+  b.take();
+  a.deliver({ t: "voice", seq: 1, data: new Uint8Array([1]) });
+  tick(); // nobody moved: voice still goes out (no 100 ms wait on top of the group's)
+  const first = [voiceIn(a.take()), voiceIn(b.take())];
+  assert.equal(first[0].length + first[1].length, 1);
+  tick();
+  const second = [voiceIn(a.take()), voiceIn(b.take())];
+  assert.deepEqual([first[0].length + second[0].length, first[1].length + second[1].length], [1, 1]);
+});
+
+test("below 600 players the room goes back to one group, flushing both backlogs", () => {
+  const { room, tick, a, b, crowd, selfOf } = bigRoom(700);
+  const ben = selfOf(b);
+  for (const s of crowd.slice(0, 101)) s.close();
+  assert.equal(room.playerCount, 599);
+  assert.equal(room.snapshotHz, 20);
+  assert.ok(b.received.some((m) => m.t === "rate" && m.snapshotHz === 20));
+  a.take();
+  b.take();
+  b.deliver({ t: "move", x: ben.x + 1, y: ben.y, dir: "east", moving: true });
+  tick();
+  assert.equal(snapshots(a.take()).length, 1);
+  assert.equal(snapshots(b.take()).length, 1);
 });

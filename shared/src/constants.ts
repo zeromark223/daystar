@@ -21,6 +21,15 @@ export const SPAWN_RING = { min: 900, max: 1_600 } as const;
 /** Server snapshot rate and client position send rate. */
 export const TICK_RATE = 20;
 
+/**
+ * Snapshot groups: once a room has this many players on one server, the server
+ * splits them in two groups served on alternate ticks, so each player gets
+ * snapshots at TICK_RATE / 2 (half the sends and bytes, and half the players per
+ * tick's burst). Below SNAPSHOT_GROUPS_OFF_BELOW everyone gets every tick again.
+ */
+export const SNAPSHOT_GROUPS_AT = 700;
+export const SNAPSHOT_GROUPS_OFF_BELOW = 600;
+
 export const MAX_NAME_LENGTH = 20;
 export const MAX_CHAT_LENGTH = 280;
 export const CHAT_HISTORY_SIZE = 100;

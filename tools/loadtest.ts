@@ -89,6 +89,8 @@ interface WorkerReport {
   voiceRx: number;
   /** Frame spoken (end of its 20 ms) -> received by a bot, through the server. */
   voice: [number, number][];
+  /** Lowest snapshot rate the server announced to this worker's bots (Hz), 0 if none yet. */
+  snapshotHz: number;
 }
 
 // ---------------------------------------------------------------- worker
@@ -134,6 +136,8 @@ interface Bot {
   /** Talkers: which voice sample, and the next packet in it. */
   voice: number;
   voicePos: number;
+  /** Snapshot rate the server announced (welcome, then "rate" messages). */
+  snapshotHz: number;
 }
 
 /**
@@ -246,6 +250,7 @@ function runWorker(): void {
       role: "guest",
       voice,
       voicePos: Math.floor(Math.random() * 200),
+      snapshotHz: 0,
       ws: null!,
       room,
       ticket: placed.ticket,
@@ -320,8 +325,11 @@ function runWorker(): void {
         bot.x = self.x;
         bot.y = self.y;
         bot.role = self.role;
+        bot.snapshotHz = msg.snapshotHz;
         bot.joined = true;
         if (bot.part !== "guest") promoteSpeakers(bot.room);
+      } else if (msg?.t === "rate") {
+        bot.snapshotHz = msg.snapshotHz;
       } else if (msg?.t === "role" && msg.id === bot.id) {
         bot.role = msg.role;
         if (bot.part !== "guest") promoteSpeakers(bot.room);
@@ -508,6 +516,7 @@ function runWorker(): void {
       move: move.entries(),
       voiceSent: [...voiceSent],
       voice: voiceLatency.entries(),
+      snapshotHz: bots.reduce((min, b) => (b.joined && b.snapshotHz && (!min || b.snapshotHz < min) ? b.snapshotHz : min), 0),
     };
     // Workers talk to the orchestrator in JSON lines over stdio .
     process.stdout.write(JSON.stringify(report) + "\n");
@@ -910,7 +919,7 @@ async function runOrchestrator(): Promise<void> {
   };
   let total = 0;
   console.log(
-    "bots | rooms | srv players | srv CPU | loop p99 | tick p99 | gc/s | gc max ms | RSS MB | move p50/p99 ms | snap gap p50/p99/max ms | chat p50/p99 ms | voice p50/p99 ms | voice rx | in MB/s | corr | drops | migr | rejoin | verdict",
+    "bots | rooms | snap Hz | srv players | srv CPU | loop p99 | tick p99 | gc/s | gc max ms | RSS MB | move p50/p99 ms | snap gap p50/p99/max ms | chat p50/p99 ms | voice p50/p99 ms | voice rx | in MB/s | corr | drops | migr | rejoin | verdict",
   );
 
   for (const target of steps) {
@@ -962,6 +971,7 @@ async function runOrchestrator(): Promise<void> {
     const voice = new Histogram();
     let voiceRx = 0;
     let voiceExpected = 0;
+    let snapshotHz = 0;
     let bytesIn = 0;
     let corrections = 0;
     let drops = 0;
@@ -976,6 +986,7 @@ async function runOrchestrator(): Promise<void> {
       move.merge(r.move);
       voice.merge(r.voice);
       voiceRx += r.voiceRx;
+      if (r.snapshotHz && (!snapshotHz || r.snapshotHz < snapshotHz)) snapshotHz = r.snapshotHz;
       for (const [room, n] of r.voiceSent) voiceExpected += n * (members.get(room) ?? 0);
       bytesIn += r.bytesIn;
       corrections += r.corrections;
@@ -999,9 +1010,12 @@ async function runOrchestrator(): Promise<void> {
     const problems = [];
     if (joined < target) problems.push(`only ${joined} joined`);
     const moveP99 = move.percentile(0.99);
+    // Age of the newest position when a snapshot arrives; does not depend on the snapshot rate.
     if (move.total > 0 && moveP99 > 150) problems.push("moves slow");
+    // Big rooms get fewer snapshots per second (SNAPSHOT_GROUPS_AT).
+    const intervalMs = 1000 / (snapshotHz || TICK_RATE);
     // With idle bots, long snapshot gaps are expected (nothing to send), so only judge them when all walk.
-    if (opts.movingRatio >= 1 && !(gapP99 <= 100)) problems.push("snapshots late");
+    if (opts.movingRatio >= 1 && !(gapP99 <= 2 * intervalMs)) problems.push("snapshots late");
     if (chat.total > 0 && chatP99 > 250) problems.push("chat slow");
     const voiceP99 = voice.percentile(0.99);
     const voiceShare = voiceExpected > 0 ? voiceRx / voiceExpected : NaN;
@@ -1015,6 +1029,7 @@ async function runOrchestrator(): Promise<void> {
     const row = [
       String(target).padStart(4),
       String(roomSize > 0 ? Math.ceil(target / roomSize) : 1).padStart(5),
+      (snapshotHz ? String(snapshotHz) : "-").padStart(7),
       String(latest?.players ?? "-").padStart(11),
       show(cpu, () => `${(cpu * 100).toFixed(0)}%`).padStart(7),
       show(loopP99, () => loopP99.toFixed(1)).padStart(8),

@@ -54,7 +54,8 @@ export type ClientMessage =
   | { t: "voice"; seq: number; data: Uint8Array };
 
 export type ServerMessage =
-  | { t: "welcome"; selfId: number; players: PlayerInfo[]; chat: ChatMessage[] }
+  /** `snapshotHz`: how often this client will get snapshots (see SNAPSHOT_GROUPS_AT). */
+  | { t: "welcome"; selfId: number; players: PlayerInfo[]; chat: ChatMessage[]; snapshotHz: number }
   | { t: "player_joined"; player: PlayerInfo }
   | { t: "player_left"; id: number }
   | { t: "chat"; message: ChatMessage }
@@ -63,6 +64,8 @@ export type ServerMessage =
   /** Once per tick: players that changed, and voice frames received since the last tick. */
   | { t: "snapshot"; players: PlayerState[]; voice: VoiceFrame[] }
   | { t: "role"; id: number; role: Role }
+  /** The room switched snapshot groups: snapshots now arrive `snapshotHz` times a second. */
+  | { t: "rate"; snapshotHz: number }
   /** Cluster: reconnect elsewhere (ask the agent's /api/migrate); the server is shedding load. */
   | { t: "migrate" };
 
@@ -126,6 +129,7 @@ const Op = {
   snapshot: 16,
   migrate: 17,
   role: 18,
+  rate: 19,
 } as const;
 
 /** Opcode of server snapshots, for callers that only need to recognize them. */
@@ -143,6 +147,7 @@ const Schemas: Record<number, Struct> = {
     players_Struct: PlayerInfoStruct,
     chat: Type.Object8,
     chat_Struct: ChatStruct,
+    snapshotHz: Type.UInt8,
   },
   [Op.player_joined]: PlayerInfoStruct,
   [Op.player_left]: { id: Type.UInt16 },
@@ -157,6 +162,7 @@ const Schemas: Record<number, Struct> = {
   },
   [Op.migrate]: {},
   [Op.role]: { id: Type.UInt16, role: Type.UInt8 },
+  [Op.rate]: { snapshotHz: Type.UInt8 },
 };
 
 // ------------------------------------------------------------------ wire <-> message
@@ -249,7 +255,7 @@ export function encodeServerMessage(msg: ServerMessage): Uint8Array<ArrayBuffer>
     case "welcome":
       return encode(
         Schemas[Op.welcome],
-        { selfId: msg.selfId, players: msg.players.map(infoToWire), chat: msg.chat },
+        { selfId: msg.selfId, players: msg.players.map(infoToWire), chat: msg.chat, snapshotHz: msg.snapshotHz },
         Op.welcome,
       );
     case "player_joined":
@@ -268,6 +274,8 @@ export function encodeServerMessage(msg: ServerMessage): Uint8Array<ArrayBuffer>
       return encode(Schemas[Op.migrate], {}, Op.migrate);
     case "role":
       return encode(Schemas[Op.role], { id: msg.id, role: roleIndex(msg.role) }, Op.role);
+    case "rate":
+      return encode(Schemas[Op.rate], msg, Op.rate);
   }
 }
 
@@ -277,8 +285,8 @@ export function decodeServerMessage(bytes: Uint8Array): ServerMessage | null {
     const schema = Schemas[op];
     switch (op) {
       case Op.welcome: {
-        const m = decode<{ selfId: number; players: WireInfo[]; chat: ChatMessage[] }>(schema, bytes, 1);
-        return { t: "welcome", selfId: m.selfId, players: m.players.map(infoFromWire), chat: m.chat };
+        const m = decode<{ selfId: number; players: WireInfo[]; chat: ChatMessage[]; snapshotHz: number }>(schema, bytes, 1);
+        return { t: "welcome", selfId: m.selfId, players: m.players.map(infoFromWire), chat: m.chat, snapshotHz: m.snapshotHz };
       }
       case Op.player_joined:
         return { t: "player_joined", player: infoFromWire(decode<WireInfo>(schema, bytes, 1)) };
@@ -303,6 +311,10 @@ export function decodeServerMessage(bytes: Uint8Array): ServerMessage | null {
         const m = decode<{ id: number; role: number }>(schema, bytes, 1);
         const role = roleFromIndex(m.role);
         return role ? { t: "role", id: m.id, role } : null;
+      }
+      case Op.rate: {
+        const m = decode<{ snapshotHz: number }>(schema, bytes, 1);
+        return m.snapshotHz > 0 ? { t: "rate", snapshotHz: m.snapshotHz } : null;
       }
       default:
         return null;

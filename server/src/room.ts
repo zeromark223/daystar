@@ -6,6 +6,8 @@ import {
   MAX_SPEAKERS,
   MAX_VOICE_FRAME_BYTES,
   MOVE_SPEED,
+  SNAPSHOT_GROUPS_AT,
+  SNAPSHOT_GROUPS_OFF_BELOW,
   TICK_RATE,
   VOICE_BYTES_PER_SEC,
   VOICE_FLUSH_MS,
@@ -39,17 +41,31 @@ export interface Peer {
   send(data: Uint8Array): void;
   close(): void;
   /**
-   * Join the room's broadcast channel. Only needed when the room has a
+   * Join one of the room's broadcast channels: ROOM_CHANNEL (events for everyone)
+   * and the player's snapshot group channel. Only needed when the room has a
    * `publish` function (Bun topics); called once the player has joined.
    */
-  subscribe?(): void;
+  subscribe?(channel: string): void;
 }
 
+/** Channel for events every player gets (joins, chat, roles...). */
+export const ROOM_CHANNEL = "";
+/** Channel of snapshot group `g` (see SNAPSHOT_GROUPS_AT). */
+export const groupChannel = (g: number) => `g${g}`;
+
 /**
- * Sends one frame to every subscribed peer of a room in a single call
- * (Bun's server.publish fans out natively). Without it the room loops over peers.
+ * Sends one frame to every peer subscribed to one of the room's channels in a
+ * single call (Bun's server.publish fans out natively). Without it the room loops over peers.
  */
-export type Publish = (data: Uint8Array) => void;
+export type Publish = (channel: string, data: Uint8Array) => void;
+
+/** Changes and voice a snapshot group has not been sent yet. */
+interface Pending {
+  changed: Set<Player>;
+  voice: VoiceFrame[];
+  /** When the oldest frame in `voice` arrived (Date.now()). */
+  voiceSince: number;
+}
 
 /** Events the runtime adapter forwards to the room for one peer. */
 export interface PeerEvents {
@@ -81,6 +97,8 @@ interface Player {
   owner: number | null;
   /** The socket, for local players only. */
   peer: Peer | null;
+  /** Snapshot group (0 or 1), for local players only. */
+  group: number;
   name: string;
   appearance: AppearanceId;
   x: number;
@@ -126,12 +144,19 @@ export class Room {
   private connections = 0;
   private nextPlayerId = 1;
   private nextChatId = 1;
-  /** Players (local or replicated) whose position or motion changed since the last snapshot. */
-  private readonly changed = new Set<Player>();
-  /** Voice frames for the next tick (local and replicated), and the local ones to mirror. */
-  private voice: VoiceFrame[] = [];
-  /** When the oldest frame in `voice` arrived (Date.now()). */
-  private voiceSince = 0;
+  /**
+   * Snapshot groups in use: 1 (everyone every tick) or 2 (alternate ticks).
+   * Local players always belong to group 0 or 1, so switching needs no resubscribing.
+   */
+  private groups = 1;
+  private readonly groupSizes = [0, 0];
+  private ticks = 0;
+  /** Per group: players (local or replicated) changed and voice received since its last snapshot. */
+  private readonly pending: Pending[] = [newPending(), newPending()];
+  /** The groups' pending sets differ (after a 2-group tick); they are flushed separately. */
+  private diverged = false;
+  /** Players changed during the current tick, and local voice frames, for the mesh. */
+  private readonly tickChanged = new Set<Player>();
   private localVoice: VoiceFrame[] = [];
   private ticker: ReturnType<typeof setInterval> | null = null;
   /** Local players asked to migrate, and when they may be asked again. */
@@ -148,6 +173,11 @@ export class Room {
   /** Players connected to this server (replicas excluded). */
   get playerCount(): number {
     return this.localCount;
+  }
+
+  /** Snapshots per second each player receives. */
+  get snapshotHz(): number {
+    return TICK_RATE / this.groups;
   }
 
   /** Ids of players connected to this server. */
@@ -213,12 +243,12 @@ export class Room {
   remoteJoined(owner: number, info: PlayerInfo): void {
     const existing = this.players.get(info.id);
     if (existing?.owner === null) return; // ours; a stale message
-    const player: Player = { ...info, owner, peer: null, ...fresh() };
+    const player: Player = { ...info, owner, peer: null, group: -1, ...fresh() };
     this.players.set(info.id, player);
     if (existing) {
       // Already shown to our clients: refresh its state instead of a second join.
-      this.changed.add(player);
-      this.changed.delete(existing);
+      this.forget(existing);
+      this.markChanged(player);
     } else {
       this.broadcast({ t: "player_joined", player: info });
     }
@@ -228,7 +258,7 @@ export class Room {
     const p = this.players.get(id);
     if (!p || p.owner !== owner) return;
     this.players.delete(id);
-    this.changed.delete(p);
+    this.forget(p);
     this.broadcast({ t: "player_left", id });
   }
 
@@ -241,7 +271,7 @@ export class Room {
       p.y = s.y;
       p.dir = s.dir;
       p.moving = s.moving;
-      this.changed.add(p);
+      this.markChanged(p);
     }
   }
 
@@ -308,10 +338,12 @@ export class Room {
     const p = this.players.get(id);
     if (!p || p.owner !== null) return null;
     const info = toInfo(p);
-    this.players.set(id, { ...p, owner: newOwner, peer: null });
+    this.players.set(id, { ...p, owner: newOwner, peer: null, group: -1 });
     this.localCount--;
-    this.changed.delete(p);
+    this.groupSizes[p.group]--;
+    this.forget(p);
     this.migrating.delete(id);
+    this.updateGroups(this.localCount);
     return info;
   }
 
@@ -350,10 +382,13 @@ export class Room {
         ? resume
         : { ...this.spawnFor(id), dir: "south" as const };
     const wasReplica = this.players.get(id)?.owner != null;
+    // Newcomers fill the smaller snapshot group.
+    const group = this.groupSizes[0] <= this.groupSizes[1] ? 0 : 1;
     const player: Player = {
       id,
       owner: null,
       peer,
+      group,
       name,
       appearance,
       x: start.x,
@@ -364,23 +399,51 @@ export class Room {
       ...fresh(),
     };
 
+    // Others hear about a change of snapshot rate before the newcomer's welcome carries it.
+    this.updateGroups(this.localCount + 1);
     // A replica with our id (a migration, or a stale copy) is replaced in place.
     const others = [...this.players.values()].filter((p) => p.id !== id);
-    send(peer, { t: "welcome", selfId: player.id, players: [...others, player].map(toInfo), chat: this.chat });
+    send(peer, {
+      t: "welcome",
+      selfId: player.id,
+      players: [...others, player].map(toInfo),
+      chat: this.chat,
+      snapshotHz: this.snapshotHz,
+    });
     // Our clients already see a migrating player; only its position may change.
     if (!wasReplica) this.broadcast({ t: "player_joined", player: toInfo(player) });
     // Subscribe after the announcement so the newcomer does not receive its own join.
     if (this.publish) {
       if (!peer.subscribe) throw new Error("Room uses publish but the peer cannot subscribe");
-      peer.subscribe();
+      peer.subscribe(ROOM_CHANNEL);
+      peer.subscribe(groupChannel(group));
     }
     this.players.set(player.id, player);
     this.localCount++;
-    if (wasReplica) this.changed.add(player);
+    this.groupSizes[group]++;
+    if (wasReplica) this.markChanged(player);
     this.startTicker();
     this.opts.onJoined?.(player.id);
     this.opts.sync?.joined(toInfo(player));
     return player;
+  }
+
+  /** Two snapshot groups from SNAPSHOT_GROUPS_AT local players, back to one below SNAPSHOT_GROUPS_OFF_BELOW. */
+  private updateGroups(count: number): void {
+    const next = this.groups === 1 ? (count >= SNAPSHOT_GROUPS_AT ? 2 : 1) : count < SNAPSHOT_GROUPS_OFF_BELOW ? 1 : 2;
+    if (next === this.groups) return;
+    this.groups = next;
+    this.broadcast({ t: "rate", snapshotHz: this.snapshotHz });
+  }
+
+  private markChanged(p: Player): void {
+    this.tickChanged.add(p);
+    for (const g of this.pending) g.changed.add(p);
+  }
+
+  private forget(p: Player): void {
+    this.tickChanged.delete(p);
+    for (const g of this.pending) g.changed.delete(p);
   }
 
   /** Somewhere near a player of the room (never the host, who sits in the sun). */
@@ -429,7 +492,7 @@ export class Room {
       p.x = spot.x;
       p.y = spot.y;
       p.lastMoveAt = Date.now();
-      this.changed.add(p);
+      this.markChanged(p);
       send(p.peer!, { t: "correction", x: p.x, y: p.y });
     }
     this.broadcast({ t: "role", id: p.id, role });
@@ -451,10 +514,14 @@ export class Room {
   }
 
   private queueVoice(frame: VoiceFrame): boolean {
-    if (this.voice.length >= MAX_PENDING_VOICE) return false;
-    if (this.voice.length === 0) this.voiceSince = Date.now();
-    this.voice.push(frame);
-    return true;
+    let queued = false;
+    for (const g of this.pending) {
+      if (g.voice.length >= MAX_PENDING_VOICE) continue;
+      if (g.voice.length === 0) g.voiceSince = Date.now();
+      g.voice.push(frame);
+      queued = true;
+    }
+    return queued;
   }
 
   /** Standalone ids: a per-room counter that skips ids still in use. */
@@ -470,8 +537,10 @@ export class Room {
     if (this.players.get(player.id) !== player) return;
     this.players.delete(player.id);
     this.localCount--;
-    this.changed.delete(player);
+    this.groupSizes[player.group]--;
+    this.forget(player);
     this.broadcast({ t: "player_left", id: player.id });
+    this.updateGroups(this.localCount);
     this.opts.onLeft?.(player.id);
     this.opts.sync?.left(player.id);
   }
@@ -493,7 +562,7 @@ export class Room {
     player.dir = move.dir;
     player.moving = move.moving;
     player.lastMoveAt = now;
-    this.changed.add(player);
+    this.markChanged(player);
   }
 
   private handleChat(player: Player, rawText: unknown): void {
@@ -536,35 +605,63 @@ export class Room {
    * Voice frames ride the snapshot when there is one, so a talking speaker costs
    * no extra sends; in a room where nobody moves they wait up to VOICE_FLUSH_MS
    * and go out alone, half as many sends as one per tick (docs/voice.md).
-   * Local changes and voice are also mirrored to other servers every tick (a
-   * handful of peers, and the receiving server batches again for its clients).
+   *
+   * Big rooms use two snapshot groups served on alternate ticks: each player gets
+   * 10 Hz, and each tick's burst of sends covers half the room. A group's snapshot
+   * holds everything since its own last one.
+   *
+   * Local changes and voice are mirrored to other servers every tick (a handful
+   * of peers, and the receiving server batches again for its clients).
    */
   private tick(now = Date.now()): void {
     const start = performance.now();
-    if (this.opts.sync && this.localVoice.length > 0) {
-      this.opts.sync.voice(this.localVoice);
-      this.localVoice = [];
-    }
-    const voiceDue = this.voice.length > 0 && (this.changed.size > 0 || now - this.voiceSince >= VOICE_FLUSH_MS);
-    if (this.changed.size === 0 && !voiceDue) return;
-    const players = [...this.changed];
-    this.changed.clear();
-    const voice = this.voice;
-    this.voice = [];
-    this.broadcast({ t: "snapshot", players, voice });
     if (this.opts.sync) {
-      const local = players.filter((p) => p.owner === null);
+      if (this.localVoice.length > 0) this.opts.sync.voice(this.localVoice);
+      const local = [...this.tickChanged].filter((p) => p.owner === null);
       if (local.length > 0) this.opts.sync.moves(local.map(toState));
     }
-    recordTick(performance.now() - start);
+    this.localVoice = [];
+    this.tickChanged.clear();
+    this.ticks++;
+    let sent: boolean;
+    if (this.groups === 2) {
+      sent = this.flush([this.ticks % 2], now);
+      this.diverged = true;
+    } else if (this.diverged) {
+      // Just back to one group: each group still has its own backlog.
+      sent = this.flush([0], now);
+      sent = this.flush([1], now) || sent;
+      this.diverged = false;
+    } else {
+      sent = this.flush([0, 1], now);
+    }
+    if (sent) recordTick(performance.now() - start);
+  }
+
+  /** Send groups whose pending state is identical one snapshot (the first group's). */
+  private flush(groups: number[], now: number): boolean {
+    const p = this.pending[groups[0]];
+    // With two groups each one waits 100 ms between snapshots anyway: voice always rides.
+    const voiceDue = p.voice.length > 0 && (p.changed.size > 0 || this.groups > 1 || now - p.voiceSince >= VOICE_FLUSH_MS);
+    if (p.changed.size === 0 && !voiceDue) return false;
+    const data = encodeServerMessage({ t: "snapshot", players: [...p.changed], voice: voiceDue ? p.voice : [] });
+    for (const g of groups) {
+      this.pending[g].changed.clear();
+      if (voiceDue) this.pending[g].voice = [];
+      this.publishTo(groupChannel(g), (q) => q.group === g, data);
+    }
+    return true;
   }
 
   /** Encode once, send to every local player. */
   private broadcast(msg: ServerMessage): void {
+    this.publishTo(ROOM_CHANNEL, () => true, encodeServerMessage(msg));
+  }
+
+  private publishTo(channel: string, member: (p: Player) => boolean, data: Uint8Array): void {
     if (this.localCount === 0) return;
-    const data = encodeServerMessage(msg);
-    if (this.publish) this.publish(data);
-    else for (const p of this.players.values()) p.peer?.send(data);
+    if (this.publish) this.publish(channel, data);
+    else for (const p of this.players.values()) if (p.peer && member(p)) p.peer.send(data);
   }
 }
 
@@ -574,6 +671,10 @@ function send(peer: Peer, msg: ServerMessage): void {
 
 function toInfo(p: Player): PlayerInfo {
   return { id: p.id, name: p.name, appearance: p.appearance, x: p.x, y: p.y, dir: p.dir, moving: p.moving, role: p.role };
+}
+
+function newPending(): Pending {
+  return { changed: new Set(), voice: [], voiceSince: 0 };
 }
 
 /** Per-player bookkeeping that starts over on every server. */

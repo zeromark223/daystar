@@ -28,7 +28,7 @@ test("client messages round-trip", () => {
 test("server messages round-trip", () => {
   const chat = { id: 3, playerId: 7, name: "Mochi", text: "hi", ts: 1_790_219_348_670 };
   const messages: ServerMessage[] = [
-    { t: "welcome", selfId: 7, players: [player], chat: [chat] },
+    { t: "welcome", selfId: 7, players: [player], chat: [chat], snapshotHz: 20 },
     { t: "player_joined", player },
     { t: "player_left", id: 7 },
     { t: "chat", message: chat },
@@ -38,6 +38,7 @@ test("server messages round-trip", () => {
     { t: "snapshot", players: [], voice: [{ id: 2, seq: 4, data: new Uint8Array([9, 8]) }] },
     { t: "migrate" },
     { t: "role", id: 7, role: "host" },
+    { t: "rate", snapshotHz: 10 },
   ];
   for (const m of messages) assert.deepEqual(decodeServerMessage(encodeServerMessage(m)), m);
 });

@@ -46,7 +46,8 @@ if (tls && cluster) throw new Error("TLS_CERT / TLS_KEY are for standalone testi
 const mesh = cluster ? new Mesh(cluster.server, cluster.secret, hostedRooms) : null;
 if (mesh) useClusterRooms(mesh);
 
-const topic = (roomId: string) => `room:${roomId}`;
+/** Bun topic of a room channel: room-wide events, or one snapshot group. */
+const topic = (roomId: string, channel: string) => (channel ? `room:${roomId}:${channel}` : `room:${roomId}`);
 
 /** In cluster mode a client must present a ticket the agent signed for this server and room. */
 function admit(url: URL, roomId: string): SocketData | Response {
@@ -100,7 +101,7 @@ const server = Bun.serve<SocketData>({
         {
           send: (d) => void ws.send(d),
           close: () => ws.close(),
-          subscribe: () => ws.subscribe(topic(data.roomId)),
+          subscribe: (channel) => ws.subscribe(topic(data.roomId, channel)),
         },
         data.playerId,
         resume,
@@ -121,10 +122,7 @@ const server = Bun.serve<SocketData>({
 });
 
 // Room broadcasts fan out inside Bun (one call per frame, not one per player).
-usePublisher((roomId) => {
-  const name = topic(roomId);
-  return (data) => void server.publish(name, data);
-});
+usePublisher((roomId) => (channel, data) => void server.publish(topic(roomId, channel), data));
 
 if (cluster) {
   const agent: AgentLink = new AgentLink(cluster, localPlayers, (msg) => {
