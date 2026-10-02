@@ -132,6 +132,12 @@ export interface RoomOptions {
   keepChatHistory?: boolean;
   /** Whether a key presented on join is this room's host key. Without it nobody can be host. */
   isHostKey?(key: string): boolean;
+  /**
+   * A fixed schedule instead of the automatic one (A/B tests): the room ticks
+   * `tickHz` times a second and serves `groups` groups in turn, so each player
+   * gets tickHz / groups snapshots per second.
+   */
+  schedule?: { tickHz: number; groups: 1 | 2 };
 }
 
 export class Room {
@@ -148,7 +154,9 @@ export class Room {
    * Snapshot groups in use: 1 (everyone every tick) or 2 (alternate ticks).
    * Local players always belong to group 0 or 1, so switching needs no resubscribing.
    */
-  private groups = 1;
+  private groups: number;
+  /** Room ticks per second; each group gets tickHz / groups snapshots per second. */
+  private readonly tickHz: number;
   private readonly groupSizes = [0, 0];
   private ticks = 0;
   /** Per group: players (local or replicated) changed and voice received since its last snapshot. */
@@ -168,6 +176,8 @@ export class Room {
     this.id = id;
     this.publish = opts.publish ?? null;
     this.opts = opts;
+    this.tickHz = opts.schedule?.tickHz ?? TICK_RATE;
+    this.groups = opts.schedule?.groups ?? 1;
   }
 
   /** Players connected to this server (replicas excluded). */
@@ -177,7 +187,7 @@ export class Room {
 
   /** Snapshots per second each player receives. */
   get snapshotHz(): number {
-    return TICK_RATE / this.groups;
+    return this.tickHz / this.groups;
   }
 
   /** Ids of players connected to this server. */
@@ -430,6 +440,7 @@ export class Room {
 
   /** Two snapshot groups from SNAPSHOT_GROUPS_AT local players, back to one below SNAPSHOT_GROUPS_OFF_BELOW. */
   private updateGroups(count: number): void {
+    if (this.opts.schedule) return;
     const next = this.groups === 1 ? (count >= SNAPSHOT_GROUPS_AT ? 2 : 1) : count < SNAPSHOT_GROUPS_OFF_BELOW ? 1 : 2;
     if (next === this.groups) return;
     this.groups = next;
@@ -590,7 +601,7 @@ export class Room {
   }
 
   private startTicker(): void {
-    this.ticker ??= setInterval(() => this.tick(), 1000 / TICK_RATE);
+    this.ticker ??= setInterval(() => this.tick(), 1000 / this.tickHz);
   }
 
   private stopTicker(): void {
@@ -615,14 +626,17 @@ export class Room {
    */
   private tick(now = Date.now()): void {
     const start = performance.now();
-    if (this.opts.sync) {
-      if (this.localVoice.length > 0) this.opts.sync.voice(this.localVoice);
-      const local = [...this.tickChanged].filter((p) => p.owner === null);
-      if (local.length > 0) this.opts.sync.moves(local.map(toState));
-    }
-    this.localVoice = [];
-    this.tickChanged.clear();
     this.ticks++;
+    // The mesh stays at TICK_RATE whatever the room's tick rate.
+    if (this.ticks % Math.max(1, Math.round(this.tickHz / TICK_RATE)) === 0) {
+      if (this.opts.sync) {
+        if (this.localVoice.length > 0) this.opts.sync.voice(this.localVoice);
+        const local = [...this.tickChanged].filter((p) => p.owner === null);
+        if (local.length > 0) this.opts.sync.moves(local.map(toState));
+      }
+      this.localVoice = [];
+      this.tickChanged.clear();
+    }
     let sent: boolean;
     if (this.groups === 2) {
       sent = this.flush([this.ticks % 2], now);
@@ -641,8 +655,11 @@ export class Room {
   /** Send groups whose pending state is identical one snapshot (the first group's). */
   private flush(groups: number[], now: number): boolean {
     const p = this.pending[groups[0]];
-    // With two groups each one waits 100 ms between snapshots anyway: voice always rides.
-    const voiceDue = p.voice.length > 0 && (p.changed.size > 0 || this.groups > 1 || now - p.voiceSince >= VOICE_FLUSH_MS);
+    // Idle rooms batch voice to VOICE_FLUSH_MS: send now when waiting for this
+    // group's next snapshot would make the oldest frame older than that.
+    const periodMs = 1000 / this.snapshotHz;
+    const voiceDue =
+      p.voice.length > 0 && (p.changed.size > 0 || now - p.voiceSince + periodMs >= VOICE_FLUSH_MS);
     if (p.changed.size === 0 && !voiceDue) return false;
     const data = encodeServerMessage({ t: "snapshot", players: [...p.changed], voice: voiceDue ? p.voice : [] });
     for (const g of groups) {

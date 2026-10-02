@@ -22,6 +22,23 @@ export const MAX_FRAME_BYTES = 4 * 1024;
 export const IDLE_TIMEOUT_SEC = 60;
 
 export const cluster = readServerClusterConfig();
+
+/**
+ * A/B tests only: SNAPSHOT_TICK_HZ and SNAPSHOT_GROUPS fix every room's schedule
+ * (e.g. 40 and 2: each player still gets 20 Hz, half the room per tick) instead
+ * of the automatic one.
+ */
+function readSchedule(): { tickHz: number; groups: 1 | 2 } | undefined {
+  const tickHz = process.env.SNAPSHOT_TICK_HZ;
+  const groups = process.env.SNAPSHOT_GROUPS;
+  if (!tickHz && !groups) return undefined;
+  const hz = Number(tickHz ?? 20);
+  const g = Number(groups ?? 1);
+  if (!(hz >= 1 && hz <= 100) || (g !== 1 && g !== 2)) throw new Error("SNAPSHOT_TICK_HZ must be 1..100 and SNAPSHOT_GROUPS 1 or 2");
+  console.log(`fixed snapshot schedule: ${hz} Hz ticks, ${g} group(s) -> ${hz / g} Hz per player`);
+  return { tickHz: hz, groups: g as 1 | 2 };
+}
+const schedule = readSchedule();
 const hostSecret = hostKeySecret(cluster?.secret);
 
 const rooms = new Map<string, Room>();
@@ -104,6 +121,7 @@ export function connect(roomId: string, peer: Peer, playerId?: number, resume?: 
       chatIdBase: cluster ? cluster.server * 0x1000000 : 0,
       keepChatHistory: !cluster,
       isHostKey: (key) => isHostKey(roomId, key, hostSecret),
+      schedule,
     });
     rooms.set(roomId, room);
     clusterRooms?.roomOpened(roomId);

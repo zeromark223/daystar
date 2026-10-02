@@ -460,7 +460,7 @@ test("idle rooms batch voice every 100 ms; a snapshot carries it at once", () =>
   const data = new Uint8Array([1]);
   host.s.deliver({ t: "voice", seq: 1, data });
   tick(20);
-  tick(50);
+  tick(40);
   assert.deepEqual(a.s.take(), []); // nobody moved: still waiting
   host.s.deliver({ t: "voice", seq: 2, data });
   tick(100);
@@ -592,4 +592,35 @@ test("below 600 players the room goes back to one group, flushing both backlogs"
   tick();
   assert.equal(snapshots(a.take()).length, 1);
   assert.equal(snapshots(b.take()).length, 1);
+});
+
+test("a fixed 40 Hz x 2 groups schedule: 20 Hz per player, half per tick, mesh at 20 Hz", () => {
+  const meshMoves: number[][] = [];
+  const noop = () => {};
+  const room = new Room("ab", {
+    onEmpty: noop,
+    schedule: { tickHz: 40, groups: 2 },
+    sync: { joined: noop, left: noop, moves: (ps) => meshMoves.push(ps.map((p) => p.id)), chat: noop, role: noop, setRole: noop, voice: noop },
+  });
+  const tick = () => (room as unknown as { tick(now: number): void }).tick(Date.now());
+  const [a, b] = ["Ann", "Ben"].map((name) => {
+    const s = new FakeSocket();
+    s.events = room.accept(s);
+    s.deliver({ t: "join", name, appearance: 0, hostKey: "" });
+    return s;
+  });
+  const welcome = b.received.find((m) => m.t === "welcome");
+  assert.equal(welcome?.t === "welcome" && welcome.snapshotHz, 20);
+  const ben = welcome?.t === "welcome" ? welcome.players.find((p) => p.id === welcome.selfId)! : null!;
+  a.take();
+  b.take();
+  b.deliver({ t: "move", x: ben.x + 1, y: ben.y, dir: "east", moving: true });
+  tick();
+  const first = [snapshots(a.take()).length, snapshots(b.take()).length];
+  assert.equal(first[0] + first[1], 1);
+  tick();
+  const second = [snapshots(a.take()).length, snapshots(b.take()).length];
+  assert.deepEqual([first[0] + second[0], first[1] + second[1]], [1, 1]);
+  // Two room ticks, one mesh sync.
+  assert.deepEqual(meshMoves, [[ben.id]]);
 });
