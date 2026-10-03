@@ -133,6 +133,31 @@ room over more cores.
   while the event loop hovered around its 50 ms limit at ~1.2 Gbps out. Test the
   server's own port: the Vite dev server's proxy capped the same run at ~5,000.
 
+### Operating system matters more than the chip
+
+Same build and command (one room, a host and two speakers, 20% walking), server and
+bots on the same machine:
+
+| Machine | OS | Stable in one room | At 5,000 players |
+|---|---|---|---|
+| Ryzen AI 7 350 (laptop) | Linux, native | **~7,000** (9,000 still within targets: CPU 80%, loop p99 46 ms) | CPU 60%, 870 Mbps out, loop p99 31 ms |
+| i7-13700K (desktop) | Linux in WSL2 | ~7,000 (CPU 92%, loop p99 47 ms; 9,000 fails at 103% CPU) | CPU 68%, 887 Mbps out, loop p99 37 ms |
+| i7-13700K (desktop) | Windows, native | **under 5,000** | CPU 97%, only 215 Mbps out, loop p99 135 ms |
+
+- **Bun on Windows is much slower for this server.** At 5,000 players it saturated
+  the core while sending about a quarter of the data Linux sent, roughly 6x the CPU
+  per message; past that the server stopped answering. The server's cost is mostly
+  socket sends, which Bun (uWebSockets) optimizes for Linux. Host on Linux; use
+  Windows for development only.
+- **WSL2 is a virtual machine**: better than native Windows, but every socket send
+  crosses the virtualization layer and Windows may run its vCPUs on the
+  13700K's efficiency cores, so it is not a fair chip comparison (on single-core
+  benchmarks the two chips are roughly on par). Under WSL2, raise `ulimit -n` (the
+  default stopped the server at ~2,000 sockets) and run the bots inside WSL too:
+  connecting from Windows to `localhost` goes through WSL's forwarding relay.
+- In virtual machines generally (WSL2, Proxmox), the kernel mitigations inside the
+  guest cost the most; see the `mitigations=off` results above.
+
 ## The road from 550 to 2,800 CCU
 
 Daystar started as a small Node.js server. Every number below comes from
