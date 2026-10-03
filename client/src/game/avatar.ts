@@ -135,6 +135,12 @@ export class Avatar {
   private bubble: Container | null = null;
   private bubbleUntil = 0;
   private readonly samples: Sample[] = [];
+  /**
+   * Area of interest: whether our knowledge of this player is current. False once
+   * the server's "view" left it out (its last position may be stale); it comes
+   * back with the next snapshot or view that has it.
+   */
+  inView = true;
 
   constructor(info: PlayerInfo, trails: Container, bodies: Container, overlay: Container, isSelf: boolean) {
     this.id = info.id;
@@ -225,6 +231,15 @@ export class Avatar {
     this.moving = moving;
   }
 
+  /** Jump to a position without blending from the old one (e.g. back in view after a while). */
+  teleport(t: number, s: { x: number; y: number; dir: Direction; moving: boolean }): void {
+    this.samples.length = 0;
+    this.trailPoints.length = 0;
+    this.x = s.x;
+    this.y = s.y;
+    this.pushSample(t, s);
+  }
+
   pushSample(t: number, s: { x: number; y: number; dir: Direction; moving: boolean }): void {
     // Snapshots skip idle players, so after a pause the previous sample can be
     // seconds old. Re-anchor it one tick back so the move starts from rest
@@ -292,13 +307,18 @@ export class Avatar {
     return -this.label.height - (this.roleTag.visible ? this.roleTag.height : 0) - 4;
   }
 
-  /** Sync the drawing with the current position; call once per frame after the camera moves. */
-  render(now: number, worldX: number, worldY: number, zoom: number): void {
+  /**
+   * Sync the drawing with the current position; call once per frame after the
+   * camera moves. `visibility` (0..1) is the area-of-interest fog.
+   */
+  render(now: number, worldX: number, worldY: number, zoom: number, visibility = 1): void {
     if (this.role === "host") {
       this.renderOnSun(now, worldX, worldY, zoom);
       return;
     }
-    const brightness = brightnessAt(this.x, this.y);
+    const brightness = brightnessAt(this.x, this.y) * visibility;
+    this.body.visible = brightness > 0.01;
+    this.trail.visible = this.body.visible;
     const scale = Math.max(1, MIN_SCREEN_SCALE / zoom);
     this.body.position.set(this.x, this.y);
     this.body.scale.set(scale);

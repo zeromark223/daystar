@@ -31,6 +31,17 @@ export const TICK_RATE = 20;
  */
 export const SNAPSHOT_GROUPS_AT = 200;
 export const SNAPSHOT_GROUPS_OFF_BELOW = 150;
+/**
+ * Area of interest: players only get the moves of others within AOI_RADIUS
+ * (the host and speakers are always in view). The server works on a grid of
+ * AOI_CELL squares; clients fade others out between AOI_FOG_START and AOI_FOG_END,
+ * inside the server's radius so nobody pops at the edge.
+ */
+export const AOI_RADIUS = 1500;
+export const AOI_CELL = 375;
+export const AOI_FOG_START = 1100;
+export const AOI_FOG_END = 1450;
+
 /** A room this big on one server gets at most 10 snapshots per second per player, whatever the load reads. */
 export const OVERCHARGE_FORCE_AT = 2000;
 

@@ -198,6 +198,9 @@ async function main(): Promise<void> {
         chat.addMessage(msg.message);
         game.showChat(msg.message.playerId, msg.message.text);
         break;
+      case "view":
+        game.applyView(msg.from, msg.to, msg.players);
+        break;
       case "snapshot":
         game.applySnapshot(msg.players);
         player.push(msg.voice.filter((frame) => frame.id !== selfId));

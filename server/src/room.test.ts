@@ -20,6 +20,9 @@ class FakeSocket {
   subscribe(channel: string): void {
     this.channels.add(channel);
   }
+  unsubscribe(channel: string): void {
+    this.channels.delete(channel);
+  }
   send(data: Uint8Array): void {
     this.received.push(decodeServerMessage(data)!);
   }
@@ -107,13 +110,14 @@ test("a player who stops is sent once more with moving=false", () => {
 test("with publish, broadcasts go out once per channel to joined players only", () => {
   const topic = fakeTopic();
   const { tick, sockets, self, done } = setup(topic);
-  // Everyone gets room events plus one of the two snapshot group channels.
+  // Everyone gets room events plus the snapshots of its map cell and group.
   assert.ok(sockets.every((s) => s.channels.has("") && s.channels.size === 2));
   const before = topic.publishes;
   sockets[0].deliver({ t: "move", x: self.x + 1, y: self.y, dir: "east", moving: true });
   tick();
-  // One room, one group: the same snapshot goes to both group channels, every player once.
-  assert.equal(topic.publishes, before + 2);
+  // At most one publish per (cell, group) channel in use, and every player gets the move once.
+  const inUse = new Set(sockets.flatMap((s) => [...s.channels].filter((c) => c !== ""))).size;
+  assert.ok(topic.publishes - before <= inUse);
   for (const s of sockets) assert.equal(s.take().filter((m) => m.t === "snapshot").length, 1);
   done();
 });
@@ -175,9 +179,10 @@ const remoteInfo = {
 test("local joins, moves, chat and leaves are mirrored; remote ones are not echoed", () => {
   const { room, tick, local, self, sent } = syncedRoom();
   assert.deepEqual(sent.joined, [7]);
-  room.remoteJoined(2, remoteInfo);
+  // Close enough to be in view (area of interest).
+  room.remoteJoined(2, { ...remoteInfo, x: self.x + 100, y: self.y });
   local.deliver({ t: "move", x: self.x + 1, y: self.y, dir: "east", moving: true });
-  room.remoteMoves(2, [{ id: 42, x: 6201, y: 5000, dir: "east", moving: true }]);
+  room.remoteMoves(2, [{ id: 42, x: self.x + 101, y: self.y, dir: "east", moving: true }]);
   tick();
   // Both changes reach our client, but only our own player is mirrored.
   const snap = local.take().filter((m) => m.t === "snapshot").at(-1);
@@ -260,8 +265,8 @@ test("handOff turns a local player into a replica silently; its old socket is ig
   tick();
   leaving.close();
   assert.deepEqual(other.take(), []);
-  // Moves now come from the new owner.
-  room.remoteMoves(2, [{ id: self.id, x: 6000, y: 6000, dir: "west", moving: true }]);
+  // Moves now come from the new owner (nearby, so the other player sees them).
+  room.remoteMoves(2, [{ id: self.id, x: self.x + 10, y: self.y, dir: "west", moving: true }]);
   tick();
   assert.ok(other.take().some((m) => m.t === "snapshot"));
   assert.equal(room.handOff(self.id, 3), null);
@@ -505,6 +510,9 @@ class CountingSocket {
   subscribe(channel: string): void {
     this.channels.add(channel);
   }
+  unsubscribe(channel: string): void {
+    this.channels.delete(channel);
+  }
   close(): void {
     this.events.close();
   }
@@ -541,7 +549,7 @@ function bigRoom(n: number) {
 const snapshots = (msgs: ServerMessage[]) => msgs.filter((m) => m.t === "snapshot");
 
 test("from 200 players the room ticks at 40 Hz in two groups: still 20 Hz per player", () => {
-  const { room, topic, tick, a, b, selfOf, watch } = bigRoom(200);
+  const { room, tick, a, b, selfOf, watch } = bigRoom(200);
   assert.equal(room.snapshotHz, 20);
   // The players' rate did not change, so nobody is told anything.
   assert.ok(!a.received.some((m) => m.t === "rate"));
@@ -552,11 +560,9 @@ test("from 200 players the room ticks at 40 Hz in two groups: still 20 Hz per pl
   const ben = selfOf(b);
   a.take();
   b.take();
-  const before = topic.publishes;
   b.deliver({ t: "move", x: ben.x + 1, y: ben.y, dir: "east", moving: true });
   tick();
-  // One group's channel per tick.
-  assert.equal(topic.publishes, before + 1);
+  // One group per tick (a and b are in different groups).
   const first = [snapshots(a.take()).length, snapshots(b.take()).length];
   assert.equal(first[0] + first[1], 1);
   tick();
@@ -635,4 +641,74 @@ test("a fixed 40 Hz x 2 groups schedule: 20 Hz per player, half per tick, mesh a
   assert.deepEqual([first[0] + second[0], first[1] + second[1]], [1, 1]);
   // Two room ticks, one mesh sync.
   assert.deepEqual(meshMoves, [[ben.id]]);
+});
+
+// ------------------------------------------------------------ area of interest
+
+/** A room where players join at chosen spots (through the migration "resume" path). */
+function aoiRoom() {
+  const room = new Room("aoi", { onEmpty: () => {}, isHostKey: (k) => k === HOST_KEY });
+  const tick = () => (room as unknown as { tick(now: number): void }).tick(Date.now() + 100);
+  let nextId = 1;
+  const at = async (name: string, x: number, y: number, hostKey = "") => {
+    const s = new FakeSocket();
+    const id = nextId++;
+    const resume = Promise.resolve({ ...remoteInfo, id, name, x, y });
+    s.events = room.accept(s, id, resume);
+    s.deliver({ t: "join", name, appearance: 0, hostKey });
+    await resume;
+    await Promise.resolve();
+    return { s, id };
+  };
+  return { room, tick, at };
+}
+
+const movedIds = (msgs: ServerMessage[]) => msgs.flatMap((m) => (m.t === "snapshot" ? m.players.map((p) => p.id) : []));
+
+test("AOI: moves reach players in view, not those across the map", async () => {
+  const { tick, at } = aoiRoom();
+  const a = await at("Ann", 2000, 5000);
+  const near = await at("Ned", 2300, 5000);
+  const far = await at("Fay", 8000, 5000);
+  for (const p of [a, near, far]) p.s.take();
+  a.s.deliver({ t: "move", x: 2001, y: 5000, dir: "east", moving: true });
+  tick();
+  assert.deepEqual(movedIds(near.s.take()), [a.id]);
+  assert.deepEqual(movedIds(far.s.take()), []);
+});
+
+test("AOI: the host and speakers are in view wherever they are, voice included", async () => {
+  const { tick, at } = aoiRoom();
+  const host = await at("Hana", 5000, 5000, HOST_KEY);
+  const a = await at("Ann", 1500, 5000);
+  const spk = await at("Sam", 8200, 5000);
+  host.s.deliver({ t: "set_role", id: spk.id, role: "speaker" });
+  for (const p of [host, a, spk]) p.s.take();
+  spk.s.deliver({ t: "move", x: 8201, y: 5000, dir: "east", moving: true });
+  spk.s.deliver({ t: "voice", seq: 1, data: new Uint8Array([1]) });
+  tick();
+  const got = a.s.take();
+  assert.deepEqual(movedIds(got), [spk.id]);
+  assert.deepEqual(voiceIn(got), [[spk.id, 1]]);
+});
+
+test("AOI: entering another cell sends who just came into view, idle players included", async () => {
+  const { at } = aoiRoom();
+  // 1874.5 is just left of a cell edge (5 x 375 = 1875).
+  const a = await at("Ann", 1874.5, 5000);
+  // Just beyond the old view, inside the new one.
+  const idle = await at("Ida", 1874.5 + 1500 + 300, 5000);
+  const seen = await at("Sid", 2300, 5000); // already in view: not sent again
+  const far = await at("Fay", 8000, 5000);
+  a.s.take();
+  a.s.deliver({ t: "move", x: 1875.5, y: 5000, dir: "east", moving: true });
+  const view = a.s.take().find((m) => m.t === "view");
+  const ids = view?.t === "view" ? view.players.map((p) => p.id) : [];
+  assert.ok(ids.includes(idle.id));
+  assert.ok(!ids.includes(seen.id));
+  assert.ok(!ids.includes(far.id));
+  assert.ok(!ids.includes(a.id));
+  // Moving inside the same cell sends no view.
+  a.s.deliver({ t: "move", x: 1876, y: 5000, dir: "east", moving: true });
+  assert.ok(!a.s.take().some((m) => m.t === "view"));
 });

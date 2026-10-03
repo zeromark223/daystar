@@ -102,6 +102,7 @@ const server = Bun.serve<SocketData>({
           send: (d) => void ws.send(d),
           close: () => ws.close(),
           subscribe: (channel) => ws.subscribe(topic(data.roomId, channel)),
+          unsubscribe: (channel) => ws.unsubscribe(topic(data.roomId, channel)),
         },
         data.playerId,
         resume,

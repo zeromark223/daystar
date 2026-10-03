@@ -15,12 +15,16 @@ import {
   WORLD_CENTER,
 } from "../../shared/src/constants.ts";
 import type { Direction } from "../../shared/src/direction.ts";
+import { cellOf, cellSetInView, cellsInView, inView } from "../../shared/src/aoi.ts";
 import { canSpeak, type Role } from "../../shared/src/roles.ts";
 import { canBeAt, spawnPoint } from "../../shared/src/space.ts";
 import { recordEgress, recordTick } from "./stats.ts";
 import {
+  assembleSnapshot,
   decodeClientMessage,
   encodeServerMessage,
+  snapshotEntry,
+  snapshotVoice,
   type ChatMessage,
   type PlayerInfo,
   type PlayerState,
@@ -42,17 +46,18 @@ export interface Peer {
   send(data: Uint8Array): void;
   close(): void;
   /**
-   * Join one of the room's broadcast channels: ROOM_CHANNEL (events for everyone)
-   * and the player's snapshot group channel. Only needed when the room has a
-   * `publish` function (Bun topics); called once the player has joined.
+   * Join / leave one of the room's broadcast channels: ROOM_CHANNEL (events for
+   * everyone) and the snapshot channel of the player's map cell and group. Only
+   * needed when the room has a `publish` function (Bun topics).
    */
   subscribe?(channel: string): void;
+  unsubscribe?(channel: string): void;
 }
 
 /** Channel for events every player gets (joins, chat, roles...). */
 export const ROOM_CHANNEL = "";
-/** Channel of snapshot group `g` (see SNAPSHOT_GROUPS_AT). */
-export const groupChannel = (g: number) => `g${g}`;
+/** Snapshots for the viewers in one map cell (area of interest) and snapshot group. */
+export const viewChannel = (cell: number, group: number) => `v${cell}:${group}`;
 
 /**
  * Sends one frame to every peer subscribed to one of the room's channels in a
@@ -100,6 +105,10 @@ interface Player {
   peer: Peer | null;
   /** Snapshot group (0 or 1), for local players only. */
   group: number;
+  /** Map cell the player views from (area of interest), for local players only. */
+  cell: number;
+  /** Map cell the player is filed under in the room's grid (every player). */
+  gridCell: number;
   name: string;
   appearance: AppearanceId;
   x: number;
@@ -170,6 +179,10 @@ export class Room {
   private diverged = false;
   /** Players changed during the current tick, and local voice frames, for the mesh. */
   private readonly tickChanged = new Set<Player>();
+  /** Local players by the map cell they view from: one snapshot per cell and group. */
+  private readonly viewers = new Map<number, Set<Player>>();
+  /** Every player (local or replica) by map cell, to find who is in view. */
+  private readonly grid = new Map<number, Set<Player>>();
   private localVoice: VoiceFrame[] = [];
   private ticker: ReturnType<typeof setInterval> | null = null;
   /** Local players asked to migrate, and when they may be asked again. */
@@ -265,8 +278,10 @@ export class Room {
   remoteJoined(owner: number, info: PlayerInfo): void {
     const existing = this.players.get(info.id);
     if (existing?.owner === null) return; // ours; a stale message
-    const player: Player = { ...info, owner, peer: null, group: -1, ...fresh() };
+    const player: Player = { ...info, owner, peer: null, group: -1, cell: -1, gridCell: -1, ...fresh() };
+    if (existing) this.unfile(existing);
     this.players.set(info.id, player);
+    this.file(player);
     if (existing) {
       // Already shown to our clients: refresh its state instead of a second join.
       this.forget(existing);
@@ -280,6 +295,7 @@ export class Room {
     const p = this.players.get(id);
     if (!p || p.owner !== owner) return;
     this.players.delete(id);
+    this.unfile(p);
     this.forget(p);
     this.broadcast({ t: "player_left", id });
   }
@@ -293,6 +309,7 @@ export class Room {
       p.y = s.y;
       p.dir = s.dir;
       p.moving = s.moving;
+      this.file(p);
       this.markChanged(p);
     }
   }
@@ -360,9 +377,13 @@ export class Room {
     const p = this.players.get(id);
     if (!p || p.owner !== null) return null;
     const info = toInfo(p);
-    this.players.set(id, { ...p, owner: newOwner, peer: null, group: -1 });
+    const replica = { ...p, owner: newOwner, peer: null, group: -1, cell: -1 };
+    this.unfile(p);
+    this.players.set(id, replica);
+    this.file(replica);
     this.localCount--;
     this.groupSizes[p.group]--;
+    this.removeViewer(p);
     this.forget(p);
     this.migrating.delete(id);
     this.applySchedule(this.localCount);
@@ -411,6 +432,8 @@ export class Room {
       owner: null,
       peer,
       group,
+      cell: cellOf(start.x, start.y),
+      gridCell: -1,
       name,
       appearance,
       x: start.x,
@@ -438,11 +461,15 @@ export class Room {
     if (this.publish) {
       if (!peer.subscribe) throw new Error("Room uses publish but the peer cannot subscribe");
       peer.subscribe(ROOM_CHANNEL);
-      peer.subscribe(groupChannel(group));
+      peer.subscribe(viewChannel(player.cell, group));
     }
+    const replica = this.players.get(player.id);
+    if (replica) this.unfile(replica);
     this.players.set(player.id, player);
+    this.file(player);
     this.localCount++;
     this.groupSizes[group]++;
+    this.viewersIn(player.cell).add(player);
     if (wasReplica) this.markChanged(player);
     this.startTicker();
     this.opts.onJoined?.(player.id);
@@ -529,6 +556,8 @@ export class Room {
       p.lastMoveAt = Date.now();
       this.markChanged(p);
       send(p.peer!, { t: "correction", x: p.x, y: p.y });
+      this.file(p);
+      this.moveViewer(p);
     }
     this.broadcast({ t: "role", id: p.id, role });
     this.opts.sync?.role(p.id, role);
@@ -571,8 +600,10 @@ export class Room {
   private leave(player: Player): void {
     if (this.players.get(player.id) !== player) return;
     this.players.delete(player.id);
+    this.unfile(player);
     this.localCount--;
     this.groupSizes[player.group]--;
+    this.removeViewer(player);
     this.forget(player);
     this.broadcast({ t: "player_left", id: player.id });
     this.applySchedule(this.localCount);
@@ -597,7 +628,66 @@ export class Room {
     player.dir = move.dir;
     player.moving = move.moving;
     player.lastMoveAt = now;
+    this.file(player);
     this.markChanged(player);
+    this.moveViewer(player);
+  }
+
+  // ------------------------------------------------------------ area of interest
+
+  /** File the player under the grid cell of its position. */
+  private file(p: Player): void {
+    const cell = cellOf(p.x, p.y);
+    const set = this.grid.get(cell);
+    if (cell === p.gridCell && set?.has(p)) return;
+    this.unfile(p);
+    p.gridCell = cell;
+    if (set) set.add(p);
+    else this.grid.set(cell, new Set([p]));
+  }
+
+  private unfile(p: Player): void {
+    const set = this.grid.get(p.gridCell);
+    if (!set?.delete(p)) return;
+    if (set.size === 0) this.grid.delete(p.gridCell);
+  }
+
+  private viewersIn(cell: number): Set<Player> {
+    let set = this.viewers.get(cell);
+    if (!set) this.viewers.set(cell, (set = new Set()));
+    return set;
+  }
+
+  private removeViewer(p: Player): void {
+    const set = this.viewers.get(p.cell);
+    set?.delete(p);
+    if (set?.size === 0) this.viewers.delete(p.cell);
+  }
+
+  /**
+   * A local player moved: when it enters another cell it switches snapshot
+   * channels and gets everyone in the part of the map that just came into view,
+   * idle players included (their positions never come in snapshots otherwise).
+   * The rest of its view was in view already, so it is up to date.
+   */
+  private moveViewer(p: Player): void {
+    const cell = cellOf(p.x, p.y);
+    const from = p.cell;
+    if (cell === from) return;
+    if (this.publish) {
+      p.peer!.unsubscribe?.(viewChannel(p.cell, p.group));
+      p.peer!.subscribe!(viewChannel(cell, p.group));
+    }
+    this.removeViewer(p);
+    p.cell = cell;
+    this.viewersIn(cell).add(p);
+    const players: PlayerState[] = [];
+    for (const near of cellsInView(cell)) {
+      for (const q of this.grid.get(near) ?? []) {
+        if (q !== p && inView(q.x, q.y, cell) && !inView(q.x, q.y, from)) players.push(toState(q));
+      }
+    }
+    send(p.peer!, { t: "view", from, to: cell, players });
   }
 
   private handleChat(player: Player, rawText: unknown): void {
@@ -676,7 +766,11 @@ export class Room {
     if (sent) recordTick(performance.now() - start);
   }
 
-  /** Send groups whose pending state is identical one snapshot (the first group's). */
+  /**
+   * Send groups whose pending state is identical (the first group's) their
+   * snapshots: one per map cell with viewers, holding the changed players in view
+   * of that cell, the host and speakers wherever they are, and the voice.
+   */
   private flush(groups: number[], now: number): boolean {
     const p = this.pending[groups[0]];
     // Idle rooms batch voice to VOICE_FLUSH_MS: send now when waiting for this
@@ -685,13 +779,64 @@ export class Room {
     const voiceDue =
       p.voice.length > 0 && (p.changed.size > 0 || now - p.voiceSince + periodMs >= VOICE_FLUSH_MS);
     if (p.changed.size === 0 && !voiceDue) return false;
-    const data = encodeServerMessage({ t: "snapshot", players: [...p.changed], voice: voiceDue ? p.voice : [] });
+    const voice = voiceDue ? p.voice : [];
+    // Each part is encoded once and copied into the snapshots of every cell that sees it.
+    const voicePart = snapshotVoice(voice);
+
+    // The host and speakers are always in view; everyone else by map cell.
+    const stage: Uint8Array[] = [];
+    const byCell = new Map<number, { p: Player; entry: Uint8Array }[]>();
+    for (const q of p.changed) {
+      const entry = snapshotEntry(q);
+      if (q.role !== "guest") {
+        stage.push(entry);
+        continue;
+      }
+      const cell = cellOf(q.x, q.y);
+      const list = byCell.get(cell);
+      if (list) list.push({ p: q, entry });
+      else byCell.set(cell, [{ p: q, entry }]);
+    }
+
+    const counts = groups.map(() => 0);
+    for (const [cell, viewers] of this.viewers) {
+      counts.fill(0);
+      for (const v of viewers) {
+        const i = groups.indexOf(v.group);
+        if (i >= 0) counts[i]++;
+      }
+      if (counts.every((n) => n === 0)) continue;
+      const entries = stage.slice();
+      const near = cellsInView(cell);
+      // Walk whichever is shorter: the cells around this one, or the cells with movers.
+      if (byCell.size < near.length) {
+        const nearSet = cellSetInView(cell);
+        for (const [other, movers] of byCell) {
+          if (nearSet.has(other)) for (const m of movers) if (inView(m.p.x, m.p.y, cell)) entries.push(m.entry);
+        }
+      } else {
+        for (const other of near) {
+          const movers = byCell.get(other);
+          if (movers) for (const m of movers) if (inView(m.p.x, m.p.y, cell)) entries.push(m.entry);
+        }
+      }
+      if (entries.length === 0 && voice.length === 0) continue;
+      const data = assembleSnapshot(entries, voicePart);
+      groups.forEach((g, i) => {
+        if (counts[i] > 0) this.publishView(cell, g, viewers, data, counts[i]);
+      });
+    }
     for (const g of groups) {
       this.pending[g].changed.clear();
       if (voiceDue) this.pending[g].voice = [];
-      this.publishTo(groupChannel(g), (q) => q.group === g, data, this.groupSizes[g]);
     }
     return true;
+  }
+
+  private publishView(cell: number, group: number, viewers: Set<Player>, data: Uint8Array, recipients: number): void {
+    recordEgress(data.byteLength * recipients);
+    if (this.publish) this.publish(viewChannel(cell, group), data);
+    else for (const v of viewers) if (v.group === group) v.peer?.send(data);
   }
 
   /** Encode once, send to every local player. */

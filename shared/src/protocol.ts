@@ -66,6 +66,13 @@ export type ServerMessage =
   | { t: "role"; id: number; role: Role }
   /** The room switched snapshot groups: snapshots now arrive `snapshotHz` times a second. */
   | { t: "rate"; snapshotHz: number }
+  /**
+   * Area of interest: our view moved from map cell `from` to `to`. `players` is
+   * everyone in the part of the map that just came into view (in view of `to` but
+   * not of `from`, see shared/src/aoi.ts), moving or not; anyone else we last saw
+   * in that part is gone from it.
+   */
+  | { t: "view"; from: number; to: number; players: PlayerState[] }
   /** Cluster: reconnect elsewhere (ask the agent's /api/migrate); the server is shedding load. */
   | { t: "migrate" };
 
@@ -130,10 +137,54 @@ const Op = {
   migrate: 17,
   role: 18,
   rate: 19,
+  view: 20,
 } as const;
 
 /** Opcode of server snapshots, for callers that only need to recognize them. */
 export const SNAPSHOT_OPCODE = Op.snapshot;
+
+// ------------------------------------------------------------ snapshots by parts
+
+/**
+ * Area of interest: a room sends one snapshot per map cell, and a moving player
+ * appears in many of them. These build snapshots from parts encoded once per tick
+ * (byte-identical to encodeServerMessage), instead of re-encoding every player
+ * for every cell.
+ */
+export const SNAPSHOT_ENTRY_BYTES = 7;
+
+/** One player's snapshot entry (the PlayerStateStruct layout). */
+export function snapshotEntry(p: PlayerState): Uint8Array {
+  const bytes = new Uint8Array(SNAPSHOT_ENTRY_BYTES);
+  const view = new DataView(bytes.buffer);
+  view.setUint16(0, p.id, true);
+  view.setUint16(2, toWire(p.x), true);
+  view.setUint16(4, toWire(p.y), true);
+  view.setUint8(6, packMotion(p.dir, p.moving));
+  return bytes;
+}
+
+const VoicePart: Struct = { voice: Type.Object8, voice_Struct: VoiceFrameStruct };
+
+/** The voice part that ends a snapshot. */
+export function snapshotVoice(frames: VoiceFrame[]): Uint8Array {
+  return encode(VoicePart, { voice: frames });
+}
+
+export function assembleSnapshot(entries: Uint8Array[], voice: Uint8Array): Uint8Array<ArrayBuffer> {
+  if (entries.length > 0xffff) throw new RangeError("Snapshot: too many players");
+  const out = new Uint8Array(3 + entries.length * SNAPSHOT_ENTRY_BYTES + voice.byteLength);
+  out[0] = Op.snapshot;
+  out[1] = entries.length & 0xff;
+  out[2] = entries.length >> 8;
+  let o = 3;
+  for (const e of entries) {
+    out.set(e, o);
+    o += SNAPSHOT_ENTRY_BYTES;
+  }
+  out.set(voice, o);
+  return out;
+}
 
 const Schemas: Record<number, Struct> = {
   [Op.join]: { name: Type.String, appearance: Type.UInt8, hostKey: Type.String },
@@ -163,6 +214,7 @@ const Schemas: Record<number, Struct> = {
   [Op.migrate]: {},
   [Op.role]: { id: Type.UInt16, role: Type.UInt8 },
   [Op.rate]: { snapshotHz: Type.UInt8 },
+  [Op.view]: { from: Type.UInt16, to: Type.UInt16, players: Type.Object16, players_Struct: PlayerStateStruct },
 };
 
 // ------------------------------------------------------------------ wire <-> message
@@ -276,6 +328,8 @@ export function encodeServerMessage(msg: ServerMessage): Uint8Array<ArrayBuffer>
       return encode(Schemas[Op.role], { id: msg.id, role: roleIndex(msg.role) }, Op.role);
     case "rate":
       return encode(Schemas[Op.rate], msg, Op.rate);
+    case "view":
+      return encode(Schemas[Op.view], { from: msg.from, to: msg.to, players: msg.players.map(stateToWire) }, Op.view);
   }
 }
 
@@ -315,6 +369,10 @@ export function decodeServerMessage(bytes: Uint8Array): ServerMessage | null {
       case Op.rate: {
         const m = decode<{ snapshotHz: number }>(schema, bytes, 1);
         return m.snapshotHz > 0 ? { t: "rate", snapshotHz: m.snapshotHz } : null;
+      }
+      case Op.view: {
+        const m = decode<{ from: number; to: number; players: WireState[] }>(schema, bytes, 1);
+        return { t: "view", from: m.from, to: m.to, players: m.players.map(stateFromWire) };
       }
       default:
         return null;

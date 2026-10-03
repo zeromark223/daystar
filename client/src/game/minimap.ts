@@ -1,5 +1,5 @@
 import { Container, Graphics } from "pixi.js";
-import { FADE_START, SUN_RADIUS, WORLD_CENTER, WORLD_RADIUS } from "../../../shared/src/constants.ts";
+import { AOI_FOG_END, FADE_START, SUN_RADIUS, WORLD_CENTER, WORLD_RADIUS } from "../../../shared/src/constants.ts";
 import { brightnessAt } from "../../../shared/src/space.ts";
 
 const RADIUS = 78;
@@ -11,6 +11,8 @@ export interface MinimapDot {
   y: number;
   color: number;
   self: boolean;
+  /** Area-of-interest fog, 0..1. */
+  alpha?: number;
 }
 
 /** A small round map in the bottom-right corner: sun, edge, players and your view. */
@@ -59,9 +61,15 @@ export class Minimap {
       }
       const b = brightnessAt(d.x, d.y);
       if (b <= 0) continue; // faded out at the edge: hidden here too
-      g.circle((d.x - WORLD_CENTER.x) * k, (d.y - WORLD_CENTER.y) * k, 1.8).fill({ color: d.color, alpha: b });
+      g.circle((d.x - WORLD_CENTER.x) * k, (d.y - WORLD_CENTER.y) * k, 1.8).fill({ color: d.color, alpha: b * (d.alpha ?? 1) });
     }
     if (self) {
+      // How far we can see (area of interest).
+      g.circle((self.x - WORLD_CENTER.x) * k, (self.y - WORLD_CENTER.y) * k, AOI_FOG_END * k).stroke({
+        color: 0xffffff,
+        width: 1,
+        alpha: 0.18,
+      });
       g.circle((self.x - WORLD_CENTER.x) * k, (self.y - WORLD_CENTER.y) * k, 3.2)
         .fill({ color: self.color })
         .stroke({ color: 0xffffff, width: 1.2 });

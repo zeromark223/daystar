@@ -6,6 +6,9 @@ import {
   encodeClientMessage,
   encodeServerMessage,
   quantize,
+  assembleSnapshot,
+  snapshotEntry,
+  snapshotVoice,
   type ClientMessage,
   type ServerMessage,
 } from "./protocol.ts";
@@ -39,6 +42,7 @@ test("server messages round-trip", () => {
     { t: "migrate" },
     { t: "role", id: 7, role: "host" },
     { t: "rate", snapshotHz: 10 },
+    { t: "view", from: 300, to: 301, players: [{ id: 3, x: 1200.5, y: 4000, dir: "north", moving: false }] },
   ];
   for (const m of messages) assert.deepEqual(decodeServerMessage(encodeServerMessage(m)), m);
 });
@@ -67,4 +71,20 @@ test("malformed or unknown frames decode to null", () => {
   assert.equal(decodeClientMessage(new Uint8Array([4, 1, 0, 2])), null);
   // Server-only opcode sent by a client.
   assert.equal(decodeClientMessage(encodeServerMessage({ t: "player_left", id: 1 })), null);
+});
+
+test("snapshots assembled from parts match the regular encoder", () => {
+  const players = Array.from({ length: 300 }, (_, i) => ({
+    id: i * 7,
+    x: Math.random() * 10000,
+    y: Math.random() * 10000,
+    dir: (["north", "south", "east", "west"] as const)[i % 4],
+    moving: i % 3 === 0,
+  }));
+  const voice = [{ id: 3, seq: 9, data: new Uint8Array([1, 2, 3]) }];
+  for (const v of [[], voice]) {
+    const regular = encodeServerMessage({ t: "snapshot", players, voice: v });
+    const parts = assembleSnapshot(players.map(snapshotEntry), snapshotVoice(v));
+    assert.deepEqual([...parts], [...regular]);
+  }
 });

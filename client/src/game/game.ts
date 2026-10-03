@@ -3,6 +3,7 @@ import { appearanceOf } from "../../../shared/src/appearance.ts";
 import { MOVE_SPEED, TICK_RATE } from "../../../shared/src/constants.ts";
 import { facing, type Direction } from "../../../shared/src/direction.ts";
 import { quantize, type PlayerInfo, type PlayerState } from "../../../shared/src/protocol.ts";
+import { fogAt, inView } from "../../../shared/src/aoi.ts";
 import type { Role } from "../../../shared/src/roles.ts";
 import { canBeAt, moveInSpace } from "../../../shared/src/space.ts";
 import { Avatar } from "./avatar.ts";
@@ -111,7 +112,7 @@ export class Game {
     let best: Avatar | null = null;
     let bestD = PICK_RADIUS;
     for (const a of this.avatars.values()) {
-      if (a.role === "host" || a.id === this.selfId) continue;
+      if (a.role === "host" || a.id === this.selfId || this.visibility(a) < 0.3) continue;
       const d = Math.hypot(this.world.x + a.x * this.zoom - sx, this.world.y + a.y * this.zoom - sy);
       if (d < bestD) {
         best = a;
@@ -136,8 +137,38 @@ export class Game {
     const now = performance.now();
     for (const p of players) {
       if (p.id === this.selfId) continue;
-      this.avatars.get(p.id)?.pushSample(now, p);
+      const avatar = this.avatars.get(p.id);
+      if (!avatar) continue;
+      // Back in view after a while: appear where it is, do not slide from where it was.
+      if (avatar.inView) avatar.pushSample(now, p);
+      else avatar.teleport(now, p);
+      avatar.inView = true;
     }
+  }
+
+  /**
+   * Area of interest: our view moved from cell `from` to `to`; `players` is
+   * everyone in the part that just came into view. Anyone else we last saw there
+   * has gone (we were not told while it was out of view).
+   */
+  applyView(from: number, to: number, players: PlayerState[]): void {
+    const listed = new Set(players.map((p) => p.id));
+    for (const a of this.avatars.values()) {
+      if (a.id === this.selfId || a.role !== "guest" || listed.has(a.id)) continue;
+      if (inView(a.x, a.y, to) && !inView(a.x, a.y, from)) a.inView = false;
+    }
+    this.applySnapshot(players);
+  }
+
+  /**
+   * How visible a player is: the host, speakers and we are always fully visible;
+   * others fade out with distance (fog) and vanish when the server left them out.
+   */
+  private visibility(a: Avatar): number {
+    const self = this.self;
+    if (!self || a === self || a.role !== "guest") return 1;
+    if (!a.inView) return 0;
+    return fogAt(Math.hypot(a.x - self.x, a.y - self.y));
   }
 
   /** The server rejected our last position; snap back to its authoritative one. */
@@ -209,15 +240,21 @@ export class Game {
     }
     this.scene.setHostVoiceLevel(hostLevel);
     this.scene.update(now, this.world.x, this.world.y, this.zoom, width, height);
-    for (const avatar of this.avatars.values()) avatar.render(now, this.world.x, this.world.y, this.zoom);
+    const seen = new Map<Avatar, number>();
+    for (const avatar of this.avatars.values()) {
+      const visibility = this.visibility(avatar);
+      seen.set(avatar, visibility);
+      avatar.render(now, this.world.x, this.world.y, this.zoom, visibility);
+    }
     this.minimap.update(
       now,
-      // The host is the sun, already on the map.
-      [...this.avatars.values()].filter((a) => a.role !== "host").map((a) => ({
+      // The host is the sun, already on the map; fogged players are not shown.
+      [...seen].filter(([a, v]) => a.role !== "host" && v > 0).map(([a, v]) => ({
         x: a.x,
         y: a.y,
         color: appearanceOf(a.appearance).color,
         self: a.id === this.selfId,
+        alpha: v,
       })),
       { x: -this.world.x / this.zoom, y: -this.world.y / this.zoom, w: width / this.zoom, h: height / this.zoom },
     );

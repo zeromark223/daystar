@@ -141,6 +141,17 @@ traffic was ~93 MB/s, close to what the gigabit LAN and the test machine could t
   groups served on alternate ticks and ticks at 40 Hz, so everyone still gets 20 Hz
   but each tick's burst of sends covers half the room (event loop p99 halved in a
   local A/B at 2,000 players, GC unchanged, about 10% more CPU).
+- **Area of interest** (`shared/src/aoi.ts`): players only get the moves of others
+  within 1,500 px; the host and speakers are always in view, and the room-wide roster,
+  chat and roles are unchanged. The server keeps a 375 px grid and sends one snapshot
+  per occupied cell (built from per-player parts encoded once per tick), so each
+  player still gets one message per tick. Entering a new cell brings a `view` message
+  with everyone in the strip that just came into view, idle players included. Clients
+  fade others out between 1,100 and 1,450 px (fog) and show the view radius on the
+  minimap. Measured locally (one room, bots spread by random walks), at 1,000 bots and
+  20 Hz: 135 Mbps out instead of ~250 (-45%), for 28% of a core instead of 15%. The
+  saving grows as more players spread out (about -75% at 3,000); a crowd standing in
+  one spot gains nothing.
 - **Overcharge** (`server/src/overcharge.ts`): when the server runs hot, every room
   sends fewer snapshots per player, 2 Hz at a time (20, 18, ... 10), and climbs back
   when there is room again. The load score is the highest of event loop p99 / 50 ms,
