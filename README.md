@@ -126,6 +126,12 @@ room over more cores.
   about 2,000 concurrent sockets.
 - Area of interest helps when people spread out; a crowd standing in one spot
   costs what it did before.
+- On a faster core the same build goes much further: **~7,000 CCU in one room on one
+  core of a Ryzen AI 7 350** (dev laptop, server and bots on the same machine over
+  loopback): CPU 65%, event loop p99 40 ms, move p99 85 ms, voice p99 133 ms. Up to
+  10,000 what players saw stayed within targets (move p99 134 ms, voice p99 183 ms)
+  while the event loop hovered around its 50 ms limit at ~1.2 Gbps out. Test the
+  server's own port: the Vite dev server's proxy capped the same run at ~5,000.
 
 ## The road from 550 to 2,800 CCU
 
