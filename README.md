@@ -98,35 +98,34 @@ tools/          load test
 
 ## Capacity
 
-Measured on **one core of a Xeon E5-2680 v4** (a Coolify VM on Proxmox), bots on a
-separate wired machine. Scenario: one room, a host and two speakers talking in turns,
-listeners walking 20% of the time, no chat.
+**2,800 CCU stable in one room on one core of a Xeon E5-2680 v4** (a Coolify VM on
+Proxmox), with area of interest, using ~200 Mbps of egress. Bots ran on a separate
+wired machine over the LAN, through Coolify's Traefik only, with kernel mitigations
+off. Scenario: one room, a host and two speakers talking in turns, listeners walking
+20% of the time, no chat.
 
-**1,600 CCU stable in one room; 1,500 recommended.** Over the LAN through Coolify's
-Traefik only (no CDN, no TLS), with kernel mitigations off, every target held at 1,600:
-server CPU 42%, event loop p99 30 ms, move p99 90 ms, voice p99 103 ms, 99.9% of
-voice frames delivered, ~72 MB/s out. At 1,800 only the tails slipped (move p99
-262 ms, median still 50 ms) while the server stayed at 49% CPU and a 40 ms loop p99;
-traffic was ~93 MB/s, close to what the gigabit LAN and the test machine could take.
+At 2,800: server CPU 68%, event loop p99 37 ms, move p99 100 ms, voice p99 135 ms,
+all voice frames delivered. At 3,000-3,200 only the server's event loop passed its
+50 ms target (CPU ~75%); what players saw was still fine (move p99 ~100 ms, voice
+p99 ~137 ms). The single core is now the limit, not bandwidth; cluster mode spreads a
+room over more cores.
 
-| Setup | Stable (all targets met) | Server at 1,400 in one room |
-|---|---|---|
-| Internet (Cloudflare), mitigations on (default) | **800 CCU** | CPU 75%, loop p99 58 ms |
-| Internet (Cloudflare), `mitigations=off` on the Proxmox host and in the VM | **1,000 CCU** (limited by the test network) | CPU 53%, loop p99 45 ms |
-| LAN (Traefik only), `mitigations=off` | **1,600 CCU** | CPU 35%, loop p99 31 ms |
+| Setup | Stable (all targets met) |
+|---|---|
+| Internet (Cloudflare), mitigations on (default) | 800 CCU |
+| Internet, `mitigations=off` on the Proxmox host and in the VM | 1,000 CCU (limited by the test network) |
+| LAN (Traefik only), mitigations off | 1,600 CCU |
+| + snapshot groups | 2,200 CCU (limited by the ~740 Mbps test network) |
+| + overcharge and area of interest | **2,800 CCU at ~200 Mbps** |
 
-- Turning the mitigations off cut the server's CPU by about 35%, most of it from the
-  VM's own kernel (PTI makes each socket send's syscall more expensive). It removes
-  protections against Spectre/Meltdown-class attacks: only do it on a host where you
-  trust every VM and container.
-- The same load costs the server noticeably more over the internet (1,400 players:
-  53% CPU vs 35% on the LAN), probably because congested paths back up the sockets
-  and the send path does extra work. Size production from the internet numbers.
-- Over the internet, plan for **~65-70 MB/s (~550 Mbit/s) of egress for 1,500 people in
-  one room**, and for the proxy: through Cloudflare, new connections started failing
-  with HTTP 502 at about 2,000 concurrent sockets.
-- Voice adds almost nothing on the server: frames ride the snapshots that go out anyway.
-- The cluster mode spreads a room over more processes and cores.
+- `mitigations=off` removes protections against Spectre/Meltdown-class attacks:
+  only on a host where you trust every VM and container.
+- The same load costs the server more over the internet than on a LAN (congested
+  paths back up sockets), so size production from internet measurements, and mind
+  the proxy: through Cloudflare, new connections started failing with HTTP 502 at
+  about 2,000 concurrent sockets.
+- Area of interest helps when people spread out; a crowd standing in one spot
+  costs what it did before.
 
 ## The road from 550 to 2,800 CCU
 
