@@ -128,6 +128,47 @@ traffic was ~93 MB/s, close to what the gigabit LAN and the test machine could t
 - Voice adds almost nothing on the server: frames ride the snapshots that go out anyway.
 - The cluster mode spreads a room over more processes and cores.
 
+## The road from 550 to 2,800 CCU
+
+Daystar started as a small Node.js server. Every number below comes from
+`tools/loadtest.ts` against the same Coolify VM (one core of a Xeon E5-2680 v4).
+The scenario got harder along the way, from rooms of 20 to a single room, and from
+chat to a host and two speakers talking, so the real gain is larger than the
+numbers suggest.
+
+| Step | Change | Result |
+|---|---|---|
+| 0 | Node.js + `ws`, a 20 Hz snapshot of every player, binary schema protocol | ~550-600 CCU in rooms of 20 with everyone walking; ~37 µs per sent message on this host (6 µs on a laptop) |
+| 1 | Delta snapshots: only players that changed | ~1,000 CCU in rooms of 20 with 20% walking |
+| 2 | Bun: native WebSockets and topic pub/sub (one call fans a frame out) | laptop: 5,000 CCU vs ~3,000-4,000 on Node; Coolify: ~1,000 in one room with chat off (~21 µs per message) |
+| 3 | Roles and voice; voice rides the snapshots that go out anyway | 800 CCU stable in one room with three people talking, over the internet |
+| 4 | `mitigations=off` on the Proxmox host, then in the VM | server CPU -35%; 1,000 CCU end to end, now limited by the test network |
+| 5 | Testing over the LAN (Traefik only) | 1,600 CCU; the same load costs less CPU without congested paths |
+| 6 | Snapshot groups: each tick serves half the room | 2,200 CCU; at 1,800 players CPU -37%, event loop p99 -60%, egress -43% |
+| 7 | Overcharge: the snapshot rate follows the load in 2 Hz steps | rooms keep the highest rate that fits (1,800 players at 14-18 Hz instead of 10) |
+| 8 | Area of interest: only players within 1,500 px, with fog on the client | **2,800 CCU at ~200 Mbps**; bandwidth is no longer the limit |
+
+What we learned:
+
+- **Count messages, not bytes.** On this host each send costs ~21 µs (a VM, Docker,
+  PTI), so what mattered was sending fewer frames: delta snapshots, voice inside the
+  snapshot, one frame per player per tick. Compression did not help (LZ4 saved 0%
+  on the packed binary).
+- **Measure the tester too.** The first runs hit the laptop's Wi-Fi (~21 MB/s),
+  later the LAN (~740 Mbps). When latency rose while the server's CPU and event loop
+  stayed flat, the bottleneck was outside the server.
+- **One room is quadratic.** Every snapshot carries the 20% who move and goes to
+  everyone, so bandwidth grows with N²: from 1,800 to 2,400 players (+33%), egress
+  went up 69%. Only area of interest breaks that.
+- **Spread the burst.** Event loop latency follows the biggest burst of sends, not
+  the average. Serving half the room per tick at twice the tick rate halved the
+  event loop p99 for the same per-player rate (local A/B, GC unchanged).
+- **Kernel mitigations matter in VMs.** PTI makes every syscall dearer; turning it
+  off inside the VM gave most of the 35%.
+- **Trade CPU for bandwidth on purpose.** Area of interest roughly doubled the CPU
+  per player and cut egress by 45-75%. The core is the limit again, and cluster mode
+  (one room over several processes) is the next step.
+
 ## Networking
 
 - Every frame is binary: an opcode byte plus a body described by a schema
