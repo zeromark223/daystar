@@ -193,6 +193,7 @@ dependencies = [
  "hmac",
  "hyper",
  "hyper-util",
+ "libc",
  "memory-stats",
  "rand 0.10.3",
  "serde",

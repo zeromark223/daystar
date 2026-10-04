@@ -25,7 +25,37 @@ fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
+/// Every socket is a file descriptor, and shells often start processes with a soft
+/// limit of 1024: raise it to the hard limit, like Bun does, so the server is not
+/// stuck at ~1,000 players. Returns the limit now in force (Unix only).
+#[cfg(unix)]
+fn raise_fd_limit() -> Option<u64> {
+    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        return None;
+    }
+    if limit.rlim_cur < limit.rlim_max {
+        // macOS reports an unlimited hard limit but refuses more than OPEN_MAX (10,240).
+        for target in [limit.rlim_max, limit.rlim_max.min(10_240)] {
+            let wanted = libc::rlimit { rlim_cur: target, rlim_max: limit.rlim_max };
+            if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &wanted) } == 0 {
+                limit.rlim_cur = target;
+                break;
+            }
+        }
+    }
+    Some(limit.rlim_cur as u64)
+}
+
 fn main() {
+    #[cfg(unix)]
+    match raise_fd_limit() {
+        Some(n) if n < 20_000 => eprintln!(
+            "warning: only {n} file descriptors (one per player socket); raise the hard limit (ulimit -Hn) for bigger rooms"
+        ),
+        Some(n) => println!("file descriptor limit: {n}"),
+        None => {}
+    }
     let threads: usize = env("RS_THREADS").and_then(|v| v.parse().ok()).unwrap_or(1);
     let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
     let workers = if threads == 0 { cores } else { threads };

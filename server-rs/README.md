@@ -21,6 +21,11 @@ Environment: `PORT` (3000), `HOST` (0.0.0.0), `RS_THREADS` (1; 0 = all cores),
 `GET /api/health` has the same shape as the Bun server's, so `tools/loadtest.ts`
 works unchanged (`--target http://localhost:3000`).
 
+Every player is a socket, so a file descriptor. On Linux and macOS the server raises
+its soft limit (`ulimit -n`, often 1024) to the hard limit at startup, like Bun, and
+warns when that is still under 20,000; raise the hard limit (`ulimit -Hn`,
+`/etc/security/limits.conf`) for bigger rooms. The load test's bots need the same.
+
 ## Design
 
 - **One task per room** owns all of its state (no locks). Connections send it
