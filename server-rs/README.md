@@ -44,6 +44,11 @@ warns when that is still under 20,000; raise the hard limit (`ulimit -Hn`,
   small frames and added ~13 ms to the median move latency.
 - Draining queued events in a batch instead of one `select!` per event: the
   first version fell behind at 9,000 players while its CPU was not even busy.
+- Not yielding between those batches: on a single thread a room that yields waits
+  behind thousands of socket tasks, and at 9,000 players joins and ticks stalled
+  (snapshots 600 ms apart). The writers were never the problem: `/api/health`
+  reports `droppedFrames` (outbox full) and `outboxAvg` (frames waiting per send),
+  and both stayed near zero.
 - Small WebSocket buffers, and **fragmenting frames above 8 KB**: the library
   keeps each socket's write buffer at the size of the largest frame it ever
   wrote, and `welcome` lists the whole room, so unfragmented welcomes cost

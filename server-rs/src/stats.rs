@@ -18,6 +18,10 @@ pub struct Stats {
     pub sockets: AtomicI64,
     pub rooms: AtomicI64,
     egress_bytes: AtomicU64,
+    /// Frames dropped because a client's outbox was full, and outbox depth seen at each send.
+    dropped_frames: AtomicU64,
+    outbox_depth_sum: AtomicU64,
+    outbox_sends: AtomicU64,
     /// Snapshots per second per player (the overcharge's decision) and its load score x 100.
     pub rate: AtomicU32,
     load_x100: AtomicU32,
@@ -39,6 +43,9 @@ impl Stats {
             sockets: AtomicI64::new(0),
             rooms: AtomicI64::new(0),
             egress_bytes: AtomicU64::new(0),
+            dropped_frames: AtomicU64::new(0),
+            outbox_depth_sum: AtomicU64::new(0),
+            outbox_sends: AtomicU64::new(0),
             rate: AtomicU32::new(crate::constants::TICK_RATE),
             load_x100: AtomicU32::new(0),
             ticks: Mutex::new(Vec::new()),
@@ -49,6 +56,15 @@ impl Stats {
 
     pub fn record_tick(&self, ms: f64) {
         self.ticks.lock().unwrap().push(ms);
+    }
+
+    /// A frame went into an outbox already holding `depth` frames (or was dropped).
+    pub fn record_outbox(&self, depth: usize, dropped: bool) {
+        self.outbox_depth_sum.fetch_add(depth as u64, Ordering::Relaxed);
+        self.outbox_sends.fetch_add(1, Ordering::Relaxed);
+        if dropped {
+            self.dropped_frames.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     pub fn record_egress(&self, bytes: usize) {
@@ -120,6 +136,9 @@ pub fn start(stats: std::sync::Arc<Stats>, mut overcharge: Overcharge, on_rate: 
             ticks.sort_by(|a, b| a.total_cmp(b));
             let egress_mbps = stats.egress_bytes.swap(0, Ordering::Relaxed) as f64 * 8.0 / 1e6 / elapsed;
             let loop_p99 = percentile(&late, 0.99);
+            let sends = stats.outbox_sends.swap(0, Ordering::Relaxed).max(1);
+            let outbox_avg = stats.outbox_depth_sum.swap(0, Ordering::Relaxed) as f64 / sends as f64;
+            let dropped = stats.dropped_frames.swap(0, Ordering::Relaxed);
             if let Some(rate) = overcharge.observe(loop_p99, cpu, egress_mbps) {
                 stats.rate.store(rate, Ordering::Relaxed);
                 println!("overcharge: {rate} snapshots/s per player (load {:.2})", overcharge.score);
@@ -142,6 +161,8 @@ pub fn start(stats: std::sync::Arc<Stats>, mut overcharge: Overcharge, on_rate: 
                 "egressMbps": round(egress_mbps, 1),
                 "snapshotHz": stats.rate.load(Ordering::Relaxed),
                 "load": stats.load_x100.load(Ordering::Relaxed) as f64 / 100.0,
+                "droppedFrames": dropped,
+                "outboxAvg": round(outbox_avg, 2),
             });
             let mut samples = stats.samples.lock().unwrap();
             samples.push_back(sample);

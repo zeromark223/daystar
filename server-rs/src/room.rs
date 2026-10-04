@@ -161,7 +161,9 @@ impl Room {
         self.tick_hz / self.groups as u32
     }
 
-    /// Most events handled before looking at the clock again.
+    /// Most events handled before looking at the clock again. The room does not
+    /// yield in between on purpose: on a single thread a yielding room waits behind
+    /// thousands of socket tasks and falls behind (measured: joins and ticks stalled).
     const BATCH: usize = 1024;
 
     pub async fn run(mut self, mut events: mpsc::UnboundedReceiver<Event>) {
@@ -262,8 +264,10 @@ impl Room {
 
     fn send(&self, conn: u64, data: Bytes) {
         if let Some(c) = self.conns.get(&conn) {
+            let depth = c.out.max_capacity() - c.out.capacity();
             // A full outbox means the client is not keeping up: drop, like Bun's backpressure limit.
-            let _ = c.out.try_send(Out::Data(data));
+            let dropped = c.out.try_send(Out::Data(data)).is_err();
+            self.stats.record_outbox(depth, dropped);
         }
     }
 
