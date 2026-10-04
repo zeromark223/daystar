@@ -81,18 +81,13 @@ fn round(v: f64, digits: i32) -> f64 {
     (v * f).round() / f
 }
 
-/// Process CPU time (all threads), in seconds.
+/// Process CPU time (all threads), in seconds; works on Linux, macOS and Windows.
 fn cpu_seconds() -> f64 {
-    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
-    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
-    let t = |tv: libc::timeval| tv.tv_sec as f64 + tv.tv_usec as f64 / 1e6;
-    t(usage.ru_utime) + t(usage.ru_stime)
+    cpu_time::ProcessTime::try_now().map_or(0.0, |t| t.as_duration().as_secs_f64())
 }
 
 fn rss_mb() -> f64 {
-    let statm = std::fs::read_to_string("/proc/self/statm").unwrap_or_default();
-    let pages: f64 = statm.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0.0);
-    (pages * unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as f64 / 1e6).round()
+    memory_stats::memory_stats().map_or(0.0, |m| (m.physical_mem as f64 / 1e6).round())
 }
 
 /// Start the loop-delay probe and the once-a-second sampler; `on_rate` gets the
