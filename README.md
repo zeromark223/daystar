@@ -158,6 +158,38 @@ bots on the same machine:
 - In virtual machines generally (WSL2, Proxmox), the kernel mitigations inside the
   guest cost the most; see the `mitigations=off` results above.
 
+## Rust port: how much does the language matter?
+
+[`server-rs/`](server-rs/README.md) is the standalone server ported to Rust (tokio):
+same protocol, rules and features, no cluster mode. Same laptop (Ryzen AI 7 350,
+Linux), same load test (one room, a host and two speakers, 20% walking, area of
+interest, 10 Hz per player from 2,000 players), bots on the same machine:
+
+| Players | Bun (TypeScript) | Rust, 1 thread | Rust, 4 threads |
+|---|---|---|---|
+| 3,000 | CPU 42%, loop p99 17 ms | CPU 35%, loop p99 15 ms | CPU 50%, loop p99 2 ms |
+| 5,000 | 59%, 32 ms | 50%, 25 ms | 81%, 2 ms |
+| 7,000 | 71%, 48 ms, move p99 86 ms | 58%, 34 ms, move p99 88 ms | 105%, 2 ms, move p99 78 ms |
+| 9,000 | 81%, 54 ms: **fails** (event loop) | 71%, 36 ms, move p99 121 ms | 132%, 2 ms, move p99 79 ms |
+| 11,000 | fails (move p99 175 ms) | fails (move p99 311 ms) | 157%, 3 ms, move p99 82 ms |
+| Memory at 9,000 | 145 MB | 296 MB | 232 MB |
+| **Stable** | **~7,000** | **~9,000** | **~11,000+** (then the bots, on the same laptop, give out) |
+
+- **One thread against one thread, Rust uses 15-20% less CPU** for the same load,
+  which is worth ~30% more players (7,000 -> 9,000). Not the 2-3x one might expect:
+  Bun's heaviest work, writing to thousands of sockets, already runs in native code
+  (uWebSockets, C++); Rust saves the JavaScript around it (encoding, area of
+  interest, ticks, GC).
+- **The real gain is threads.** With 4 threads the room logic stays on one core
+  while framing and socket writes spread over the others: the event loop stays at
+  ~2 ms and latency barely moves up to 11,000 players. Bun gets there only with
+  cluster mode (several processes and the mesh).
+- Past ~9,000 players the laptop itself is the limit: the server's thread waits
+  for a core (CPU under 80% while the loop lags) because the bots use the rest.
+- Rust uses about twice the memory of Bun here (~25-35 KB per socket: a task, a
+  channel and WebSocket buffers per connection, against uWebSockets' compact
+  per-socket state).
+
 ## The road from 550 to 2,800 CCU
 
 Daystar started as a small Node.js server. Every number below comes from

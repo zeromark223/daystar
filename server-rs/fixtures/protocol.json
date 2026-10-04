@@ -1,0 +1,295 @@
+{
+  "server": [
+    {
+      "message": {
+        "t": "welcome",
+        "selfId": 7,
+        "players": [
+          {
+            "id": 7,
+            "name": "Mochi 🌟",
+            "appearance": 11,
+            "x": 1241.25,
+            "y": 9869.5,
+            "dir": "north",
+            "moving": false,
+            "role": "host"
+          },
+          {
+            "id": 8,
+            "name": "Bé Na",
+            "appearance": 16,
+            "x": 1242.25,
+            "y": 9868.5,
+            "dir": "south",
+            "moving": true,
+            "role": "speaker"
+          },
+          {
+            "id": 9,
+            "name": "Gus",
+            "appearance": 21,
+            "x": 1243.25,
+            "y": 9867.5,
+            "dir": "west",
+            "moving": false,
+            "role": "guest"
+          }
+        ],
+        "chat": [
+          {
+            "id": 3,
+            "playerId": 7,
+            "name": "Mochi 🌟",
+            "text": "Xin chào mọi người",
+            "ts": 1790219348670
+          }
+        ],
+        "snapshotHz": 20
+      },
+      "hex": "0a0700030007006513369a030a004d6f63686920f09f8c9f0b0208006913329a04060042c3a9204e61100109006d132e9a0103004775731500010300000007000a004d6f63686920f09f8c9f180058696e206368c3a06f206de1bb8d69206e67c6b0e1bb9d6900e0ab36160d7a4214"
+    },
+    {
+      "message": {
+        "t": "welcome",
+        "selfId": 1,
+        "players": [
+          {
+            "id": 1,
+            "name": "A",
+            "appearance": 5,
+            "x": 1235.25,
+            "y": 9875.5,
+            "dir": "west",
+            "moving": false,
+            "role": "guest"
+          }
+        ],
+        "chat": [],
+        "snapshotHz": 10
+      },
+      "hex": "0a0100010001004d134e9a010100410500000a"
+    },
+    {
+      "message": {
+        "t": "player_joined",
+        "player": {
+          "id": 42,
+          "name": "Zed",
+          "appearance": 18,
+          "x": 1276.25,
+          "y": 9834.5,
+          "dir": "east",
+          "moving": true,
+          "role": "guest"
+        }
+      },
+      "hex": "0b2a00f113aa990603005a65641200"
+    },
+    {
+      "message": {
+        "t": "player_left",
+        "id": 65535
+      },
+      "hex": "0cffff"
+    },
+    {
+      "message": {
+        "t": "chat",
+        "message": {
+          "id": 3,
+          "playerId": 7,
+          "name": "Mochi 🌟",
+          "text": "Xin chào mọi người",
+          "ts": 1790219348670
+        }
+      },
+      "hex": "0d0300000007000a004d6f63686920f09f8c9f180058696e206368c3a06f206de1bb8d69206e67c6b0e1bb9d6900e0ab36160d7a42"
+    },
+    {
+      "message": {
+        "t": "correction",
+        "x": 4999.75,
+        "y": 0
+      },
+      "hex": "0e1f4e0000"
+    },
+    {
+      "message": {
+        "t": "error",
+        "message": "There can be at most 8 speakers."
+      },
+      "hex": "0f200054686572652063616e206265206174206d6f7374203820737065616b6572732e"
+    },
+    {
+      "message": {
+        "t": "snapshot",
+        "players": [
+          {
+            "id": 1,
+            "x": 100.75,
+            "y": 50.25,
+            "dir": "east",
+            "moving": false
+          },
+          {
+            "id": 2,
+            "x": 201.5,
+            "y": 100.5,
+            "dir": "east",
+            "moving": false
+          },
+          {
+            "id": 30,
+            "x": 3022.5,
+            "y": 1507.5,
+            "dir": "east",
+            "moving": true
+          }
+        ],
+        "voice": []
+      },
+      "hex": "10030001009301c90002020026039201021e003a2f8e170600"
+    },
+    {
+      "message": {
+        "t": "snapshot",
+        "players": [],
+        "voice": [
+          {
+            "id": 2,
+            "seq": 65535,
+            "data": [
+              1,
+              2,
+              3,
+              250
+            ]
+          }
+        ]
+      },
+      "hex": "100000010200ffff0400010203fa"
+    },
+    {
+      "message": {
+        "t": "role",
+        "id": 9,
+        "role": "speaker"
+      },
+      "hex": "12090001"
+    },
+    {
+      "message": {
+        "t": "rate",
+        "snapshotHz": 14
+      },
+      "hex": "130e"
+    },
+    {
+      "message": {
+        "t": "view",
+        "from": 837,
+        "to": 838,
+        "players": [
+          {
+            "id": 4,
+            "x": 403,
+            "y": 201,
+            "dir": "east",
+            "moving": false
+          },
+          {
+            "id": 5,
+            "x": 503.75,
+            "y": 251.25,
+            "dir": "east",
+            "moving": false
+          }
+        ]
+      },
+      "hex": "1445034603020004004c062403020500df07ed0302"
+    },
+    {
+      "message": {
+        "t": "migrate"
+      },
+      "hex": "11"
+    }
+  ],
+  "client": [
+    {
+      "message": {
+        "t": "join",
+        "name": "  Mochi 🌟  ",
+        "appearance": 23,
+        "hostKey": ""
+      },
+      "hex": "010e0020204d6f63686920f09f8c9f2020170000"
+    },
+    {
+      "message": {
+        "t": "join",
+        "name": "Host",
+        "appearance": 0,
+        "hostKey": "abcDEF-_123"
+      },
+      "hex": "010400486f7374000b006162634445462d5f313233"
+    },
+    {
+      "message": {
+        "t": "chat",
+        "text": "Xin chào"
+      },
+      "hex": "02090058696e206368c3a06f"
+    },
+    {
+      "message": {
+        "t": "move",
+        "x": 123.25,
+        "y": 9876.75,
+        "dir": "north",
+        "moving": true
+      },
+      "hex": "03ed01539a07"
+    },
+    {
+      "message": {
+        "t": "set_role",
+        "id": 9,
+        "role": "speaker"
+      },
+      "hex": "04090001"
+    },
+    {
+      "message": {
+        "t": "set_role",
+        "id": 9,
+        "role": "guest"
+      },
+      "hex": "04090000"
+    },
+    {
+      "message": {
+        "t": "voice",
+        "seq": 513,
+        "data": [
+          9,
+          8,
+          7
+        ]
+      },
+      "hex": "0501020300090807"
+    }
+  ],
+  "badClient": [
+    "",
+    "630102",
+    "01010041c80000",
+    "04010002",
+    "030100020008",
+    "0304000800",
+    "0205006869",
+    "03010002000300",
+    "0c0100"
+  ]
+}

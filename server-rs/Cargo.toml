@@ -1,0 +1,27 @@
+[package]
+name = "daystar-rs"
+version = "0.1.0"
+edition = "2024"
+description = "Daystar game server in Rust (standalone), for comparing with the Bun server"
+license = "MIT"
+publish = false
+
+[dependencies]
+axum = "0.8.9"
+base64 = "0.23.1"
+bytes = "1.12.1"
+futures-util = "0.3.34"
+hmac = "0.13.0"
+hyper = "1"
+hyper-util = { version = "0.1", features = ["tokio"] }
+libc = "0.2.190"
+rand = "0.10.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+tokio = { version = "1.53.2", features = ["rt", "rt-multi-thread", "net", "time", "sync", "macros", "fs"] }
+tokio-tungstenite = "0.29"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

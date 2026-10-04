@@ -10,3 +10,4 @@ client/public/assets/
 *.pem
 .health-token
 .env
+server-rs/target
