@@ -435,7 +435,8 @@ impl Room {
         }
         let elapsed = ((now - p.last_move_at) / 1000.0).min(1.0);
         let max_distance = MOVE_SPEED * elapsed + MOVE_SLACK;
-        if (x - p.x).hypot(y - p.y) > max_distance || !can_be_at(x, y) {
+        let (dx, dy) = (x - p.x, y - p.y);
+        if dx * dx + dy * dy > max_distance * max_distance || !can_be_at(x, y) {
             let (cx, cy, conn) = (p.x, p.y, p.conn);
             self.send(conn, protocol::correction(cx, cy));
             return;
@@ -553,8 +554,12 @@ impl Room {
         self.cells.entry(to).or_default().insert(id);
         self.players.get_mut(&id).unwrap().cell = to;
         let mut band = Vec::new();
-        for near in cells_in_view(to) {
-            let Some(ids) = self.cells.get(near) else { continue };
+        for &near in cells_in_view(to) {
+            // Cells the old view covered entirely hold nobody new.
+            if cell_fully_in_view(near, from) {
+                continue;
+            }
+            let Some(ids) = self.cells.get(&near) else { continue };
             for q in ids {
                 let q = &self.players[q];
                 if q.id != id && in_view(q.x, q.y, to) && !in_view(q.x, q.y, from) {

@@ -15,7 +15,7 @@ import {
   WORLD_CENTER,
 } from "../../shared/src/constants.ts";
 import type { Direction } from "../../shared/src/direction.ts";
-import { cellOf, cellSetInView, cellsInView, inView } from "../../shared/src/aoi.ts";
+import { cellFullyInView, cellOf, cellSetInView, cellsInView, inView } from "../../shared/src/aoi.ts";
 import { canSpeak, type Role } from "../../shared/src/roles.ts";
 import { canBeAt, spawnPoint } from "../../shared/src/space.ts";
 import { recordEgress, recordTick } from "./stats.ts";
@@ -616,9 +616,10 @@ export class Room {
     const now = Date.now();
     const elapsed = Math.min((now - player.lastMoveAt) / 1000, 1);
     const maxDistance = MOVE_SPEED * elapsed + MOVE_SLACK;
-    const distance = Math.hypot(move.x - player.x, move.y - player.y);
+    const dx = move.x - player.x;
+    const dy = move.y - player.y;
 
-    if (distance > maxDistance || !canBeAt(move.x, move.y)) {
+    if (dx * dx + dy * dy > maxDistance * maxDistance || !canBeAt(move.x, move.y)) {
       send(player.peer!, { t: "correction", x: player.x, y: player.y });
       return;
     }
@@ -683,6 +684,8 @@ export class Room {
     this.viewersIn(cell).add(p);
     const players: PlayerState[] = [];
     for (const near of cellsInView(cell)) {
+      // Cells the old view covered entirely hold nobody new.
+      if (cellFullyInView(near, from)) continue;
       for (const q of this.grid.get(near) ?? []) {
         if (q !== p && inView(q.x, q.y, cell) && !inView(q.x, q.y, from)) players.push(toState(q));
       }

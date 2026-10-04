@@ -186,6 +186,14 @@ interest, 10 Hz per player from 2,000 players), bots on the same machine:
   cluster mode (several processes and the mesh).
 - Past ~9,000 players the laptop itself is the limit: the server's thread waits
   for a core (CPU under 80% while the loop lags) because the bots use the rest.
+- **Why the single thread "stops at ~73% CPU".** Pinned to one core at 11,000
+  players, that core was 100% busy: 31% our code, 38% system calls (socket sends,
+  receives, epoll) and 31% softirq. The softirq part is the kernel's network
+  processing, much of it the bots' receiving side, which on loopback runs on the
+  sender's core and is not counted in the process's CPU time. On a real network
+  that share moves to the clients. Profiling also showed glibc's `hypot` taking a
+  third of the server's time in the area-of-interest checks; squared distances
+  (now in both servers) gave the single thread ~25% more throughput.
 - Rust uses about twice the memory of Bun here (~25-35 KB per socket: a task, a
   channel and WebSocket buffers per connection, against uWebSockets' compact
   per-socket state).
@@ -296,6 +304,10 @@ Bots are kept cheap so they can share a machine with the server: only one in ten
 (`--measure-share`, default 0.1) times its moves, snapshot gaps and voice, the rest
 only count frames, and none of them decodes the whole room in `welcome`. At 9,000
 bots that cut their CPU per MB received by about 35%.
+
+With server and bots on one machine, the `srv CPU` column understates a busy
+server: loopback network processing runs as softirq on the server's core and is not
+part of its CPU time (a core can be saturated while the column reads ~70%).
 
 `--last` reads `.loadtest-last.json` (git-ignored; it stores the token in plain text). Instead of `--health-token`, you can put `HEALTH_TOKEN=…` in a
 git-ignored `.env` file at the repo root; Bun loads it and the load test uses it.

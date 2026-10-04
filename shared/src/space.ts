@@ -14,11 +14,16 @@ export function distanceFromCenter(x: number, y: number): number {
   return Math.hypot(x - WORLD_CENTER.x, y - WORLD_CENTER.y);
 }
 
-/** Whether a player may be at (x, y): outside the sun, inside the world. */
+const INNER_SQ = (SUN_RADIUS - EPSILON) ** 2;
+const OUTER_SQ = (WORLD_RADIUS + EPSILON) ** 2;
+
+/** Whether a player may be at (x, y): outside the sun, inside the world (checked on every move). */
 export function canBeAt(x: number, y: number): boolean {
   if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
-  const r = distanceFromCenter(x, y);
-  return r >= SUN_RADIUS - EPSILON && r <= WORLD_RADIUS + EPSILON;
+  const dx = x - WORLD_CENTER.x;
+  const dy = y - WORLD_CENTER.y;
+  const r2 = dx * dx + dy * dy;
+  return r2 >= INNER_SQ && r2 <= OUTER_SQ;
 }
 
 /** The nearest allowed position; players slide along the sun and the edge. */

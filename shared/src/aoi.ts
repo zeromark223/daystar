@@ -20,18 +20,35 @@ function center(cell: number): { x: number; y: number } {
 
 /** From a cell's center: AOI_RADIUS plus the farthest a viewer can be inside the cell. */
 export const VIEW_REACH = AOI_RADIUS + AOI_CELL * Math.SQRT1_2;
+// Distances are compared squared: this runs for every mover and every viewing cell
+// each tick, and Math.hypot (careful about overflow we cannot have) is slow.
+const REACH_SQ = VIEW_REACH * VIEW_REACH;
+const MEET_SQ = (VIEW_REACH + AOI_CELL * Math.SQRT1_2) ** 2;
 
 /** Whether a player at (x, y) is in view of the viewers of `cell`. */
 export function inView(x: number, y: number, cell: number): boolean {
   const c = center(cell);
-  return Math.hypot(x - c.x, y - c.y) <= VIEW_REACH;
+  const dx = x - c.x;
+  const dy = y - c.y;
+  return dx * dx + dy * dy <= REACH_SQ;
 }
 
 /** Cheap pre-check: whether any point of `other` can be in view of `cell`. */
 export function cellsMeet(cell: number, other: number): boolean {
   const a = center(cell);
   const b = center(other);
-  return Math.hypot(a.x - b.x, a.y - b.y) <= VIEW_REACH + AOI_CELL * Math.SQRT1_2;
+  const dx = a.x - b.x;
+  const dy = a.y - b.y;
+  return dx * dx + dy * dy <= MEET_SQ;
+}
+
+/** Whether every point of `other` is in view of `cell` (its farthest corner is). */
+export function cellFullyInView(other: number, cell: number): boolean {
+  const c = center(cell);
+  const o = center(other);
+  const dx = Math.abs(o.x - c.x) + AOI_CELL / 2;
+  const dy = Math.abs(o.y - c.y) + AOI_CELL / 2;
+  return dx * dx + dy * dy <= REACH_SQ;
 }
 
 const ROWS = 32; // the world's 10,000 px need 27

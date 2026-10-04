@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { cellOf, cellsInView, cellsMeet, fogAt, inView } from "./aoi.ts";
+import { cellFullyInView, cellOf, cellsInView, cellsMeet, fogAt, inView } from "./aoi.ts";
 import { AOI_FOG_END, AOI_FOG_START, AOI_RADIUS } from "./constants.ts";
 import { canBeAt } from "./space.ts";
 
@@ -31,4 +31,15 @@ test("fog: clear, then fading, then gone", () => {
   assert.ok(fogAt((AOI_FOG_START + AOI_FOG_END) / 2) > 0.4 && fogAt((AOI_FOG_START + AOI_FOG_END) / 2) < 0.6);
   assert.equal(fogAt(AOI_FOG_END), 0);
   assert.ok(AOI_FOG_END < AOI_RADIUS);
+});
+
+test("a cell fully in view has every point in view", () => {
+  const viewer = cellOf(5000, 5000);
+  for (const other of cellsInView(viewer)) {
+    if (!cellFullyInView(other, viewer)) continue;
+    const ox = (other % 64) * 375;
+    const oy = Math.floor(other / 64) * 375;
+    for (const [fx, fy] of [[0, 0], [1, 0], [0, 1], [1, 1], [0.5, 0.5]]) assert.ok(inView(ox + fx * 375, oy + fy * 375, viewer));
+  }
+  assert.ok(cellFullyInView(viewer, viewer));
 });
