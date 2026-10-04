@@ -27,8 +27,10 @@ import {
   encodeClientMessage,
   POSITION_SCALE,
   quantize,
+  SERVER_OPCODES,
   SNAPSHOT_OPCODE,
 } from "../shared/src/protocol.ts";
+import { roleFromIndex, type Role } from "../shared/src/roles.ts";
 import { readOpusPackets } from "./voice/ogg.ts";
 
 const ROOT = resolve(import.meta.dirname, "..");
@@ -36,34 +38,35 @@ const HIST_MAX_MS = 5000;
 
 // ---------------------------------------------------------------- histogram
 
-/** 1 ms buckets up to HIST_MAX_MS; mergeable across processes. */
+/** 1 ms buckets up to HIST_MAX_MS in a flat array (bots add hundreds of thousands per second); mergeable across processes. */
 class Histogram {
-  counts = new Map<number, number>();
+  counts = new Uint32Array(HIST_MAX_MS + 1);
+  total = 0;
   add(ms: number): void {
-    const b = Math.min(HIST_MAX_MS, Math.max(0, Math.round(ms)));
-    this.counts.set(b, (this.counts.get(b) ?? 0) + 1);
+    this.counts[ms >= HIST_MAX_MS ? HIST_MAX_MS : ms <= 0 ? 0 : Math.round(ms)]++;
+    this.total++;
   }
   merge(entries: [number, number][]): void {
-    for (const [b, n] of entries) this.counts.set(b, (this.counts.get(b) ?? 0) + n);
-  }
-  get total(): number {
-    let t = 0;
-    for (const n of this.counts.values()) t += n;
-    return t;
+    for (const [b, n] of entries) {
+      this.counts[b] += n;
+      this.total += n;
+    }
   }
   percentile(p: number): number {
-    const total = this.total;
-    if (total === 0) return NaN;
-    const target = Math.ceil(total * p);
+    if (this.total === 0) return NaN;
+    const target = Math.ceil(this.total * p);
     let seen = 0;
-    for (const b of [...this.counts.keys()].sort((a, c) => a - c)) {
-      seen += this.counts.get(b)!;
+    for (let b = 0; b <= HIST_MAX_MS; b++) {
+      seen += this.counts[b];
       if (seen >= target) return b;
     }
     return HIST_MAX_MS;
   }
+  /** Non-empty buckets, for the report to the orchestrator. */
   entries(): [number, number][] {
-    return [...this.counts.entries()];
+    const out: [number, number][] = [];
+    for (let b = 0; b <= HIST_MAX_MS; b++) if (this.counts[b]) out.push([b, this.counts[b]]);
+    return out;
   }
 }
 
@@ -138,6 +141,11 @@ interface Bot {
   voicePos: number;
   /** Snapshot rate the server announced (welcome, then "rate" messages). */
   snapshotHz: number;
+  /**
+   * Only a share of bots (--measure-share) times its moves, snapshot gaps and voice:
+   * scanning every snapshot for every bot cost more CPU than the server's work.
+   */
+  measured: boolean;
 }
 
 /**
@@ -163,6 +171,36 @@ function voiceSample(i: number): Uint8Array[] {
 
 /** Snapshot body: UInt16 count, then per player id, x, y (UInt16 LE) and motion (UInt8). */
 const SNAPSHOT_ENTRY = 7;
+
+/**
+ * What a bot needs from "welcome" (its own entry, the snapshot rate) without
+ * decoding the whole room into objects: entries are id, x, y, motion, name,
+ * appearance, role; the joining player is the last one.
+ */
+function readWelcome(bytes: Uint8Array): { selfId: number; x: number; y: number; role: Role; snapshotHz: number } {
+  const data = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const selfId = data.getUint16(1, true);
+  const count = data.getUint16(3, true);
+  let o = 5;
+  let self = { x: 0, y: 0, role: "guest" as Role };
+  for (let i = 0; i < count; i++) {
+    const id = data.getUint16(o, true);
+    const nameEnd = o + 7 + 2 + data.getUint16(o + 7, true);
+    if (id === selfId) {
+      self = { x: data.getUint16(o + 2, true) / POSITION_SCALE, y: data.getUint16(o + 4, true) / POSITION_SCALE, role: roleFromIndex(data.getUint8(nameEnd + 1)) ?? "guest" };
+    }
+    o = nameEnd + 2; // appearance, role
+  }
+  const chats = data.getUint8(o);
+  o += 1;
+  for (let i = 0; i < chats; i++) {
+    o += 6; // id, playerId
+    o += 2 + data.getUint16(o, true); // name
+    o += 2 + data.getUint16(o, true); // text
+    o += 8; // ts
+  }
+  return { selfId, ...self, snapshotHz: data.getUint8(o) };
+}
 
 /** Position of `id` in a raw snapshot frame, in wire units, without a full decode. */
 function findInSnapshot(data: DataView, id: number): { xw: number; yw: number } | null {
@@ -190,6 +228,7 @@ function runWorker(): void {
   let baseUrl = "";
   let chatEveryMs = 30_000;
   let movingRatio = 1;
+  let measureEvery = 10;
   /**
    * Shared clock for voice (Date.now() at the start of the test): frame k covers
    * [epoch + 20k, epoch + 20(k+1)) ms and is sent with seq = k & 0xffff, like the
@@ -251,6 +290,7 @@ function runWorker(): void {
       voice,
       voicePos: Math.floor(Math.random() * 200),
       snapshotHz: 0,
+      measured: bots.length % measureEvery === 0,
       ws: null!,
       room,
       ticket: placed.ticket,
@@ -301,14 +341,19 @@ function runWorker(): void {
       if (bot.ws !== ws || !(event.data instanceof ArrayBuffer)) return;
       const bytes = new Uint8Array(event.data);
       counters.bytesIn += bytes.byteLength;
-      const now = performance.now();
-      // Snapshots are only scanned for our own entry, not decoded, to keep bots cheap.
-      if (bytes[0] === SNAPSHOT_OPCODE) {
+      const op = bytes[0];
+      // Snapshots are only scanned, never decoded, to keep bots cheap; most bots
+      // only count them, the measured share also times them.
+      if (op === SNAPSHOT_OPCODE) {
         counters.snapshots++;
+        const data = new DataView(event.data);
+        counters.voiceRx += data.getUint8(3 + data.getUint16(1, true) * SNAPSHOT_ENTRY);
+        if (!bot.measured) return;
+        const now = performance.now();
         if (bot.lastSnapshot) gaps.add(now - bot.lastSnapshot);
         bot.lastSnapshot = now;
-        if (voiceEpoch) readVoice(new DataView(event.data));
-        const own = bot.pending.length ? findInSnapshot(new DataView(event.data), bot.id) : null;
+        if (voiceEpoch) readVoice(data);
+        const own = bot.pending.length ? findInSnapshot(data, bot.id) : null;
         if (own) {
           const i = bot.pending.findLastIndex((p) => p.xw === own.xw && p.yw === own.yw);
           if (i >= 0) {
@@ -318,17 +363,21 @@ function runWorker(): void {
         }
         return;
       }
-      const msg = decodeServerMessage(bytes);
-      if (msg?.t === "welcome") {
-        const self = msg.players.find((p) => p.id === msg.selfId)!;
-        bot.id = msg.selfId;
-        bot.x = self.x;
-        bot.y = self.y;
-        bot.role = self.role;
-        bot.snapshotHz = msg.snapshotHz;
+      if (op === SERVER_OPCODES.welcome) {
+        const w = readWelcome(bytes);
+        bot.id = w.selfId;
+        bot.x = w.x;
+        bot.y = w.y;
+        bot.role = w.role;
+        bot.snapshotHz = w.snapshotHz;
         bot.joined = true;
         if (bot.part !== "guest") promoteSpeakers(bot.room);
-      } else if (msg?.t === "rate") {
+        return;
+      }
+      // Frequent and of no use to a bot.
+      if (op === SERVER_OPCODES.view || op === SERVER_OPCODES.playerJoined || op === SERVER_OPCODES.playerLeft) return;
+      const msg = decodeServerMessage(bytes);
+      if (msg?.t === "rate") {
         bot.snapshotHz = msg.snapshotHz;
       } else if (msg?.t === "role" && msg.id === bot.id) {
         bot.role = msg.role;
@@ -392,7 +441,6 @@ function runWorker(): void {
       // Unwrap the 16-bit seq to the latest frame index with those low bits.
       const k = current - (((current & 0xffff) - seq + 0x10000) & 0xffff);
       voiceLatency.add(now - (voiceEpoch + (k + 1) * VOICE_FRAME_MS));
-      counters.voiceRx++;
     }
   }
 
@@ -501,8 +549,10 @@ function runWorker(): void {
       const frame = encodeClientMessage({ t: "move", x: bot.x, y: bot.y, dir: d.dir, moving: true });
       bot.ws.send(frame);
       counters.bytesOut += frame.byteLength;
-      bot.pending.push({ xw: toWire(bot.x), yw: toWire(bot.y), t: performance.now() });
-      if (bot.pending.length > 20) bot.pending.shift(); // e.g. moves rejected by the server
+      if (bot.measured) {
+        bot.pending.push({ xw: toWire(bot.x), yw: toWire(bot.y), t: performance.now() });
+        if (bot.pending.length > 20) bot.pending.shift(); // e.g. moves rejected by the server
+      }
     }
     phase = (phase + 1) % PHASES;
   }, 1000 / TICK_RATE / PHASES);
@@ -529,7 +579,7 @@ function runWorker(): void {
   }, 1000);
 
   type Command =
-    | { cmd: "config"; baseUrl: string; chatEveryMs: number; movingRatio: number; voiceEpoch: number }
+    | { cmd: "config"; baseUrl: string; chatEveryMs: number; movingRatio: number; voiceEpoch: number; measureEvery: number }
     | { cmd: "add"; room: string; name: string; part?: Bot["part"]; hostKey?: string; voice?: number };
   createInterface({ input: process.stdin }).on("line", (line) => {
     const msg = JSON.parse(line) as Command;
@@ -538,6 +588,7 @@ function runWorker(): void {
       chatEveryMs = msg.chatEveryMs;
       movingRatio = msg.movingRatio;
       voiceEpoch = msg.voiceEpoch;
+      measureEvery = msg.measureEvery;
     } else {
       void addBot(msg.room, msg.name, msg.part ?? "guest", msg.hostKey ?? "", msg.voice ?? 0);
     }
@@ -577,6 +628,8 @@ const USAGE = `Usage: bun tools/loadtest.ts [options]   (or: bun run loadtest [o
   --ramp <n>           new connections per second                (default 100)
   --workers <n>        bot processes                             (default 6)
   --chat-every <s>     seconds between chat messages per bot; 0 = no chat (default 30)
+  --measure-share <s>  share of bots that time moves, snapshot gaps and voice; the
+                       rest only count frames, which keeps bots cheap (default 0.1)
   --speakers <n>       talkers per room: a host plus n-1 speakers holding a
                        conversation (real Opus frames); rooms are created with
                        POST /api/rooms and printed as invite links (default 0)
@@ -608,6 +661,8 @@ interface Options {
   chatEveryMs: number;
   movingRatio: number;
   speakers: number;
+  /** Every n-th bot measures latencies (1 / --measure-share). */
+  measureEvery: number;
   port: number;
   /** Game servers in a spawned local cluster; 0 = one standalone server. */
   cluster: number;
@@ -666,6 +721,7 @@ function parseOptions(): Options {
         workers: { type: "string", default: "6" },
         "chat-every": { type: "string", default: "30" },
         speakers: { type: "string", default: "0" },
+        "measure-share": { type: "string", default: "0.1" },
         moving: { type: "string", default: "1" },
         target: { type: "string" },
         // Bun loads .env, so HEALTH_TOKEN there works without putting it on the command line.
@@ -721,6 +777,7 @@ function parseOptions(): Options {
     chatEveryMs: int("chat-every", values["chat-every"], 0) * 1000,
     movingRatio: ratio("moving", values.moving),
     speakers: int("speakers", values.speakers, 0),
+    measureEvery: Math.max(1, Math.round(1 / Math.max(0.001, ratio("measure-share", values["measure-share"])))),
     port: int("port", values.port, 1),
     cluster: int("cluster", values.cluster, 0),
     capacity: int("capacity", values.capacity, 1),
@@ -895,7 +952,9 @@ async function runOrchestrator(): Promise<void> {
     workers.push(w);
   }
   const voiceEpoch = Date.now();
-  for (const w of workers) tell(w, { cmd: "config", baseUrl: httpUrl, chatEveryMs, movingRatio: opts.movingRatio, voiceEpoch });
+  for (const w of workers) {
+    tell(w, { cmd: "config", baseUrl: httpUrl, chatEveryMs, movingRatio: opts.movingRatio, voiceEpoch, measureEvery: opts.measureEvery });
+  }
 
   const roomIndex = (i: number) => (roomSize > 0 ? Math.floor(i / roomSize) : 0);
   const roomFor = (i: number) =>

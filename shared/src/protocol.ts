@@ -142,6 +142,13 @@ const Op = {
 
 /** Opcode of server snapshots, for callers that only need to recognize them. */
 export const SNAPSHOT_OPCODE = Op.snapshot;
+/** Opcodes a load-test bot reads (or skips) without a full decode. */
+export const SERVER_OPCODES = {
+  welcome: Op.welcome,
+  playerJoined: Op.player_joined,
+  playerLeft: Op.player_left,
+  view: Op.view,
+} as const;
 
 // ------------------------------------------------------------ snapshots by parts
 
