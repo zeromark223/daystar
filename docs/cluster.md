@@ -130,7 +130,8 @@ client has a single code path.
   `interest { room, on/off }` when it gains its first / loses its last local player
   in a room. Peers that are interested get that room's events:
   - `room_state` (all locally owned players) when interest starts,
-  - `player_joined` / `player_left`,
+  - `player_joined` / `player_left` (between servers; clients get them inside the
+    next snapshot),
   - `moves`: the locally owned players that changed, **one frame per room per peer per
     tick**, merged into the receiver's next tick. Cross-server visibility therefore
     costs up to one extra tick (≤ 50 ms), accepted to keep message counts flat,

@@ -39,6 +39,12 @@ class FakeSocket {
   }
 }
 
+const byNumber = (a: number, b: number) => a - b;
+
+/** Ids that joined / left, as carried by snapshots. */
+const joinedIn = (msgs: ServerMessage[]) => msgs.flatMap((m) => (m.t === "snapshot" ? m.joined.map((p) => p.id) : []));
+const leftIn = (msgs: ServerMessage[]) => msgs.flatMap((m) => (m.t === "snapshot" ? m.left : []));
+
 /** Fake Bun topics: fans a frame out to every socket subscribed to the channel, counting calls. */
 function fakeTopic() {
   const sockets: { channels: Set<string>; send(data: Uint8Array): void }[] = [];
@@ -65,6 +71,7 @@ function setup(topic?: ReturnType<typeof fakeTopic>) {
   });
   const welcome = sockets[0].received.find((m) => m.t === "welcome")!;
   const self = welcome.t === "welcome" ? welcome.players.find((p) => p.id === welcome.selfId)! : null!;
+  tick(); // drain the joins, which ride the next snapshot
   for (const s of sockets) s.take();
   const done = () => sockets.forEach((s) => s.close());
   return { room, tick, sockets, self, done };
@@ -122,25 +129,52 @@ test("with publish, broadcasts go out once per channel to joined players only", 
   done();
 });
 
-test("with publish, a newcomer gets welcome but not its own join", () => {
+test("with publish, a newcomer gets welcome now and everyone sees the join in the next snapshot", () => {
   const topic = fakeTopic();
-  const { room, sockets, done } = setup(topic);
+  const { room, tick, sockets, done } = setup(topic);
   const late = new FakeSocket();
   topic.sockets.push(late);
   late.events = room.accept(late);
   late.deliver({ t: "join", name: "Dan", appearance: 9, hostKey: "" });
-  assert.deepEqual(
-    late.take().map((m) => m.t),
-    ["welcome"],
-  );
-  for (const s of sockets) assert.deepEqual(s.take().map((m) => m.t), ["player_joined"]);
+  const welcome = late.take();
+  assert.deepEqual(welcome.map((m) => m.t), ["welcome"]);
+  const id = welcome[0].t === "welcome" ? welcome[0].selfId : -1;
+  for (const s of sockets) assert.deepEqual(s.take(), []);
+  tick();
+  // The newcomer hears its own join too; clients skip ids they already know.
+  for (const s of [...sockets, late]) assert.deepEqual(joinedIn(s.take()), [id]);
   late.close();
   done();
 });
 
-// ------------------------------------------------------------ cluster sync
+test("joins and leaves in one tick share a frame; a join and leave within it cancel", () => {
+  const { room, tick, sockets, done } = setup();
+  const [ann] = sockets;
+  const join = (name: string) => {
+    const s = new FakeSocket();
+    s.events = room.accept(s);
+    s.deliver({ t: "join", name, appearance: 0, hostKey: "" });
+    const w = s.take()[0];
+    return { s, id: w.t === "welcome" ? w.selfId : -1 };
+  };
+  const dan = join("Dan");
+  const eve = join("Eve");
+  const fay = join("Fay");
+  fay.s.close();
+  sockets[2].close();
+  tick();
+  const got = ann.take();
+  assert.equal(got.length, 1);
+  assert.deepEqual(joinedIn(got).sort(byNumber), [dan.id, eve.id].sort(byNumber));
+  assert.equal(leftIn(got).length, 1);
+  dan.s.close();
+  eve.s.close();
+  tick();
+  assert.deepEqual(leftIn(ann.take()).sort(byNumber), [dan.id, eve.id].sort(byNumber));
+  sockets.slice(0, 2).forEach((s) => s.close());
+});
 
-const byNumber = (a: number, b: number) => a - b;
+// ------------------------------------------------------------ cluster sync
 
 function syncedRoom() {
   const sent = { joined: [] as number[], left: [] as number[], moves: [] as number[][], chat: [] as string[] };
@@ -160,6 +194,7 @@ function syncedRoom() {
   const local = new FakeSocket();
   local.events = room.accept(local, 7);
   local.deliver({ t: "join", name: "Ann", appearance: 0, hostKey: "" });
+  tick(); // our own join rides the next snapshot
   const welcome = local.take().find((m) => m.t === "welcome")!;
   const self = welcome.t === "welcome" ? welcome.players.find((p) => p.id === 7)! : null!;
   return { room, tick, local, self, sent };
@@ -199,10 +234,8 @@ test("remote players appear, move, leave, and vanish with their server", () => {
   const { room, local, tick } = syncedRoom();
   room.remoteJoined(2, remoteInfo);
   room.remoteJoined(3, { ...remoteInfo, id: 43 });
-  assert.deepEqual(
-    local.take().map((m) => m.t),
-    ["player_joined", "player_joined"],
-  );
+  tick();
+  assert.deepEqual(joinedIn(local.take()), [42, 43]);
   // Only the owning server can move or remove a replica.
   room.remoteMoves(3, [{ id: 42, x: 6400, y: 5000, dir: "north", moving: true }]);
   room.remoteLeft(3, 42);
@@ -210,10 +243,8 @@ test("remote players appear, move, leave, and vanish with their server", () => {
   assert.deepEqual(local.take(), []);
   room.dropOwner(2);
   room.dropOwner(3);
-  assert.deepEqual(
-    local.take().map((m) => (m.t === "player_left" ? m.id : m.t)),
-    [42, 43],
-  );
+  tick();
+  assert.deepEqual(leftIn(local.take()), [42, 43]);
   assert.equal(room.playerCount, 1);
 });
 
@@ -230,13 +261,11 @@ test("a newcomer's welcome lists replicas, and full state for a peer lists only 
 });
 
 test("a repeated remote join refreshes state instead of announcing twice", () => {
-  const { room, local } = syncedRoom();
+  const { room, tick, local } = syncedRoom();
   room.remoteJoined(2, remoteInfo);
   room.remoteJoined(2, { ...remoteInfo, x: 700 });
-  assert.deepEqual(
-    local.take().map((m) => m.t),
-    ["player_joined"],
-  );
+  tick();
+  assert.deepEqual(joinedIn(local.take()), [42]);
 });
 
 // ------------------------------------------------------------ migration
@@ -274,8 +303,9 @@ test("handOff turns a local player into a replica silently; its old socket is ig
 });
 
 test("a migrating player joins where it was, without a second join announcement", async () => {
-  const { room, sockets, done } = setup();
+  const { room, tick, sockets, done } = setup();
   room.remoteJoined(2, remoteInfo);
+  tick();
   for (const s of sockets) s.take(); // the replica's own (legitimate) join
   const moved = new FakeSocket();
   const resume = Promise.resolve({ ...remoteInfo, x: 6300, y: 5100, dir: "west" as const });
@@ -286,7 +316,8 @@ test("a migrating player joins where it was, without a second join announcement"
   const welcome = moved.take().find((m) => m.t === "welcome");
   const me = welcome?.t === "welcome" ? welcome.players.find((p) => p.id === 42) : undefined;
   assert.deepEqual(me && [me.x, me.y, me.dir], [6300, 5100, "west"]);
-  for (const s of sockets) assert.ok(!s.take().some((m) => m.t === "player_joined"));
+  tick();
+  for (const s of sockets) assert.deepEqual(joinedIn(s.take()), []);
   assert.equal(room.playerCount, 4);
   moved.close();
   done();
@@ -308,7 +339,11 @@ function hostedRoom(opts: { sync?: ConstructorParameters<typeof Room>[1]["sync"]
     const self = welcome?.t === "welcome" ? welcome.players.find((p) => p.id === welcome.selfId) : undefined;
     return { s, self: self! };
   };
-  const everyone = (...sockets: FakeSocket[]) => sockets.forEach((s) => s.take());
+  /** Drain what everyone got so far, including joins waiting for the next snapshot. */
+  const everyone = (...sockets: FakeSocket[]) => {
+    tick();
+    sockets.forEach((s) => s.take());
+  };
   return { room, tick, join, everyone };
 }
 
@@ -455,6 +490,18 @@ test("a migrating speaker stays a speaker", async () => {
   await Promise.resolve();
   const welcome = moved.take().find((m) => m.t === "welcome");
   assert.equal(welcome?.t === "welcome" && welcome.players.find((p) => p.id === 42)?.role, "speaker");
+});
+
+test("a join announced in the next snapshot carries the role given since", () => {
+  const { tick, join, everyone } = hostedRoom();
+  const host = join("Hana", HOST_KEY);
+  const a = join("Ann");
+  everyone(host.s, a.s);
+  const b = join("Ben");
+  host.s.deliver({ t: "set_role", id: b.self.id, role: "speaker" });
+  tick();
+  const snap = a.s.take().find((m) => m.t === "snapshot");
+  assert.deepEqual(snap?.t === "snapshot" && snap.joined.map((p) => [p.id, p.role]), [[b.self.id, "speaker"]]);
 });
 
 test("idle rooms batch voice every 100 ms; a snapshot carries it at once", () => {

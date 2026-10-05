@@ -93,6 +93,10 @@ struct Pending {
     changed: IdSet,
     voice: Vec<VoiceFrame>,
     voice_since: f64,
+    /// Players who joined (described as they are at flush time) and ids that left;
+    /// both ride the group's next snapshot.
+    joined: Vec<u16>,
+    left: Vec<u16>,
 }
 
 struct Conn {
@@ -331,8 +335,10 @@ impl Room {
         infos.push(player.info());
         let chat: Vec<ChatMessage> = self.chat.iter().cloned().collect();
         self.send(conn, protocol::welcome(id, &infos, &chat, self.snapshot_hz() as u8));
-        // Before the newcomer is in the room, so it does not get its own join.
-        self.broadcast(protocol::player_joined(infos.last().unwrap()));
+        // The newcomer hears its own join too; clients skip players they already have.
+        for g in &mut self.pending {
+            g.joined.push(id);
+        }
         self.cells.entry(player.cell).or_default().insert(id);
         self.group_sizes[group] += 1;
         self.players.insert(id, player);
@@ -370,7 +376,15 @@ impl Room {
         self.group_sizes[p.group] -= 1;
         self.forget(id);
         self.stats.players.fetch_sub(1, Ordering::Relaxed);
-        self.broadcast(protocol::player_left(id));
+        for g in &mut self.pending {
+            // A join this group has not been told about yet cancels out instead.
+            match g.joined.iter().position(|&j| j == id) {
+                Some(i) => {
+                    g.joined.swap_remove(i);
+                }
+                None => g.left.push(id),
+            }
+        }
         self.apply_schedule(self.players.len());
     }
 
@@ -598,11 +612,13 @@ impl Room {
         let p = &self.pending[groups[0]];
         let period = 1000.0 / self.snapshot_hz() as f64;
         let voice_due = !p.voice.is_empty() && (!p.changed.is_empty() || now - p.voice_since + period >= VOICE_FLUSH_MS);
-        if p.changed.is_empty() && !voice_due {
+        let roster = !p.joined.is_empty() || !p.left.is_empty();
+        if p.changed.is_empty() && !voice_due && !roster {
             return false;
         }
-        let voice_part = protocol::snapshot_voice(if voice_due { &p.voice } else { &[] });
-        let has_voice = voice_due;
+        let joined: Vec<PlayerInfo> = p.joined.iter().filter_map(|id| self.players.get(id)).map(Player::info).collect();
+        let tail = protocol::snapshot_tail(if voice_due { &p.voice } else { &[] }, &joined, &p.left);
+        let has_tail = voice_due || roster;
 
         let mut stage: Vec<[u8; 7]> = Vec::new();
         let mut by_cell: HashMap<u16, Vec<(f64, f64, [u8; 7])>, FxBuild> = HashMap::default();
@@ -638,10 +654,10 @@ impl Room {
                     }
                 }
             }
-            if entries.is_empty() && !has_voice {
+            if entries.is_empty() && !has_tail {
                 continue;
             }
-            let data = protocol::assemble_snapshot(&entries, &voice_part);
+            let data = protocol::assemble_snapshot(&entries, &tail);
             self.stats.record_egress(data.len() * recipients);
             for id in ids {
                 let q = &self.players[id];
@@ -652,6 +668,8 @@ impl Room {
         }
         for &g in groups {
             self.pending[g].changed.clear();
+            self.pending[g].joined.clear();
+            self.pending[g].left.clear();
             if voice_due {
                 self.pending[g].voice.clear();
             }

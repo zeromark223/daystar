@@ -136,6 +136,16 @@ async function main(): Promise<void> {
     game!.addPlayer(p);
   };
 
+  const playerLeft = (id: number) => {
+    const name = people.nameOf(id);
+    if (name === undefined) return; // never seen (left before we joined)
+    people.remove(id);
+    player.remove(id);
+    game!.removePlayer(id);
+    chat!.addSystem(`${name} left.`);
+    updateCount();
+  };
+
   const handle = (msg: ServerMessage, from: Connection) => {
     if (!game || !chat || from !== conn) return;
     switch (msg.t) {
@@ -167,15 +177,9 @@ async function main(): Promise<void> {
         chat.addSystem(`${msg.player.name} joined.`);
         updateCount();
         break;
-      case "player_left": {
-        const name = people.nameOf(msg.id);
-        people.remove(msg.id);
-        player.remove(msg.id);
-        game.removePlayer(msg.id);
-        if (name) chat.addSystem(`${name} left.`);
-        updateCount();
+      case "player_left":
+        playerLeft(msg.id);
         break;
-      }
       case "role": {
         const before = people.roleOf(msg.id);
         people.setRole(msg.id, msg.role);
@@ -202,8 +206,17 @@ async function main(): Promise<void> {
         game.applyView(msg.from, msg.to, msg.players);
         break;
       case "snapshot":
+        // Joins first (positions may refer to them), leaves last. A newcomer also gets
+        // the joins already in its welcome, and its own: skip players we have.
+        for (const p of msg.joined) {
+          if (p.id === selfId || people.nameOf(p.id) !== undefined) continue;
+          addPlayer(p);
+          chat.addSystem(`${p.name} joined.`);
+        }
+        if (msg.joined.length) updateCount();
         game.applySnapshot(msg.players);
         player.push(msg.voice.filter((frame) => frame.id !== selfId));
+        for (const id of msg.left) playerLeft(id);
         break;
       case "correction":
         game.applyCorrection(msg.x, msg.y);

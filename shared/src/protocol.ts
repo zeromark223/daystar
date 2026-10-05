@@ -61,8 +61,13 @@ export type ServerMessage =
   | { t: "chat"; message: ChatMessage }
   | { t: "correction"; x: number; y: number }
   | { t: "error"; message: string }
-  /** Once per tick: players that changed, and voice frames received since the last tick. */
-  | { t: "snapshot"; players: PlayerState[]; voice: VoiceFrame[] }
+  /**
+   * Once per tick: players that changed, voice frames received since the last one,
+   * and who joined (full info) or left the room meanwhile. Joins and leaves ride the
+   * snapshot so a burst of arrivals costs no extra sends; a client applies `joined`
+   * first, then positions and voice, then `left`.
+   */
+  | { t: "snapshot"; players: PlayerState[]; voice: VoiceFrame[]; joined: PlayerInfo[]; left: number[] }
   | { t: "role"; id: number; role: Role }
   /** The room switched snapshot groups: snapshots now arrive `snapshotHz` times a second. */
   | { t: "rate"; snapshotHz: number }
@@ -171,16 +176,23 @@ export function snapshotEntry(p: PlayerState): Uint8Array {
   return bytes;
 }
 
-const VoicePart: Struct = { voice: Type.Object8, voice_Struct: VoiceFrameStruct };
+const TailPart: Struct = {
+  voice: Type.Object8,
+  voice_Struct: VoiceFrameStruct,
+  joined: Type.Object16,
+  joined_Struct: PlayerInfoStruct,
+  left: Type.Array16,
+  left_Type: Type.UInt16,
+};
 
-/** The voice part that ends a snapshot. */
-export function snapshotVoice(frames: VoiceFrame[]): Uint8Array {
-  return encode(VoicePart, { voice: frames });
+/** What ends a snapshot, the same for every cell: voice frames, joins and leaves. */
+export function snapshotTail(voice: VoiceFrame[], joined: PlayerInfo[], left: number[]): Uint8Array {
+  return encode(TailPart, { voice, joined: joined.map(infoToWire), left });
 }
 
-export function assembleSnapshot(entries: Uint8Array[], voice: Uint8Array): Uint8Array<ArrayBuffer> {
+export function assembleSnapshot(entries: Uint8Array[], tail: Uint8Array): Uint8Array<ArrayBuffer> {
   if (entries.length > 0xffff) throw new RangeError("Snapshot: too many players");
-  const out = new Uint8Array(3 + entries.length * SNAPSHOT_ENTRY_BYTES + voice.byteLength);
+  const out = new Uint8Array(3 + entries.length * SNAPSHOT_ENTRY_BYTES + tail.byteLength);
   out[0] = Op.snapshot;
   out[1] = entries.length & 0xff;
   out[2] = entries.length >> 8;
@@ -189,7 +201,7 @@ export function assembleSnapshot(entries: Uint8Array[], voice: Uint8Array): Uint
     out.set(e, o);
     o += SNAPSHOT_ENTRY_BYTES;
   }
-  out.set(voice, o);
+  out.set(tail, o);
   return out;
 }
 
@@ -217,6 +229,10 @@ const Schemas: Record<number, Struct> = {
     players_Struct: PlayerStateStruct,
     voice: Type.Object8,
     voice_Struct: VoiceFrameStruct,
+    joined: Type.Object16,
+    joined_Struct: PlayerInfoStruct,
+    left: Type.Array16,
+    left_Type: Type.UInt16,
   },
   [Op.migrate]: {},
   [Op.role]: { id: Type.UInt16, role: Type.UInt8 },
@@ -328,7 +344,11 @@ export function encodeServerMessage(msg: ServerMessage): Uint8Array<ArrayBuffer>
     case "error":
       return encode(Schemas[Op.error], msg, Op.error);
     case "snapshot":
-      return encode(Schemas[Op.snapshot], { players: msg.players.map(stateToWire), voice: msg.voice }, Op.snapshot);
+      return encode(
+        Schemas[Op.snapshot],
+        { players: msg.players.map(stateToWire), voice: msg.voice, joined: msg.joined.map(infoToWire), left: msg.left },
+        Op.snapshot,
+      );
     case "migrate":
       return encode(Schemas[Op.migrate], {}, Op.migrate);
     case "role":
@@ -362,8 +382,8 @@ export function decodeServerMessage(bytes: Uint8Array): ServerMessage | null {
       case Op.error:
         return { t: "error", ...decode<{ message: string }>(schema, bytes, 1) };
       case Op.snapshot: {
-        const m = decode<{ players: WireState[]; voice: VoiceFrame[] }>(schema, bytes, 1);
-        return { t: "snapshot", players: m.players.map(stateFromWire), voice: m.voice };
+        const m = decode<{ players: WireState[]; voice: VoiceFrame[]; joined: WireInfo[]; left: number[] }>(schema, bytes, 1);
+        return { t: "snapshot", players: m.players.map(stateFromWire), voice: m.voice, joined: m.joined.map(infoFromWire), left: m.left };
       }
       case Op.migrate:
         decode(schema, bytes, 1);

@@ -24,7 +24,7 @@ import {
   decodeClientMessage,
   encodeServerMessage,
   snapshotEntry,
-  snapshotVoice,
+  snapshotTail,
   type ChatMessage,
   type PlayerInfo,
   type PlayerState,
@@ -65,12 +65,15 @@ export const viewChannel = (cell: number, group: number) => `v${cell}:${group}`;
  */
 export type Publish = (channel: string, data: Uint8Array) => void;
 
-/** Changes and voice a snapshot group has not been sent yet. */
+/** Changes, voice, joins and leaves a snapshot group has not been sent yet. */
 interface Pending {
   changed: Set<Player>;
   voice: VoiceFrame[];
   /** When the oldest frame in `voice` arrived (Date.now()). */
   voiceSince: number;
+  /** Players who joined (described as they are at flush time) and ids that left. */
+  joined: Set<number>;
+  left: number[];
 }
 
 /** Events the runtime adapter forwards to the room for one peer. */
@@ -287,7 +290,7 @@ export class Room {
       this.forget(existing);
       this.markChanged(player);
     } else {
-      this.broadcast({ t: "player_joined", player: info });
+      this.queueJoined(info.id);
     }
   }
 
@@ -297,7 +300,7 @@ export class Room {
     this.players.delete(id);
     this.unfile(p);
     this.forget(p);
-    this.broadcast({ t: "player_left", id });
+    this.queueLeft(id);
   }
 
   /** Replicated moves go out to our clients with our next tick. */
@@ -456,8 +459,7 @@ export class Room {
       snapshotHz: this.snapshotHz,
     });
     // Our clients already see a migrating player; only its position may change.
-    if (!wasReplica) this.broadcast({ t: "player_joined", player: toInfo(player) });
-    // Subscribe after the announcement so the newcomer does not receive its own join.
+    if (!wasReplica) this.queueJoined(player.id);
     if (this.publish) {
       if (!peer.subscribe) throw new Error("Room uses publish but the peer cannot subscribe");
       peer.subscribe(ROOM_CHANNEL);
@@ -496,6 +498,32 @@ export class Room {
       }
     }
     if (this.snapshotHz !== before) this.broadcast({ t: "rate", snapshotHz: this.snapshotHz });
+  }
+
+  /**
+   * Joins and leaves go out with each group's next snapshot (one frame per player
+   * per tick however many arrive). The newcomer gets its own join and the ones
+   * already in its welcome too; clients ignore players they already have.
+   */
+  private queueJoined(id: number): void {
+    for (const g of this.pending) g.joined.add(id);
+  }
+
+  /** A join this group has not been told about yet cancels out instead. */
+  private queueLeft(id: number): void {
+    for (const g of this.pending) {
+      if (!g.joined.delete(id)) g.left.push(id);
+    }
+  }
+
+  /** Current state, so a role or position change since the join is not lost. */
+  private joinedInfos(ids: Set<number>): PlayerInfo[] {
+    const out: PlayerInfo[] = [];
+    for (const id of ids) {
+      const p = this.players.get(id);
+      if (p) out.push(toInfo(p));
+    }
+    return out;
   }
 
   private markChanged(p: Player): void {
@@ -605,7 +633,7 @@ export class Room {
     this.groupSizes[player.group]--;
     this.removeViewer(player);
     this.forget(player);
-    this.broadcast({ t: "player_left", id: player.id });
+    this.queueLeft(player.id);
     this.applySchedule(this.localCount);
     this.opts.onLeft?.(player.id);
     this.opts.sync?.left(player.id);
@@ -781,10 +809,11 @@ export class Room {
     const periodMs = 1000 / this.snapshotHz;
     const voiceDue =
       p.voice.length > 0 && (p.changed.size > 0 || now - p.voiceSince + periodMs >= VOICE_FLUSH_MS);
-    if (p.changed.size === 0 && !voiceDue) return false;
+    const roster = p.joined.size > 0 || p.left.length > 0;
+    if (p.changed.size === 0 && !voiceDue && !roster) return false;
     const voice = voiceDue ? p.voice : [];
     // Each part is encoded once and copied into the snapshots of every cell that sees it.
-    const voicePart = snapshotVoice(voice);
+    const tail = snapshotTail(voice, this.joinedInfos(p.joined), p.left);
 
     // The host and speakers are always in view; everyone else by map cell.
     const stage: Uint8Array[] = [];
@@ -823,14 +852,16 @@ export class Room {
           if (movers) for (const m of movers) if (inView(m.p.x, m.p.y, cell)) entries.push(m.entry);
         }
       }
-      if (entries.length === 0 && voice.length === 0) continue;
-      const data = assembleSnapshot(entries, voicePart);
+      if (entries.length === 0 && voice.length === 0 && !roster) continue;
+      const data = assembleSnapshot(entries, tail);
       groups.forEach((g, i) => {
         if (counts[i] > 0) this.publishView(cell, g, viewers, data, counts[i]);
       });
     }
     for (const g of groups) {
       this.pending[g].changed.clear();
+      this.pending[g].joined.clear();
+      this.pending[g].left = [];
       if (voiceDue) this.pending[g].voice = [];
     }
     return true;
@@ -864,7 +895,7 @@ function toInfo(p: Player): PlayerInfo {
 }
 
 function newPending(): Pending {
-  return { changed: new Set(), voice: [], voiceSince: 0 };
+  return { changed: new Set(), voice: [], voiceSince: 0, joined: new Set(), left: [] };
 }
 
 /** Per-player bookkeeping that starts over on every server. */

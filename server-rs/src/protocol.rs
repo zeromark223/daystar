@@ -98,7 +98,9 @@ mod op {
     pub const SET_ROLE: u8 = 4;
     pub const VOICE: u8 = 5;
     pub const WELCOME: u8 = 10;
+    #[allow(dead_code)]
     pub const PLAYER_JOINED: u8 = 11;
+    #[allow(dead_code)]
     pub const PLAYER_LEFT: u8 = 12;
     pub const CHAT_OUT: u8 = 13;
     pub const CORRECTION: u8 = 14;
@@ -184,12 +186,15 @@ pub fn welcome(self_id: u16, players: &[PlayerInfo], chat: &[ChatMessage], snaps
     w.done()
 }
 
+/// Not sent any more (joins ride snapshots); kept so the wire format stays complete.
+#[allow(dead_code)]
 pub fn player_joined(p: &PlayerInfo) -> Bytes {
     let mut w = W::new(op::PLAYER_JOINED, 32);
     w.info(p);
     w.done()
 }
 
+#[allow(dead_code)]
 pub fn player_left(id: u16) -> Bytes {
     let mut w = W::new(op::PLAYER_LEFT, 2);
     w.u16(id);
@@ -252,27 +257,36 @@ pub fn snapshot_entry(p: &PlayerState) -> [u8; 7] {
     [id[0], id[1], x[0], x[1], y[0], y[1], pack_motion(p.dir, p.moving)]
 }
 
-/// The voice part that ends a snapshot: a UInt8 count, then {id, seq, len, data}.
-pub fn snapshot_voice(frames: &[VoiceFrame]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(1 + frames.iter().map(|f| 6 + f.data.len()).sum::<usize>());
-    out.push(frames.len() as u8);
+/// What ends a snapshot after the entries: voice frames (UInt8 count, then
+/// {id, seq, len, data}), players who joined (UInt16 count of PlayerInfo) and
+/// ids that left (UInt16 count of UInt16). Encoded once per group per tick.
+pub fn snapshot_tail(frames: &[VoiceFrame], joined: &[PlayerInfo], left: &[u16]) -> Vec<u8> {
+    let cap = 5 + frames.iter().map(|f| 6 + f.data.len()).sum::<usize>() + joined.len() * 24 + left.len() * 2;
+    let mut w = W(Vec::with_capacity(cap));
+    w.u8(frames.len() as u8);
     for f in frames {
-        out.extend_from_slice(&f.id.to_le_bytes());
-        out.extend_from_slice(&f.seq.to_le_bytes());
-        out.extend_from_slice(&(f.data.len() as u16).to_le_bytes());
-        out.extend_from_slice(&f.data);
+        w.u16(f.id).u16(f.seq).u16(f.data.len() as u16);
+        w.0.extend_from_slice(&f.data);
     }
-    out
+    w.u16(joined.len() as u16);
+    for p in joined {
+        w.info(p);
+    }
+    w.u16(left.len() as u16);
+    for &id in left {
+        w.u16(id);
+    }
+    w.0
 }
 
-pub fn assemble_snapshot(entries: &[[u8; 7]], voice: &[u8]) -> Bytes {
-    let mut out = Vec::with_capacity(3 + entries.len() * 7 + voice.len());
+pub fn assemble_snapshot(entries: &[[u8; 7]], tail: &[u8]) -> Bytes {
+    let mut out = Vec::with_capacity(3 + entries.len() * 7 + tail.len());
     out.push(op::SNAPSHOT);
     out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
     for e in entries {
         out.extend_from_slice(e);
     }
-    out.extend_from_slice(voice);
+    out.extend_from_slice(tail);
     Bytes::from(out)
 }
 
@@ -440,7 +454,9 @@ mod tests {
                             data: Bytes::from(v["data"].as_array().unwrap().iter().map(|b| b.as_u64().unwrap() as u8).collect::<Vec<_>>()),
                         })
                         .collect();
-                    assemble_snapshot(&entries, &snapshot_voice(&frames))
+                    let joined: Vec<_> = m["joined"].as_array().unwrap().iter().map(info).collect();
+                    let left: Vec<_> = m["left"].as_array().unwrap().iter().map(u16_of).collect();
+                    assemble_snapshot(&entries, &snapshot_tail(&frames, &joined, &left))
                 }
                 "role" => role(u16_of(&m["id"]), role_of(&m["role"])),
                 "rate" => rate(m["snapshotHz"].as_u64().unwrap() as u8),

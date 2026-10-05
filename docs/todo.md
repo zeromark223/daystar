@@ -47,7 +47,8 @@ the loop p99 doubles (800 players: 66 ms with chat, 34 ms without; move p99 989 
 
 Plan: queue chat lines per room and send them inside the next tick's frame (snapshot +
 chat in one message per player), so a tick costs exactly N sends however chatty the room
-is. Chat gains at most 50 ms of latency. Same idea later for joins and leaves.
+is. Chat gains at most 50 ms of latency. Joins and leaves already work this way
+(appended to the snapshot, see README "Networking").
 
 ## Voice follow-ups
 

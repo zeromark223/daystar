@@ -8,7 +8,7 @@ import {
   quantize,
   assembleSnapshot,
   snapshotEntry,
-  snapshotVoice,
+  snapshotTail,
   type ClientMessage,
   type ServerMessage,
 } from "./protocol.ts";
@@ -37,8 +37,8 @@ test("server messages round-trip", () => {
     { t: "chat", message: chat },
     { t: "correction", x: 10, y: 20.5 },
     { t: "error", message: "nope" },
-    { t: "snapshot", players: [{ id: 1, x: 9999.75, y: 0, dir: "south", moving: true }], voice: [] },
-    { t: "snapshot", players: [], voice: [{ id: 2, seq: 4, data: new Uint8Array([9, 8]) }] },
+    { t: "snapshot", players: [{ id: 1, x: 9999.75, y: 0, dir: "south", moving: true }], voice: [], joined: [], left: [] },
+    { t: "snapshot", players: [], voice: [{ id: 2, seq: 4, data: new Uint8Array([9, 8]) }], joined: [player], left: [3, 65535] },
     { t: "migrate" },
     { t: "role", id: 7, role: "host" },
     { t: "rate", snapshotHz: 10 },
@@ -57,7 +57,8 @@ test("positions are quantized to the wire grid", () => {
 
 test("snapshot costs 7 bytes per player", () => {
   const players = Array.from({ length: 100 }, (_, i) => ({ id: i, x: i, y: i, dir: "south" as const, moving: false }));
-  assert.equal(encodeServerMessage({ t: "snapshot", players, voice: [] }).length, 1 + 2 + 100 * 7 + 1);
+  // + 1 (no voice) + 2 (no joins) + 2 (no leaves)
+  assert.equal(encodeServerMessage({ t: "snapshot", players, voice: [], joined: [], left: [] }).length, 1 + 2 + 100 * 7 + 5);
 });
 
 test("malformed or unknown frames decode to null", () => {
@@ -83,8 +84,11 @@ test("snapshots assembled from parts match the regular encoder", () => {
   }));
   const voice = [{ id: 3, seq: 9, data: new Uint8Array([1, 2, 3]) }];
   for (const v of [[], voice]) {
-    const regular = encodeServerMessage({ t: "snapshot", players, voice: v });
-    const parts = assembleSnapshot(players.map(snapshotEntry), snapshotVoice(v));
-    assert.deepEqual([...parts], [...regular]);
+    for (const joined of [[], [player]]) {
+      const left = joined.length ? [9, 10] : [];
+      const regular = encodeServerMessage({ t: "snapshot", players, voice: v, joined, left });
+      const parts = assembleSnapshot(players.map(snapshotEntry), snapshotTail(v, joined, left));
+      assert.deepEqual([...parts], [...regular]);
+    }
   }
 });

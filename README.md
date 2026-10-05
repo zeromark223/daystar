@@ -277,6 +277,12 @@ What we learned:
   20 Hz: 135 Mbps out instead of ~250 (-45%), for 28% of a core instead of 15%. The
   saving grows as more players spread out (about -75% at 3,000); a crowd standing in
   one spot gains nothing.
+- **Joins and leaves ride the snapshot:** instead of one `player_joined` /
+  `player_left` broadcast per event, a room queues them and appends them to each
+  group's next snapshot (a join and a leave in the same tick cancel out). Fifty joins
+  per second in a 5,000-player room used to be 250,000 extra sends per second; now
+  they add a few bytes to the frames each player gets anyway. A newcomer's welcome
+  still goes out at once.
 - **Overcharge** (`server/src/overcharge.ts`): when the server runs hot, every room
   sends fewer snapshots per player, 2 Hz at a time (20, 18, ... 10), and climbs back
   when there is room again. The load score is the highest of event loop p99 / 50 ms,
