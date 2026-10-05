@@ -26,6 +26,23 @@ its soft limit (`ulimit -n`, often 1024) to the hard limit at startup, like Bun,
 warns when that is still under 20,000; raise the hard limit (`ulimit -Hn`,
 `/etc/security/limits.conf`) for bigger rooms. The load test's bots need the same.
 
+## Docker and Coolify
+
+`server-rs/Dockerfile` builds the web client (Bun) and the server (Rust) into a
+~120 MB image; the build context is the repository root:
+
+```bash
+docker build -f server-rs/Dockerfile -t daystar-rs .
+docker run -p 3000:3000 -e ROOM_SECRET=... -e HEALTH_TOKEN=... daystar-rs
+```
+
+On Coolify: a new application from this repository with the **Dockerfile** build
+pack, Dockerfile location `server-rs/Dockerfile`, base directory `/`, port 3000.
+Set `ROOM_SECRET`, `HEALTH_TOKEN`, and `RS_THREADS` (1 to compare with the Bun
+server, 0 for every core of the VM); `EGRESS_BUDGET_MBPS` as for the Bun server.
+The image's health check runs `daystar-rs healthcheck` (GET /healthz), and the
+same `tools/loadtest.ts --target https://...` command tests it.
+
 ## Design
 
 - **One task per room** owns all of its state (no locks). Connections send it

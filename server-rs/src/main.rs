@@ -47,7 +47,26 @@ fn raise_fd_limit() -> Option<u64> {
     Some(limit.rlim_cur as u64)
 }
 
+/// `daystar-rs healthcheck`: exit 0 when GET /healthz on PORT answers 200 (for
+/// container health checks; slim images have no curl or wget).
+fn healthcheck() -> ! {
+    use std::io::{Read, Write};
+    let port = env("PORT").unwrap_or_else(|| "3000".into());
+    let ok = (|| {
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", port.parse().ok()?)).ok()?;
+        s.set_read_timeout(Some(std::time::Duration::from_secs(2))).ok()?;
+        s.write_all(b"GET /healthz HTTP/1.0\r\nHost: localhost\r\n\r\n").ok()?;
+        let mut reply = String::new();
+        s.read_to_string(&mut reply).ok()?;
+        (reply.split_whitespace().nth(1) == Some("200")).then_some(())
+    })();
+    std::process::exit(if ok.is_some() { 0 } else { 1 })
+}
+
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("healthcheck") {
+        healthcheck();
+    }
     #[cfg(unix)]
     match raise_fd_limit() {
         Some(n) if n < 20_000 => eprintln!(

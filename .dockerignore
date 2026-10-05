@@ -4,3 +4,9 @@ assets
 tools
 .git
 *.log
+server-rs/target
+.env
+.loadtest-last.json
+ref
+coolify.config.json
+*.zip
