@@ -1,6 +1,7 @@
 # Daystar's Rust game server (standalone), with the web client.
-# Build from the repository root:
-#   docker build -f server-rs/Dockerfile -t daystar-rs .
+# Lives at the repository root because the build needs client/ and shared/ too
+# (the context must be the root; Coolify: base directory "/", Dockerfile "/Dockerfile.rust").
+#   docker build -f Dockerfile.rust -t daystar-rs .
 #   docker run -p 3000:3000 -e ROOM_SECRET=... daystar-rs
 
 FROM oven/bun:1.4.2-alpine AS client

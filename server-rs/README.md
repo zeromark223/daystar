@@ -28,16 +28,17 @@ warns when that is still under 20,000; raise the hard limit (`ulimit -Hn`,
 
 ## Docker and Coolify
 
-`server-rs/Dockerfile` builds the web client (Bun) and the server (Rust) into a
-~120 MB image; the build context is the repository root:
+`Dockerfile.rust` (at the repository root, because the build also needs `client/`
+and `shared/`) builds the web client (Bun) and the server (Rust) into a ~120 MB
+image:
 
 ```bash
-docker build -f server-rs/Dockerfile -t daystar-rs .
+docker build -f Dockerfile.rust -t daystar-rs .
 docker run -p 3000:3000 -e ROOM_SECRET=... -e HEALTH_TOKEN=... daystar-rs
 ```
 
 On Coolify: a new application from this repository with the **Dockerfile** build
-pack, Dockerfile location `server-rs/Dockerfile`, base directory `/`, port 3000.
+pack, base directory `/` and Dockerfile location `/Dockerfile.rust`, port 3000.
 Set `ROOM_SECRET`, `HEALTH_TOKEN`, and `RS_THREADS` (1 to compare with the Bun
 server, 0 for every core of the VM); `EGRESS_BUDGET_MBPS` as for the Bun server.
 The image's health check runs `daystar-rs healthcheck` (GET /healthz), and the
