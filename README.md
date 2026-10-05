@@ -81,10 +81,16 @@ tools/          load test
 - Brightness falls off beyond 60% of the radius and reaches zero at the edge, where a
   player is invisible to others (you still see a faint ring around yourself). This is
   visual only: positions are still sent to everyone.
-- Appearance: star, planet or ringed planet, in one of eight colors; one byte on the wire.
+- Appearance: eleven kinds of body (star, planet, ringed planet, comet, moon, gas giant,
+  black hole, binary star, pulsar, planet with a moon, UFO) in one of eight colors; one
+  byte on the wire. Bodies are painted in code (`client/src/game/bodies.ts`) and
+  animated with transforms only; most wear a face that blinks, looks where it goes and
+  opens its mouth with the speaker's voice.
 - Newcomers appear near someone already in the room, or on a ring around the sun.
 - Sky, nebulae, sun, glows and trails are generated at startup (canvas gradients and
   PixiJS graphics); the minimap and wheel / `+` `-` zoom help finding people.
+- On touch screens, dragging anywhere brings up a thumbstick under the finger (slower
+  near its center); a tap still walks to the tapped point and two fingers pinch to zoom.
 
 ## Roles and voice
 

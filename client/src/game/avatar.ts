@@ -5,7 +5,8 @@ import type { Direction } from "../../../shared/src/direction.ts";
 import type { PlayerInfo } from "../../../shared/src/protocol.ts";
 import { ROLE_LABELS, type Role } from "../../../shared/src/roles.ts";
 import { brightnessAt } from "../../../shared/src/space.ts";
-import { glowTexture, planetTexture } from "./textures.ts";
+import { BodyView, SIZES } from "./bodies.ts";
+import { glowTexture } from "./textures.ts";
 
 const BUBBLE_MS = 6000;
 const BUBBLE_MAX_WIDTH = 220;
@@ -33,71 +34,12 @@ const TRAIL_EVERY_MS = 45;
 const MIN_SCREEN_SCALE = 0.55;
 const ROLE_COLOR = 0xffd166;
 
-/** Size of each kind of body, in world pixels at zoom 1. */
-const SIZES: Record<BodyKind, { core: number; glow: number }> = {
-  star: { core: 7, glow: 170 },
-  planet: { core: 14, glow: 130 },
-  ringed: { core: 12, glow: 130 },
-};
-
 interface Sample {
   t: number;
   x: number;
   y: number;
   dir: Direction;
   moving: boolean;
-}
-
-function lighten(color: number, amount: number): number {
-  const r = (color >> 16) & 0xff;
-  const g = (color >> 8) & 0xff;
-  const b = color & 0xff;
-  const mix = (c: number) => Math.round(c + (255 - c) * amount);
-  return (mix(r) << 16) | (mix(g) << 8) | mix(b);
-}
-
-/** Half of an ellipse (the back or front of a planet's ring). */
-function ringHalf(g: Graphics, rx: number, ry: number, front: boolean, color: number): void {
-  const steps = 24;
-  const from = front ? 0 : Math.PI;
-  g.moveTo(Math.cos(from) * rx, Math.sin(from) * ry);
-  for (let i = 1; i <= steps; i++) {
-    const a = from + (i / steps) * Math.PI;
-    g.lineTo(Math.cos(a) * rx, Math.sin(a) * ry);
-  }
-  g.stroke({ color, width: 2.2, alpha: 0.85 });
-}
-
-/** The body itself (without the glow), drawn around (0, 0). */
-function drawBody(kind: BodyKind, color: number): Container {
-  const r = SIZES[kind].core;
-  if (kind === "star") {
-    // A bright core with a four-pointed sparkle.
-    const g = new Graphics();
-    const spike = r * 3.2;
-    g.poly([0, -spike, r * 0.35, 0, 0, spike, -r * 0.35, 0]).fill({ color: lighten(color, 0.6), alpha: 0.9 });
-    g.poly([-spike, 0, 0, r * 0.35, spike, 0, 0, -r * 0.35]).fill({ color: lighten(color, 0.6), alpha: 0.9 });
-    g.circle(0, 0, r).fill({ color: lighten(color, 0.45) });
-    g.circle(0, 0, r * 0.55).fill({ color: 0xffffff });
-    return g;
-  }
-  // Planets: a shaded sphere, with a ring passing behind and in front of it.
-  const body = new Container();
-  const ringColor = lighten(color, 0.35);
-  if (kind === "ringed") {
-    const back = new Graphics();
-    ringHalf(back, r * 2.3, r * 0.75, false, ringColor);
-    body.addChild(back);
-  }
-  const sphere = new Sprite({ texture: planetTexture(color, r), anchor: 0.5 });
-  sphere.width = sphere.height = r * 2;
-  body.addChild(sphere);
-  if (kind === "ringed") {
-    const front = new Graphics();
-    ringHalf(front, r * 2.3, r * 0.75, true, ringColor);
-    body.addChild(front);
-  }
-  return body;
 }
 
 /**
@@ -119,7 +61,10 @@ export class Avatar {
   private readonly color: number;
   private readonly kind: BodyKind;
   private readonly body = new Container();
-  private readonly core: Container;
+  private readonly core: BodyView;
+  /** Last drawn position and the velocity it implies (world px/s), for faces and tails. */
+  private lastDrawn = { x: 0, y: 0, t: 0 };
+  private velocity = { vx: 0, vy: 0 };
   private readonly trail = new Graphics();
   private readonly trailPoints: { x: number; y: number }[] = [];
   private lastTrailAt = 0;
@@ -159,9 +104,9 @@ export class Avatar {
 
     const glow = new Sprite({ texture: glowTexture(), anchor: 0.5, blendMode: "add", tint: this.color });
     glow.width = glow.height = SIZES[this.kind].glow;
-    this.core = drawBody(this.kind, this.color);
+    this.core = new BodyView(this.kind, look.colorIndex);
     this.ring = new Graphics().circle(0, 0, SIZES[this.kind].core * 2.4).stroke({ color: ROLE_COLOR, width: 2, alpha: 0.9 });
-    this.body.addChild(glow, this.ring, this.core);
+    this.body.addChild(glow, this.ring, this.core.view);
     bodies.addChild(this.body);
     if (isSelf) {
       // Outside the body so it does not fade with it.
@@ -170,6 +115,8 @@ export class Avatar {
       bodies.addChild(this.marker);
     }
     this.trail.blendMode = "add";
+    // A comet draws its own tail.
+    this.trail.renderable = this.kind !== "comet";
     trails.addChild(this.trail);
 
     this.label = new Text({
@@ -323,7 +270,8 @@ export class Avatar {
     this.body.position.set(this.x, this.y);
     this.body.scale.set(scale);
     this.body.alpha = brightness;
-    if (this.kind === "star") this.core.rotation = now * 0.0006;
+    this.trackVelocity(now);
+    if (this.body.visible) this.core.update(now, { ...this.velocity, moving: this.moving }, this.voiceLevel);
     if (this.ring.visible) {
       this.ring.scale.set(1 + this.voiceLevel * 0.45);
       this.ring.alpha = 0.45 + this.voiceLevel * 0.55;
@@ -342,6 +290,22 @@ export class Avatar {
     this.tag.alpha = this.isSelf ? Math.max(brightness, 0.6) : brightness;
     this.tag.visible = this.tag.alpha > 0.02;
     this.renderBubble(now);
+  }
+
+  private trackVelocity(now: number): void {
+    const last = this.lastDrawn;
+    const dt = (now - last.t) / 1000;
+    if (dt > 0 && dt < 0.25) {
+      // Smoothed: interpolated positions arrive in small uneven steps.
+      const k = 0.25;
+      this.velocity.vx += ((this.x - last.x) / dt - this.velocity.vx) * k;
+      this.velocity.vy += ((this.y - last.y) / dt - this.velocity.vy) * k;
+    } else {
+      this.velocity.vx = this.velocity.vy = 0;
+    }
+    last.x = this.x;
+    last.y = this.y;
+    last.t = now;
   }
 
   /** The host's name and bubble float above the sun. */
@@ -382,7 +346,8 @@ export class Avatar {
     }
     this.trail.clear();
     if (pts.length < 2 || brightness <= 0) return;
-    const width = SIZES[this.kind].core * 1.1 * scale;
+    // Capped so big bodies do not drag a fat band behind them.
+    const width = Math.min(SIZES[this.kind].core, 11) * 1.1 * scale;
     for (let i = 1; i < pts.length; i++) {
       const k = i / pts.length;
       this.trail

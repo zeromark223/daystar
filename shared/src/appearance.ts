@@ -3,13 +3,34 @@
  * Drawn procedurally by the client; on the wire it is one byte, kind * colors + color.
  */
 
-export const BODY_KINDS = ["star", "planet", "ringed"] as const;
+// New kinds go at the end: ids already stored in browsers keep their meaning.
+export const BODY_KINDS = [
+  "star",
+  "planet",
+  "ringed",
+  "comet",
+  "moon",
+  "gas",
+  "hole",
+  "binary",
+  "pulsar",
+  "moonlet",
+  "ufo",
+] as const;
 export type BodyKind = (typeof BODY_KINDS)[number];
 
 export const BODY_LABELS: Record<BodyKind, string> = {
   star: "Star",
   planet: "Planet",
-  ringed: "Ringed planet",
+  ringed: "Ringed",
+  comet: "Comet",
+  moon: "Moon",
+  gas: "Gas giant",
+  hole: "Black hole",
+  binary: "Binary star",
+  pulsar: "Pulsar",
+  moonlet: "Planet + moon",
+  ufo: "UFO",
 };
 
 export const PALETTE = [

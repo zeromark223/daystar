@@ -10,6 +10,7 @@ import { Avatar } from "./avatar.ts";
 import { KeyboardInput } from "./input.ts";
 import { Minimap } from "./minimap.ts";
 import { SpaceScene } from "./space-scene.ts";
+import { TouchStick } from "./touch.ts";
 
 export interface GameCallbacks {
   sendMove(x: number, y: number, dir: Direction, moving: boolean): void;
@@ -41,6 +42,7 @@ export class Game {
   private readonly overlay = new Container();
   private readonly avatars = new Map<number, Avatar>();
   private readonly keyboard = new KeyboardInput();
+  private touch: TouchStick | null = null;
   private zoom: number;
   private selfId = -1;
   private tapTarget: { x: number; y: number } | null = null;
@@ -70,6 +72,7 @@ export class Game {
     app.stage.addChild(game.scene.sky, game.world, game.overlay, game.minimap.view);
     game.setupPointer();
     game.setupZoom();
+    game.touch = new TouchStick(app.canvas, () => !game.selfIsHost, (factor) => game.zoomBy(factor));
     game.minimap.layout(app.screen.width, app.screen.height);
     app.renderer.on("resize", (w: number, h: number) => game.minimap.layout(w, h));
     app.ticker.add((ticker) => game.update(ticker.deltaMS));
@@ -189,6 +192,7 @@ export class Game {
     this.app.stage.hitArea = new Rectangle(0, 0, 1e6, 1e6);
     this.app.stage.on("pointertap", (e) => {
       (document.activeElement as HTMLElement | null)?.blur();
+      if (this.touch?.wasGesture()) return; // a thumbstick drag or a pinch, not a tap
       if (this.selfIsHost) {
         // The host does not move; a tap picks a player instead.
         const picked = this.playerAt(e.global.x, e.global.y);
@@ -203,10 +207,12 @@ export class Game {
   }
 
   /** Mouse wheel and +/- keys zoom around the player. */
+  private zoomBy(factor: number): void {
+    this.zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, this.zoom * factor));
+  }
+
   private setupZoom(): void {
-    const zoomBy = (factor: number) => {
-      this.zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, this.zoom * factor));
-    };
+    const zoomBy = (factor: number) => this.zoomBy(factor);
     this.app.canvas.addEventListener(
       "wheel",
       (e) => {
@@ -265,6 +271,15 @@ export class Game {
     if (!self || self.role === "host") return;
 
     let { x: vx, y: vy } = this.keyboard.vector();
+    /** Share of full speed: the thumbstick walks slower near its center. */
+    let throttle = 1;
+    if (vx === 0 && vy === 0 && this.touch) {
+      const stick = this.touch.vector();
+      if (stick.x !== 0 || stick.y !== 0) {
+        ({ x: vx, y: vy } = stick);
+        throttle = Math.min(1, Math.hypot(vx, vy) / 0.6);
+      }
+    }
     if (vx !== 0 || vy !== 0) {
       this.tapTarget = null;
     } else if (this.tapTarget) {
@@ -280,7 +295,7 @@ export class Game {
     let dir = self.dir;
     if (vx !== 0 || vy !== 0) {
       const len = Math.hypot(vx, vy);
-      let step = MOVE_SPEED * dt;
+      let step = MOVE_SPEED * dt * throttle;
       if (this.tapTarget) step = Math.min(step, len);
       let next = moveInSpace(self.x, self.y, (vx / len) * step, (vy / len) * step);
       // Snap to the wire grid so the server validates exactly this position.

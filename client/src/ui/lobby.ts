@@ -9,7 +9,7 @@ import {
   type AppearanceId,
   type BodyKind,
 } from "../../../shared/src/appearance.ts";
-import { paintPlanet } from "../game/textures.ts";
+import { paintBody } from "../game/bodies.ts";
 
 const NAME_KEY = "daystar:name";
 const APPEARANCE_KEY = "daystar:appearance";
@@ -34,9 +34,9 @@ function hex(color: number): string {
   return `#${color.toString(16).padStart(6, "0")}`;
 }
 
-/** A small canvas drawing of a body, matching the in-game look closely enough. */
-function drawPreview(canvas: HTMLCanvasElement, kind: BodyKind, color: number): void {
-  const size = 96;
+/** A small canvas drawing of a body, made from the same parts as in the game. */
+function drawPreview(canvas: HTMLCanvasElement, kind: BodyKind, colorIndex: number): void {
+  const size = 72;
   const dpr = window.devicePixelRatio || 1;
   canvas.width = canvas.height = size * dpr;
   canvas.style.width = canvas.style.height = `${size}px`;
@@ -44,46 +44,16 @@ function drawPreview(canvas: HTMLCanvasElement, kind: BodyKind, color: number): 
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, size, size);
   const c = size / 2;
+  const color = PALETTE[colorIndex].color;
   const glow = ctx.createRadialGradient(c, c, 0, c, c, c);
-  glow.addColorStop(0, hex(color));
-  glow.addColorStop(0.3, `${hex(color)}66`);
+  glow.addColorStop(0, `${hex(color)}aa`);
+  glow.addColorStop(0.3, `${hex(color)}44`);
   glow.addColorStop(1, `${hex(color)}00`);
   ctx.fillStyle = glow;
   ctx.fillRect(0, 0, size, size);
-  if (kind === "star") {
-    ctx.fillStyle = "#ffffffdd";
-    ctx.beginPath();
-    ctx.moveTo(c, c - 26);
-    ctx.lineTo(c + 3, c);
-    ctx.lineTo(c, c + 26);
-    ctx.lineTo(c - 3, c);
-    ctx.closePath();
-    ctx.moveTo(c - 26, c);
-    ctx.lineTo(c, c + 3);
-    ctx.lineTo(c + 26, c);
-    ctx.lineTo(c, c - 3);
-    ctx.closePath();
-    ctx.fill();
-    ctx.fillStyle = "#ffffff";
-    ctx.beginPath();
-    ctx.arc(c, c, 6, 0, Math.PI * 2);
-    ctx.fill();
-    return;
-  }
-  const r = kind === "planet" ? 15 : 13;
-  if (kind === "ringed") {
-    ctx.strokeStyle = "#ffffffaa";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.ellipse(c, c, r * 2.3, r * 0.75, 0, Math.PI, Math.PI * 2);
-    ctx.stroke();
-  }
-  paintPlanet(ctx, c, c, r, color);
-  if (kind === "ringed") {
-    ctx.beginPath();
-    ctx.ellipse(c, c, r * 2.3, r * 0.75, 0, 0, Math.PI);
-    ctx.stroke();
-  }
+  // Wide kinds (rings, disks, orbits) are drawn a little smaller to fit.
+  const wide = kind === "ringed" || kind === "hole" || kind === "moonlet" || kind === "ufo" || kind === "pulsar";
+  paintBody(ctx, kind, colorIndex, c, c, wide ? 1.05 : kind === "gas" ? 1.3 : 1.6);
 }
 
 export interface LobbyChoice {
@@ -159,10 +129,9 @@ export async function runLobby(
   colorGrid.replaceChildren(...swatches);
 
   function refresh(): void {
-    const color = PALETTE[colorIndex].color;
     for (const k of kindButtons) {
       k.button.setAttribute("aria-checked", String(k.kind === kind));
-      drawPreview(k.canvas, k.kind, color);
+      drawPreview(k.canvas, k.kind, colorIndex);
     }
     swatches.forEach((s, i) => s.setAttribute("aria-checked", String(i === colorIndex)));
   }

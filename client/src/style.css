@@ -160,8 +160,8 @@ button:disabled {
 
 .kind-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 10px;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
 }
 
 .kind {
@@ -173,7 +173,9 @@ button:disabled {
   border: 1px solid var(--panel-border);
   color: var(--ink);
   font-weight: 500;
-  font-size: 0.9rem;
+  font-size: 0.8rem;
+  line-height: 1.2;
+  text-align: center;
 }
 
 .kind[aria-checked="true"] {
@@ -319,6 +321,13 @@ button:disabled {
 @media (max-width: 600px) {
   .hint {
     display: none;
+  }
+
+  .hint.touch {
+    display: block;
+    top: 112px;
+    bottom: auto;
+    right: 16px;
   }
 
   .chat {
@@ -520,4 +529,30 @@ button.secondary {
   .people {
     top: 108px;
   }
+}
+
+/* ---------- touch thumbstick ---------- */
+
+.stick {
+  position: fixed;
+  z-index: 4;
+  width: 112px;
+  height: 112px;
+  margin: -56px 0 0 -56px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(232, 236, 255, 0.35);
+  background: radial-gradient(circle, rgba(142, 162, 255, 0.16), rgba(142, 162, 255, 0.04) 70%);
+  pointer-events: none;
+}
+
+.stick-knob {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 46px;
+  height: 46px;
+  margin: -23px 0 0 -23px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #fff8e0, var(--accent) 55%, #c99a2e);
+  box-shadow: 0 0 18px rgba(255, 209, 102, 0.45);
 }

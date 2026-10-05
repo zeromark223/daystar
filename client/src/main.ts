@@ -44,7 +44,12 @@ const RECONNECT_ATTEMPTS = 5;
 const HINTS = {
   player: "WASD / arrows or tap to move · wheel or +/− to zoom · Enter to chat · Esc to stop typing",
   host: "You are the sun · tap a player to choose speakers · wheel or +/− to zoom · Enter to chat",
+  touchPlayer: "Drag anywhere to move · tap to go there · pinch to zoom",
+  touchHost: "You are the sun · tap a player to choose speakers · pinch to zoom",
 };
+const TOUCH = matchMedia("(pointer: coarse)").matches;
+/** On phones the hint is shown for a while after joining, then gets out of the way. */
+const TOUCH_HINT_MS = 10_000;
 
 async function main(): Promise<void> {
   let roomId = roomFromUrl();
@@ -54,6 +59,7 @@ async function main(): Promise<void> {
   const count = document.getElementById("hud-count")!;
   const roleChip = document.getElementById("hud-role")!;
   const hint = document.getElementById("hint")!;
+  let touchHintTimer: ReturnType<typeof setTimeout> | undefined;
   const micButton = document.getElementById("mic-button") as HTMLButtonElement;
   const soundButton = document.getElementById("sound-button") as HTMLButtonElement;
   let game: Game | null = null;
@@ -120,7 +126,13 @@ async function main(): Promise<void> {
     roleChip.hidden = role === "guest";
     roleChip.textContent = ROLE_LABELS[role];
     roleChip.className = `role-chip ${role}`;
-    hint.textContent = role === "host" ? HINTS.host : HINTS.player;
+    if (TOUCH) hint.textContent = role === "host" ? HINTS.touchHost : HINTS.touchPlayer;
+    else hint.textContent = role === "host" ? HINTS.host : HINTS.player;
+    if (TOUCH && (!announce || before !== role)) {
+      hint.classList.add("touch");
+      clearTimeout(touchHintTimer);
+      touchHintTimer = setTimeout(() => hint.classList.remove("touch"), TOUCH_HINT_MS);
+    }
     if (!canSpeak(role)) mic.stop();
     renderMic();
     if (!announce || before === role) return;
