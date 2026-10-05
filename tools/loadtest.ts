@@ -15,9 +15,9 @@
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
-import { readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { APPEARANCE_COUNT, type AppearanceId } from "../shared/src/appearance.ts";
 import type { Direction } from "../shared/src/direction.ts";
 import { canBeAt, moveInSpace } from "../shared/src/space.ts";
@@ -623,6 +623,12 @@ interface HealthReport {
 const USAGE = `Usage: bun tools/loadtest.ts [options]   (or: bun run loadtest [options], not on Windows)
 
   --steps <n,n,...>    total bot counts to ramp through         (default 50,100,200)
+  --max <n>            instead of steps: add bots without pause (at --ramp) up to n,
+                       then hold --hold seconds; a row every --report-every seconds
+  --report-every <s>   seconds per row with --max                (default 5)
+  --log <file>         also write the rows as CSV                (default
+                       loadtest-logs/<time>-<host>.csv)
+  --no-log             do not write a CSV file
   --room-size <n>      bots per room; 0 = everyone in one room   (default 0)
   --hold <s>           seconds at each step; 2nd half measured   (default 20)
   --ramp <n>           new connections per second                (default 100)
@@ -644,7 +650,7 @@ const USAGE = `Usage: bun tools/loadtest.ts [options]   (or: bun run loadtest [o
   --port <n>           port for the spawned server or agent      (default 3300)
   --room-prefix <s>    rooms are <prefix>-all or <prefix>-0, -1, ... (default load;
                        not used with --speakers)
-  --keep-going         continue ramping after a failed step
+  --keep-going         continue ramping after a failed step (--max always goes on)
   --last               reuse the options of the previous run; options given with it
                        override them, e.g. --last --hold 60
   -h, --help           show this help`;
@@ -654,6 +660,11 @@ const LAST_FILE = resolve(ROOT, ".loadtest-last.json");
 
 interface Options {
   steps: number[];
+  /** --max: ramp without pause up to this many bots; null for steps. */
+  max: number | null;
+  reportEvery: number;
+  /** CSV log path, or null. */
+  log: string | null;
   roomSize: number;
   hold: number;
   ramp: number;
@@ -715,6 +726,10 @@ function parseOptions(): Options {
       allowPositionals: false,
       options: {
         steps: { type: "string", default: "50,100,200" },
+        max: { type: "string" },
+        "report-every": { type: "string", default: "5" },
+        log: { type: "string" },
+        "no-log": { type: "boolean", default: false },
         "room-size": { type: "string", default: "0" },
         hold: { type: "string", default: "20" },
         ramp: { type: "string", default: "100" },
@@ -783,18 +798,34 @@ function parseOptions(): Options {
     capacity: int("capacity", values.capacity, 1),
     roomPrefix: values["room-prefix"],
     keepGoing: values["keep-going"],
+    max: values.max === undefined ? null : int("max", values.max, 1),
+    reportEvery: int("report-every", values["report-every"], 1),
+    log: values["no-log"] ? null : (values.log ?? defaultLogPath(values.target)),
     healthToken: values["health-token"],
     target: values.target === undefined ? null : parseTarget(values.target),
   };
   if (options.speakers > MAX_SPEAKERS + 1) fail(`--speakers is at most ${MAX_SPEAKERS + 1} (the host plus ${MAX_SPEAKERS})`);
   const perRoom = options.roomSize > 0 ? options.roomSize : Infinity;
-  if (options.speakers > Math.min(perRoom, options.steps[0])) fail("--speakers must fit in a room and in the first step");
+  const firstCount = options.max ?? options.steps[0];
+  if (options.speakers > Math.min(perRoom, firstCount)) fail("--speakers must fit in a room and in the first step");
   // The server keeps 5 minutes of samples; a longer window would be cut short.
   if (options.hold / 2 > 290) fail("--hold must be at most 580 seconds");
 
   // A bare run (no options) keeps the saved ones instead of erasing them.
   if (hadOptions) writeFileSync(LAST_FILE, JSON.stringify({ argv, savedAt: new Date().toISOString() }, null, 2) + "\n");
   return options;
+}
+
+/** loadtest-logs/2026-10-04T12-30-05-meet.example.com.csv (git-ignored). */
+function defaultLogPath(target: string | undefined): string {
+  const stamp = new Date().toISOString().slice(0, 19).replace(/:/g, "-");
+  let host = "local";
+  try {
+    if (target) host = new URL(target.includes("://") ? target : `https://${target}`).host.replace(/[^a-zA-Z0-9.-]/g, "_");
+  } catch {
+    // parseTarget reports bad targets
+  }
+  return resolve(ROOT, "loadtest-logs", `${stamp}-${host}.csv`);
 }
 
 /** Accepts http(s):// or ws(s):// URLs; any path (e.g. a room link) is ignored. */
@@ -865,6 +896,7 @@ const BUN = process.execPath;
 async function runOrchestrator(): Promise<void> {
   const opts = parseOptions();
   const { steps, roomSize, hold, ramp, chatEveryMs, roomPrefix, speakers } = opts;
+  const maxBots = opts.max ?? steps.at(-1)!;
   const workerCount = opts.workers;
 
   // Either spawn a local server or use the remote one; both report through /api/health.
@@ -920,7 +952,7 @@ async function runOrchestrator(): Promise<void> {
   console.log(`Bots walk ${Math.round(opts.movingRatio * 100)}% of the time${chatEveryMs ? "" : ", no chat"}`);
 
   // With --speakers the server creates the rooms, and hands out their host keys.
-  const roomCount = roomSize > 0 ? Math.ceil(steps.at(-1)! / roomSize) : 1;
+  const roomCount = roomSize > 0 ? Math.ceil(maxBots / roomSize) : 1;
   const created: { room: string; hostKey: string }[] = [];
   if (speakers > 0) {
     for (let i = 0; i < roomCount; i++) {
@@ -980,47 +1012,60 @@ async function runOrchestrator(): Promise<void> {
     };
   };
   let total = 0;
+  const startedAt = Date.now();
+  const timeCol = opts.max !== null;
   console.log(
-    "bots | rooms | snap Hz | srv players | srv CPU | load | out Mbps | loop p99 | tick p99 | gc/s | gc max ms | RSS MB | move p50/p99 ms | snap gap p50/p99/max ms | chat p50/p99 ms | voice p50/p99 ms | voice rx | in MB/s | corr | drops | migr | rejoin | verdict",
+    (timeCol ? "   t s | " : "") +
+      "bots | rooms | snap Hz | srv players | srv CPU | load | out Mbps | loop p99 | tick p99 | gc/s | gc max ms | RSS MB | move p50/p99 ms | snap gap p50/p99/max ms | chat p50/p99 ms | voice p50/p99 ms | voice rx | in MB/s | corr | drops | migr | rejoin | verdict",
   );
 
-  for (const target of steps) {
-    // Ramp up at a fixed connection rate.
-    while (total < target) {
-      const batch = Math.min(target - total, Math.max(1, Math.round(ramp / 10)));
-      for (let i = 0; i < batch; i++, total++) {
-        const { worker, cmd } = assign(total);
-        tell(worker, cmd);
-        members.set(cmd.room, (members.get(cmd.room) ?? 0) + 1);
-      }
-      await sleep(100);
-    }
-    await sleep((hold / 2) * 1000);
+  // CSV log: what was run, then one line per row.
+  const CSV_COLUMNS = [
+    "time_s", "bots", "joined", "rooms", "snap_hz", "srv_players", "srv_cpu", "load", "out_mbps", "loop_p99_ms", "tick_p99_ms",
+    "gc_per_s", "gc_max_ms", "rss_mb", "move_p50_ms", "move_p99_ms", "gap_p50_ms", "gap_p99_ms", "gap_max_ms", "chat_p50_ms",
+    "chat_p99_ms", "voice_p50_ms", "voice_p99_ms", "voice_rx_pct", "in_mb_s", "corrections", "drops", "migrations", "rejoins", "verdict",
+  ];
+  if (opts.log) {
+    mkdirSync(dirname(opts.log), { recursive: true });
+    const argv = process.argv.slice(2).map((a, i, all) => (all[i - 1] === "--health-token" ? "***" : a)).join(" ");
+    writeFileSync(
+      opts.log,
+      `# bun tools/loadtest.ts ${argv}\n# target ${wsUrl} (${runtimeLabel})\n# started ${new Date(startedAt).toISOString()}\n${CSV_COLUMNS.join(",")}\n`,
+    );
+    console.log(`Log: ${opts.log}`);
+  }
+  const csvLine = (values: (string | number)[]) =>
+    values.map((v) => (typeof v === "number" ? (Number.isNaN(v) ? "" : String(v)) : `"${v.replace(/"/g, "'")}"`)).join(",");
 
-    // Measure the second half of the hold: bot reports plus the server's own samples.
-    window = [];
-    let serverFrom: number | null = null;
-    let healthProblem = "";
-    if (!noServerStats) {
-      try {
-        serverFrom = (await health.fetch(Date.now())).now;
-      } catch (err) {
-        healthProblem = (err as Error).message;
-      }
+  // Health samples since the last row (server clock).
+  let serverFrom: number | null = null;
+  if (!noServerStats) {
+    try {
+      serverFrom = (await health.fetch(Date.now())).now;
+    } catch {
+      // reported on the next row
     }
-    const t0 = Date.now();
-    await sleep((hold / 2) * 1000);
-    const t1 = Date.now();
-    const elapsed = (t1 - t0) / 1000;
+  }
+
+  /**
+   * One row over [t0, t1]: the bots' reports gathered since the last row and the
+   * server's samples. `full`: every bot should have joined by now.
+   */
+  async function measureRow(t0: number, t1: number, target: number, full: boolean): Promise<{ ok: boolean }> {
+    const reports = window;
+    window = [];
+    const elapsed = Math.max(0.001, (t1 - t0) / 1000);
     let samples: StatsSample[] = [];
     let latest: StatsSample | null = null;
     let perServer: HealthReport["servers"];
-    if (serverFrom !== null) {
+    let healthProblem = "";
+    if (!noServerStats) {
       try {
-        const report = await health.fetch(serverFrom);
+        const report = await health.fetch(serverFrom ?? t0);
         samples = report.samples;
         latest = report.latest;
         perServer = report.servers;
+        serverFrom = report.now;
       } catch (err) {
         healthProblem = (err as Error).message;
       }
@@ -1040,7 +1085,7 @@ async function runOrchestrator(): Promise<void> {
     let socketErrors = 0;
     let migrations = 0;
     let rejoins = 0;
-    for (const r of window) {
+    for (const r of reports) {
       migrations += r.migrations;
       rejoins += r.rejoins;
       gaps.merge(r.gaps);
@@ -1072,7 +1117,7 @@ async function runOrchestrator(): Promise<void> {
     const gapP99 = gaps.percentile(0.99);
     const chatP99 = chat.percentile(0.99);
     const problems = [];
-    if (joined < target) problems.push(`only ${joined} joined`);
+    if (full && joined < target) problems.push(`only ${joined} joined`);
     const moveP99 = move.percentile(0.99);
     // Age of the newest position when a snapshot arrives; does not depend on the snapshot rate.
     if (move.total > 0 && moveP99 > 150) problems.push("moves slow");
@@ -1082,17 +1127,21 @@ async function runOrchestrator(): Promise<void> {
     if (opts.movingRatio >= 1 && !(gapP99 <= 2 * intervalMs)) problems.push("snapshots late");
     if (chat.total > 0 && chatP99 > 250) problems.push("chat slow");
     const voiceP99 = voice.percentile(0.99);
-    const voiceShare = voiceExpected > 0 ? voiceRx / voiceExpected : NaN;
+    // While bots are still joining, how much voice they should have had is unknown.
+    const voiceShare = full && voiceExpected > 0 ? voiceRx / voiceExpected : NaN;
     if (voice.total > 0 && voiceP99 > 300) problems.push("voice slow");
-    if (voiceShare < 0.97) problems.push("voice lost");
+    if (full && voiceShare < 0.97) problems.push("voice lost");
     if (drops > 0) problems.push("disconnects");
     if (socketErrors > 0) problems.push(`${socketErrors} socket errors`);
     if (loopP99 > 50) problems.push("event loop lag");
     const verdict = problems.length ? `FAIL (${problems.join(", ")})` : "ok";
+    const rooms = roomSize > 0 ? Math.ceil(target / roomSize) : 1;
+    const timeS = Math.round((t1 - startedAt) / 1000);
 
     const row = [
+      ...(timeCol ? [String(timeS).padStart(6)] : []),
       String(target).padStart(4),
-      String(roomSize > 0 ? Math.ceil(target / roomSize) : 1).padStart(5),
+      String(rooms).padStart(5),
       (snapshotHz ? String(snapshotHz) : "-").padStart(7),
       String(latest?.players ?? "-").padStart(11),
       show(cpu, () => `${(cpu * 100).toFixed(0)}%`).padStart(7),
@@ -1126,8 +1175,91 @@ async function runOrchestrator(): Promise<void> {
         );
       console.log(`       ${parts.join(" | ")}`);
     }
-    if (problems.length && !opts.keepGoing) break;
+    if (opts.log) {
+      const round = (v: number, d: number) => (Number.isNaN(v) ? NaN : Math.round(v * 10 ** d) / 10 ** d);
+      const pct = (h: Histogram, p: number) => (h.total ? h.percentile(p) : NaN);
+      appendFileSync(
+        opts.log,
+        csvLine([
+          timeS, target, joined, rooms, snapshotHz || NaN, latest?.players ?? NaN, round(cpu, 3), round(load, 2), round(egress, 1),
+          round(loopP99, 1), round(tickP99, 2), round(gcPerSec, 1), round(gcMax, 1), latest?.rssMb ?? NaN, pct(move, 0.5),
+          pct(move, 0.99), pct(gaps, 0.5), pct(gaps, 0.99), pct(gaps, 1), pct(chat, 0.5), pct(chat, 0.99), pct(voice, 0.5),
+          pct(voice, 0.99), round(voiceShare * 100, 1), round(bytesIn / elapsed / 1e6, 1), corrections, drops, migrations, rejoins,
+          verdict,
+        ]) + "\n",
+      );
+    }
+    return { ok: problems.length === 0 };
   }
+
+  const addBots = (count: number) => {
+    for (let i = 0; i < count; i++, total++) {
+      const { worker, cmd } = assign(total);
+      tell(worker, cmd);
+      members.set(cmd.room, (members.get(cmd.room) ?? 0) + 1);
+    }
+  };
+  /** Highest bot count of a row that met every target, and the first row that did not. */
+  let bestOk = 0;
+  let firstFail: number | null = null;
+  const track = (target: number, ok: boolean) => {
+    if (ok && firstFail === null) bestOk = Math.max(bestOk, target);
+    if (!ok && firstFail === null) firstFail = target;
+  };
+
+  if (opts.max !== null) {
+    // Continuous ramp: bots keep arriving at --ramp per second; a row every --report-every seconds.
+    const max = opts.max;
+    let rowFrom = Date.now();
+    let maxReachedAt: number | null = null;
+    window = [];
+    for (;;) {
+      if (total < max) {
+        addBots(Math.min(max - total, Math.max(1, Math.round(ramp / 10))));
+        if (total >= max) maxReachedAt = Date.now();
+      }
+      await sleep(100);
+      const now = Date.now();
+      if (now - rowFrom >= opts.reportEvery * 1000) {
+        // Joins take a moment: only expect everyone a few seconds after the last one was added.
+        const full = maxReachedAt !== null && now - maxReachedAt > 5000;
+        const { ok } = await measureRow(rowFrom, now, total, full);
+        track(total, ok);
+        rowFrom = now;
+      }
+      if (maxReachedAt !== null && now - maxReachedAt >= hold * 1000) break;
+    }
+  } else {
+    for (const target of steps) {
+      // Ramp up at a fixed connection rate.
+      while (total < target) {
+        addBots(Math.min(target - total, Math.max(1, Math.round(ramp / 10))));
+        await sleep(100);
+      }
+      await sleep((hold / 2) * 1000);
+      // Measure the second half of the hold: bot reports plus the server's own samples.
+      window = [];
+      if (!noServerStats) {
+        try {
+          serverFrom = (await health.fetch(Date.now())).now;
+        } catch {
+          // reported by measureRow
+        }
+      }
+      const t0 = Date.now();
+      await sleep((hold / 2) * 1000);
+      const { ok } = await measureRow(t0, Date.now(), target, true);
+      track(target, ok);
+      if (!ok && !opts.keepGoing) break;
+    }
+  }
+
+  const summary =
+    firstFail === null
+      ? `Summary: every row met the targets, up to ${bestOk} bots`
+      : `Summary: last row meeting every target at ${bestOk} bots; first failing row at ${firstFail} bots`;
+  console.log(summary);
+  if (opts.log) appendFileSync(opts.log, `# ${summary}\n`);
 
   for (const w of workers) w.kill();
   server?.kill();

@@ -11,3 +11,4 @@ client/public/assets/
 .health-token
 .env
 server-rs/target
+loadtest-logs

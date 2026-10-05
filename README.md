@@ -287,6 +287,19 @@ room. `bun tools/loadtest.ts --help` lists all options. (`bun run loadtest …` 
 on Linux and macOS; on Windows call the file directly, since Bun's script shell can
 drop flags there.)
 
+`--max` finds the knee faster than steps: bots keep arriving at `--ramp` per second
+up to the maximum, then stay `--hold` seconds, with a row every `--report-every`
+seconds (default 5) and a closing summary of the last row that met every target:
+
+```bash
+bun tools/loadtest.ts --target https://meet.example.com --max 5000 --ramp 50 --hold 60 \
+  --report-every 5 --room-size 0 --moving 0.2 --chat-every 0 --speakers 3
+```
+
+Both modes also write the rows to `loadtest-logs/<time>-<host>.csv` (git-ignored;
+`--log <file>` to choose, `--no-log` to skip), headed by the command, the target and
+the start time, so runs can be compared in a spreadsheet.
+
 To test a deployed server from this machine, point it at the public URL. Server
 columns come from its `/api/health`; if the server sets `HEALTH_TOKEN`, pass it:
 
