@@ -186,6 +186,20 @@ interest, 10 Hz per player from 2,000 players), bots on the same machine:
   cluster mode (several processes and the mesh).
 - Past ~9,000 players the laptop itself is the limit: the server's thread waits
   for a core (CPU under 80% while the loop lags) because the bots use the rest.
+- **On the Coolify VM** (one core of the Xeon E5-2680 v4, over the LAN through
+  Traefik, both servers with the same optimizations), one thread each:
+
+  | Run | Bun | Rust, 1 thread |
+  |---|---|---|
+  | Steps (`--hold 40`) | ~2,500-3,000: 2,000 at 46% CPU; 3,000 fails on the event loop only (54 ms), players' latency fine to ~3,200 | **3,500**: 2,000 at 39% CPU; 3,500 at 71%, loop 47 ms; fails at 4,000 |
+  | `--max 5000 --ramp 50`, a row every 5 s | last row meeting every target at **2,250** | last row meeting every target at **2,750** |
+
+  Rust holds ~15-25% more players on the same core and moves more data at the same
+  count (427 vs 356 Mbps at 3,000 in the ramp). The fast ramp finds a lower knee
+  than steps: bots arriving at 50 per second have not spread out yet (area of
+  interest saves less), every join brings a whole-room welcome, and 5-second rows
+  catch spikes that longer holds average out. It is the "everyone joins at once"
+  case; a slower `--ramp` or steps around the knee give the steady capacity.
 - **Why the single thread "stops at ~73% CPU".** Pinned to one core at 11,000
   players, that core was 100% busy: 31% our code, 38% system calls (socket sends,
   receives, epoll) and 31% softirq. The softirq part is the kernel's network
