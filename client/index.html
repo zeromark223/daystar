@@ -39,6 +39,7 @@
         <span id="hud-count" class="count"></span>
         <span id="hud-role" class="role-chip" hidden></span>
         <button id="copy-link" type="button">Copy invite link</button>
+        <button id="qr-button" type="button" class="secondary" aria-haspopup="dialog">QR</button>
       </div>
       <div class="voice-bar">
         <button id="mic-button" type="button" class="mic" aria-pressed="false" hidden>Turn mic on</button>
@@ -79,6 +80,14 @@
           <button type="submit">Start poll</button>
         </div>
       </form>
+    </dialog>
+
+    <dialog id="qr-dialog" class="qr-dialog" aria-labelledby="qr-title">
+      <h2 id="qr-title">Scan to join</h2>
+      <canvas id="qr-canvas" aria-label="QR code of the invite link"></canvas>
+      <p id="qr-link" class="qr-link"></p>
+      <p id="qr-note" class="note" hidden>This link points to this computer, so other devices cannot open it.</p>
+      <form method="dialog"><button type="submit">Done</button></form>
     </dialog>
 
     <section id="disconnected" class="lobby" hidden>

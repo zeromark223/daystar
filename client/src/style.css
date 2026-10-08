@@ -825,3 +825,48 @@ button.secondary {
     font-size: 0.85rem;
   }
 }
+
+/* ---------- invite QR ---------- */
+
+.qr-dialog {
+  width: min(320px, calc(100vw - 32px));
+  padding: 20px;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  background: var(--panel-solid);
+  color: var(--ink);
+  text-align: center;
+}
+
+.qr-dialog::backdrop {
+  background: rgba(2, 3, 10, 0.6);
+}
+
+.qr-dialog h2 {
+  margin: 0 0 14px;
+  font-size: 1.15rem;
+}
+
+.qr-dialog canvas {
+  display: block;
+  margin: 0 auto;
+  max-width: 100%;
+  height: auto;
+  border-radius: 10px;
+}
+
+.qr-link {
+  margin: 12px 0 0;
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.qr-dialog .note {
+  margin: 8px 0 0;
+}
+
+.qr-dialog form {
+  margin-top: 14px;
+}

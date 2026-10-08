@@ -8,6 +8,7 @@ import { Game } from "./game/game.ts";
 import { Connection, createRoom } from "./net.ts";
 import { AudienceBar } from "./ui/audience.ts";
 import { ChatPanel } from "./ui/chat.ts";
+import { inviteUrl, setupInviteQr } from "./ui/invite.ts";
 import { runLobby, type LobbyChoice } from "./ui/lobby.ts";
 import { PeoplePanel } from "./ui/people.ts";
 import { PollPanel } from "./ui/poll.ts";
@@ -360,13 +361,14 @@ async function main(): Promise<void> {
   document.getElementById("copy-link")!.addEventListener("click", async (e) => {
     const button = e.currentTarget as HTMLButtonElement;
     try {
-      await navigator.clipboard.writeText(location.href);
+      await navigator.clipboard.writeText(inviteUrl(roomId!));
       button.textContent = "Copied!";
     } catch {
-      button.textContent = location.href;
+      button.textContent = inviteUrl(roomId!);
     }
     setTimeout(() => (button.textContent = "Copy invite link"), 1500);
   });
+  setupInviteQr(roomId!);
   hud.hidden = false;
   audience.show();
 }
