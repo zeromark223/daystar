@@ -8,10 +8,13 @@ interface Person {
   id: number;
   name: string;
   role: Role;
+  /** Raised hand ticket (when it went up), or 0. */
+  hand: number;
 }
 
 export interface PeopleActions {
   setRole(id: number, role: "speaker" | "guest"): void;
+  lowerHand(id: number): void;
 }
 
 const ORDER: Record<Role, number> = { host: 0, speaker: 1, guest: 2 };
@@ -82,9 +85,29 @@ export class PeoplePanel {
     this.schedule();
   }
 
-  upsert(id: number, name: string, role: Role): void {
-    this.people.set(id, { id, name, role });
+  upsert(id: number, name: string, role: Role, hand = 0): void {
+    this.people.set(id, { id, name, role, hand });
     this.schedule();
+    this.renderToggle();
+  }
+
+  handOf(id: number): number {
+    return this.people.get(id)?.hand ?? 0;
+  }
+
+  setHand(id: number, hand: number): void {
+    const p = this.people.get(id);
+    if (!p || p.hand === hand) return;
+    p.hand = hand;
+    this.schedule();
+    this.renderToggle();
+  }
+
+  /** The host sees how many hands are up on the People button. */
+  private renderToggle(): void {
+    let hands = 0;
+    if (this.selfIsHost) for (const p of this.people.values()) if (p.hand) hands++;
+    this.toggle.textContent = hands > 0 ? `People · ✋ ${hands}` : "People";
   }
 
   setRole(id: number, role: Role): void {
@@ -92,12 +115,14 @@ export class PeoplePanel {
     if (!p) return;
     p.role = role;
     this.schedule();
+    this.renderToggle();
   }
 
   remove(id: number): void {
     this.people.delete(id);
     if (this.menu.dataset.id === String(id)) this.closeMenu();
     this.schedule();
+    this.renderToggle();
   }
 
   clear(): void {
@@ -145,6 +170,13 @@ export class PeoplePanel {
     return b;
   }
 
+  private heading(text: string): HTMLLIElement {
+    const li = document.createElement("li");
+    li.className = "heading";
+    li.textContent = text;
+    return li;
+  }
+
   private schedule(): void {
     if (this.scheduled || this.panel.hidden) return;
     this.scheduled = true;
@@ -162,12 +194,32 @@ export class PeoplePanel {
       .sort((a, b) => ORDER[a.role] - ORDER[b.role] || a.name.localeCompare(b.name));
     let guests = 0;
     const items: HTMLLIElement[] = [];
+    // The host answers raised hands first, oldest first.
+    const hands = this.selfIsHost ? sorted.filter((p) => p.hand > 0).sort((a, b) => a.hand - b.hand) : [];
+    if (hands.length > 0) {
+      items.push(this.heading(`Raised hands · ${hands.length}`));
+      for (const p of hands) {
+        const li = document.createElement("li");
+        li.className = "raised";
+        const name = document.createElement("span");
+        name.className = "name";
+        name.textContent = `✋ ${p.name}`;
+        const lower = document.createElement("button");
+        lower.type = "button";
+        lower.className = "secondary";
+        lower.textContent = "Lower";
+        lower.addEventListener("click", () => this.actions.lowerHand(p.id));
+        li.append(name, this.roleButton(p), lower);
+        items.push(li);
+      }
+      items.push(this.heading("Everyone"));
+    }
     for (const p of sorted) {
       if (p.role === "guest" && ++guests > MAX_GUESTS_SHOWN) continue;
       const li = document.createElement("li");
       const name = document.createElement("span");
       name.className = "name";
-      name.textContent = p.id === this.selfId ? `${p.name} (you)` : p.name;
+      name.textContent = (p.hand ? "✋ " : "") + (p.id === this.selfId ? `${p.name} (you)` : p.name);
       li.append(name);
       if (p.role !== "guest") {
         const badge = document.createElement("span");
@@ -179,6 +231,7 @@ export class PeoplePanel {
       items.push(li);
     }
     this.list.replaceChildren(...items);
+    this.renderToggle();
     const hidden = guests - MAX_GUESTS_SHOWN;
     this.more.hidden = hidden <= 0;
     this.more.textContent = `and ${hidden} more; type a name to find them`;

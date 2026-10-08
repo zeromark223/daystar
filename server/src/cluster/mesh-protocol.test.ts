@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { decodeMesh, encodeMesh, type MeshMessage } from "./mesh-protocol.ts";
 
-const player = { id: 9, name: "Zed 🦌", appearance: 12, x: 540.5, y: 600.25, dir: "west" as const, moving: true, role: "guest" as const };
+const player = { id: 9, name: "Zed 🦌", appearance: 12, x: 540.5, y: 600.25, dir: "west" as const, moving: true, role: "guest" as const, hand: 0 };
 
 test("every mesh message round-trips", () => {
   const messages: MeshMessage[] = [
@@ -20,6 +20,10 @@ test("every mesh message round-trips", () => {
     { t: "role", room: "r", id: 9, role: "speaker" },
     { t: "set_role", room: "r", id: 9, role: "guest" },
     { t: "voice", room: "r", frames: [{ id: 9, seq: 3, data: new Uint8Array([1, 2]) }] },
+    { t: "reactions", room: "r", list: [{ id: 9, kind: 2 }] },
+    { t: "hand", room: "r", id: 9, hand: 179_000_000 },
+    { t: "set_hand", room: "r", id: 9, hand: 0 },
+    { t: "poll", room: "r", poll: { id: 7, question: "Q?", options: ["a", "b"], open: false, counts: [1, 2] } },
   ];
   for (const m of messages) assert.deepEqual(decodeMesh(encodeMesh(m)), m);
 });

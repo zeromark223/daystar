@@ -102,3 +102,22 @@ export function planetTexture(color: number, radius: number): Texture {
   planets.set(key, texture);
   return texture;
 }
+
+const emojis = new Map<string, Texture>();
+
+/** An emoji drawn once with the system's emoji font; draw it at about 28 px. */
+export function emojiTexture(emoji: string): Texture {
+  let texture = emojis.get(emoji);
+  if (texture) return texture;
+  const size = 96;
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext("2d")!;
+  ctx.font = `${size * 0.78}px "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(emoji, size / 2, size / 2 + size * 0.04);
+  texture = Texture.from(canvas);
+  emojis.set(emoji, texture);
+  return texture;
+}

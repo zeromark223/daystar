@@ -175,7 +175,7 @@ const SNAPSHOT_ENTRY = 7;
 /**
  * What a bot needs from "welcome" (its own entry, the snapshot rate) without
  * decoding the whole room into objects: entries are id, x, y, motion, name,
- * appearance, role; the joining player is the last one.
+ * appearance, role, hand; the joining player is the last one.
  */
 function readWelcome(bytes: Uint8Array): { selfId: number; x: number; y: number; role: Role; snapshotHz: number } {
   const data = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -189,7 +189,7 @@ function readWelcome(bytes: Uint8Array): { selfId: number; x: number; y: number;
     if (id === selfId) {
       self = { x: data.getUint16(o + 2, true) / POSITION_SCALE, y: data.getUint16(o + 4, true) / POSITION_SCALE, role: roleFromIndex(data.getUint8(nameEnd + 1)) ?? "guest" };
     }
-    o = nameEnd + 2; // appearance, role
+    o = nameEnd + 6; // appearance, role, hand
   }
   const chats = data.getUint8(o);
   o += 1;

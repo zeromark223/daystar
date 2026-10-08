@@ -113,7 +113,12 @@ export class Mesh {
           if (!peers) this.interest.set(msg.room, (peers = new Set()));
           peers.add(server);
           // A peer started hosting a room we host: give it our players.
-          if (room) this.links.get(server)?.send(encodeMesh({ t: "room_state", room: msg.room, players: room.localState() }));
+          if (room) {
+            const link = this.links.get(server);
+            link?.send(encodeMesh({ t: "room_state", room: msg.room, players: room.localState() }));
+            const poll = room.currentPoll();
+            if (poll) link?.send(encodeMesh({ t: "poll", room: msg.room, poll }));
+          }
         } else {
           peers?.delete(server);
           if (peers?.size === 0) this.interest.delete(msg.room);
@@ -144,6 +149,18 @@ export class Mesh {
         break;
       case "voice":
         room?.remoteVoice(server, msg.frames);
+        break;
+      case "reactions":
+        room?.remoteReactions(server, msg.list);
+        break;
+      case "hand":
+        room?.remoteHand(server, msg.id, msg.hand);
+        break;
+      case "set_hand":
+        room?.remoteSetHand(msg.id, msg.hand);
+        break;
+      case "poll":
+        room?.remotePoll(msg.poll);
         break;
       case "takeover": {
         // The player reconnected to `server`: stop owning it and send its state over.
@@ -205,6 +222,10 @@ export class Mesh {
       role: (id, role) => send({ t: "role", room, id, role }),
       setRole: (owner, id, role) => this.links.get(owner)?.send(encodeMesh({ t: "set_role", room, id, role })),
       voice: (frames) => send({ t: "voice", room, frames }),
+      reactions: (list) => send({ t: "reactions", room, list }),
+      hand: (id, hand) => send({ t: "hand", room, id, hand }),
+      setHand: (owner, id, hand) => this.links.get(owner)?.send(encodeMesh({ t: "set_hand", room, id, hand })),
+      poll: (poll) => send({ t: "poll", room, poll }),
     };
   }
 

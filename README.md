@@ -102,6 +102,22 @@ tools/          load test
 - Voice works in Chrome and Safari on phones, and Chrome, Edge and Firefox on
   computers (not yet Firefox on Android). It needs HTTPS.
 
+## Audience
+
+- **Reactions:** 👏 ❤️ 😂 😮 🎉 👍 (buttons, or keys 1-6) float up from the player and
+  make its face open its mouth. Rate-limited per player and capped at 64 per
+  snapshot, they ride the next snapshot like joins and leaves, so a room-wide burst
+  of applause costs no extra messages.
+- **Raised hands:** guests raise a hand (button or H) to ask for the floor. The host
+  sees the hands oldest first in People and invites one to speak or lowers it;
+  becoming a speaker lowers it too.
+- **Polls you answer by flying:** the host asks a question with 2 to 4 answers, each
+  answer becomes a planet on a ring around the sun, and players vote by flying to
+  one. The server counts from positions it already has (twice a second, sent only
+  when counts change). Only players who moved since the poll started count, so
+  nobody votes by spawning inside a planet. The host ends the poll to show the result.
+- In cluster mode reactions, hands and polls are mirrored between servers like roles.
+
 ## Capacity
 
 **2,800 CCU stable in one room on one core of a Xeon E5-2680 v4** (a Coolify VM on
@@ -167,7 +183,9 @@ bots on the same machine:
 ## Rust port: how much does the language matter?
 
 [`server-rs/`](server-rs/README.md) is the standalone server ported to Rust (tokio):
-same protocol, rules and features, no cluster mode. Same laptop (Ryzen AI 7 350,
+same protocol, rules and features as of October 2026, no cluster mode. It is kept
+as a benchmark and no longer follows the protocol: it predates raised hands,
+reactions and polls, so today's client does not work with it. Same laptop (Ryzen AI 7 350,
 Linux), same load test (one room, a host and two speakers, 20% walking, area of
 interest, 10 Hz per player from 2,000 players), bots on the same machine:
 

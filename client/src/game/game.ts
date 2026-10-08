@@ -9,6 +9,8 @@ import { canBeAt, moveInSpace } from "../../../shared/src/space.ts";
 import { Avatar } from "./avatar.ts";
 import { KeyboardInput } from "./input.ts";
 import { Minimap } from "./minimap.ts";
+import { PollZones } from "./poll-zones.ts";
+import type { Poll } from "../../../shared/src/poll.ts";
 import { SpaceScene } from "./space-scene.ts";
 import { TouchStick } from "./touch.ts";
 
@@ -38,6 +40,7 @@ export class Game {
   private readonly world = new Container();
   private readonly trails = new Container();
   private readonly bodies = new Container();
+  private readonly pollZones = new PollZones();
   /** Screen-space layer for names and chat bubbles. */
   private readonly overlay = new Container();
   private readonly avatars = new Map<number, Avatar>();
@@ -68,7 +71,7 @@ export class Game {
     stage.appendChild(app.canvas);
 
     const game = new Game(app, callbacks);
-    game.world.addChild(game.scene.backdrop, game.trails, game.bodies);
+    game.world.addChild(game.scene.backdrop, game.pollZones.view, game.trails, game.bodies);
     app.stage.addChild(game.scene.sky, game.world, game.overlay, game.minimap.view);
     game.setupPointer();
     game.setupZoom();
@@ -94,7 +97,9 @@ export class Game {
 
   addPlayer(info: PlayerInfo): void {
     this.avatars.get(info.id)?.destroy();
-    this.avatars.set(info.id, new Avatar(info, this.trails, this.bodies, this.overlay, info.id === this.selfId));
+    const avatar = new Avatar(info, this.trails, this.bodies, this.overlay, info.id === this.selfId);
+    avatar.setHand(info.hand > 0);
+    this.avatars.set(info.id, avatar);
     if (info.id === this.selfId && info.role === "host") this.becameHost();
   }
 
@@ -123,6 +128,31 @@ export class Game {
       }
     }
     return best;
+  }
+
+  /** A player reacted: float the emoji up if we can see them. */
+  react(id: number, kind: number): void {
+    const a = this.avatars.get(id);
+    if (a && (a.role === "host" || this.visibility(a) > 0.1)) a.react(kind);
+  }
+
+  setHand(id: number, raised: boolean): void {
+    this.avatars.get(id)?.setHand(raised);
+  }
+
+  showPoll(poll: Poll): void {
+    if (poll.open) this.pollZones.show(poll);
+    else this.pollZones.end(poll);
+  }
+
+  setPollCounts(counts: number[]): void {
+    this.pollZones.setCounts(counts);
+  }
+
+  /** The answer planet we are in while a poll is open, or -1. */
+  get pollAnswer(): number {
+    const self = this.self;
+    return self ? this.pollZones.zoneAt(self.x, self.y) : -1;
   }
 
   removePlayer(id: number): void {
@@ -246,6 +276,7 @@ export class Game {
     }
     this.scene.setHostVoiceLevel(hostLevel);
     this.scene.update(now, this.world.x, this.world.y, this.zoom, width, height);
+    if (this.self) this.pollZones.update(now, this.self.x, this.self.y);
     const seen = new Map<Avatar, number>();
     for (const avatar of this.avatars.values()) {
       const visibility = this.visibility(avatar);

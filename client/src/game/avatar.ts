@@ -6,7 +6,8 @@ import type { PlayerInfo } from "../../../shared/src/protocol.ts";
 import { ROLE_LABELS, type Role } from "../../../shared/src/roles.ts";
 import { brightnessAt } from "../../../shared/src/space.ts";
 import { BodyView, SIZES } from "./bodies.ts";
-import { glowTexture } from "./textures.ts";
+import { REACTIONS } from "../../../shared/src/audience.ts";
+import { emojiTexture, glowTexture } from "./textures.ts";
 
 const BUBBLE_MS = 6000;
 const BUBBLE_MAX_WIDTH = 220;
@@ -33,6 +34,14 @@ const TRAIL_EVERY_MS = 45;
 /** Bodies never shrink below this share of their size when the camera zooms out. */
 const MIN_SCREEN_SCALE = 0.55;
 const ROLE_COLOR = 0xffd166;
+/** A reaction floats up this far (screen px) and fades out over REACTION_MS. */
+const REACTION_RISE = 70;
+const REACTION_MS = 1600;
+const REACTION_SIZE = 28;
+/** Per player and in total, so a room-wide burst of applause stays cheap to draw. */
+const MAX_REACTIONS_PER_AVATAR = 4;
+const MAX_LIVE_REACTIONS = 80;
+let liveReactions = 0;
 
 interface Sample {
   t: number;
@@ -75,6 +84,11 @@ export class Avatar {
   /** How loud this player is talking, 0..1, set every frame. */
   private voiceLevel = 0;
   private readonly tag = new Container();
+  private readonly floating = new Container();
+  private readonly reactions: { sprite: Sprite; born: number; drift: number }[] = [];
+  /** A reaction makes the face open its mouth for a moment. */
+  private reactedUntil = 0;
+  private handIcon: Sprite | null = null;
   private readonly label: Text;
   private readonly roleTag: Text;
   private bubble: Container | null = null;
@@ -142,7 +156,7 @@ export class Avatar {
       },
     });
     this.roleTag.anchor.set(0.5, 1);
-    this.tag.addChild(this.roleTag, this.label);
+    this.tag.addChild(this.roleTag, this.label, this.floating);
     overlay.addChild(this.tag);
     this.setRole(info.role);
 
@@ -168,6 +182,51 @@ export class Avatar {
   }
 
   /** How loud the player is talking right now (0..1); drives the speaking glow. */
+  /** Float an emoji up from the player. False when too many are already on screen. */
+  react(kind: number, now = performance.now()): boolean {
+    if (liveReactions >= MAX_LIVE_REACTIONS) return false;
+    if (this.reactions.length >= MAX_REACTIONS_PER_AVATAR) this.dropReaction(0);
+    const sprite = new Sprite({ texture: emojiTexture(REACTIONS[kind].emoji), anchor: 0.5 });
+    sprite.width = sprite.height = REACTION_SIZE;
+    this.floating.addChild(sprite);
+    this.reactions.push({ sprite, born: now, drift: (Math.random() - 0.5) * 24 });
+    liveReactions++;
+    this.reactedUntil = now + 500;
+    return true;
+  }
+
+  private dropReaction(i: number): void {
+    const [r] = this.reactions.splice(i, 1);
+    r.sprite.destroy();
+    liveReactions--;
+  }
+
+  private renderReactions(now: number): void {
+    this.floating.y = this.headroom() - 6;
+    for (let i = this.reactions.length - 1; i >= 0; i--) {
+      const r = this.reactions[i];
+      const t = (now - r.born) / REACTION_MS;
+      if (t >= 1) {
+        this.dropReaction(i);
+        continue;
+      }
+      r.sprite.position.set(r.drift * t, -REACTION_RISE * t);
+      r.sprite.alpha = 1 - t * t;
+      const pop = Math.min(1, t * 6);
+      r.sprite.width = r.sprite.height = REACTION_SIZE * (0.6 + 0.4 * pop);
+    }
+  }
+
+  /** Show (or hide) a raised hand next to the name. */
+  setHand(raised: boolean): void {
+    if (raised && !this.handIcon) {
+      this.handIcon = new Sprite({ texture: emojiTexture("✋"), anchor: { x: 1, y: 1 } });
+      this.handIcon.width = this.handIcon.height = 18;
+      this.tag.addChild(this.handIcon);
+    }
+    if (this.handIcon) this.handIcon.visible = raised;
+  }
+
   setVoiceLevel(level: number): void {
     this.voiceLevel = Math.min(1, level);
   }
@@ -271,7 +330,8 @@ export class Avatar {
     this.body.scale.set(scale);
     this.body.alpha = brightness;
     this.trackVelocity(now);
-    if (this.body.visible) this.core.update(now, { ...this.velocity, moving: this.moving }, this.voiceLevel);
+    const voice = now < this.reactedUntil ? Math.max(this.voiceLevel, 0.7) : this.voiceLevel;
+    if (this.body.visible) this.core.update(now, { ...this.velocity, moving: this.moving }, voice);
     if (this.ring.visible) {
       this.ring.scale.set(1 + this.voiceLevel * 0.45);
       this.ring.alpha = 0.45 + this.voiceLevel * 0.55;
@@ -290,6 +350,7 @@ export class Avatar {
     this.tag.alpha = this.isSelf ? Math.max(brightness, 0.6) : brightness;
     this.tag.visible = this.tag.alpha > 0.02;
     this.renderBubble(now);
+    this.renderTagExtras(now);
   }
 
   private trackVelocity(now: number): void {
@@ -308,6 +369,11 @@ export class Avatar {
     last.t = now;
   }
 
+  private renderTagExtras(now: number): void {
+    if (this.reactions.length > 0) this.renderReactions(now);
+    if (this.handIcon?.visible) this.handIcon.position.set(-this.label.width / 2 - 3, -1);
+  }
+
   /** The host's name and bubble float above the sun. */
   private renderOnSun(now: number, worldX: number, worldY: number, zoom: number): void {
     this.marker?.position.set(this.x, this.y);
@@ -319,6 +385,7 @@ export class Avatar {
     this.tag.alpha = 1;
     this.tag.visible = true;
     this.renderBubble(now);
+    this.renderTagExtras(now);
   }
 
   private renderBubble(now: number): void {
@@ -365,6 +432,7 @@ export class Avatar {
   }
 
   destroy(): void {
+    while (this.reactions.length > 0) this.dropReaction(0);
     this.body.destroy({ children: true });
     this.marker?.destroy();
     this.trail.destroy();

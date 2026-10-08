@@ -20,6 +20,14 @@ import { canSpeak, type Role } from "../../shared/src/roles.ts";
 import { canBeAt, spawnPoint } from "../../shared/src/space.ts";
 import { recordEgress, recordTick } from "./stats.ts";
 import {
+  handTicket,
+  MAX_REACTIONS_PER_SNAPSHOT,
+  REACTION_BURST,
+  REACTIONS_PER_SEC,
+  type Reaction,
+} from "../../shared/src/audience.ts";
+import { cleanPoll, POLL_COUNT_MS, pollZoneAt, type Poll } from "../../shared/src/poll.ts";
+import {
   assembleSnapshot,
   decodeClientMessage,
   encodeServerMessage,
@@ -74,6 +82,10 @@ interface Pending {
   /** Players who joined (described as they are at flush time) and ids that left. */
   joined: Set<number>;
   left: number[];
+  /** Reactions (capped at MAX_REACTIONS_PER_SNAPSHOT), hands by player id, new poll counts. */
+  reactions: Reaction[];
+  hands: Map<number, number>;
+  pollCounts: number[] | null;
 }
 
 /** Events the runtime adapter forwards to the room for one peer. */
@@ -98,6 +110,14 @@ export interface RoomSync {
   setRole(owner: number, id: number, role: Role): void;
   /** Voice frames from local speakers during one tick. */
   voice(frames: VoiceFrame[]): void;
+  /** Reactions from local players during one tick. */
+  reactions(list: Reaction[]): void;
+  /** A local player's hand went up (its ticket) or down (0). */
+  hand(id: number, hand: number): void;
+  /** Ask server `owner` to change the hand of its player `id` (the host lowered it). */
+  setHand(owner: number, id: number, hand: number): void;
+  /** Our host started or ended a poll. */
+  poll(poll: Poll): void;
 }
 
 interface Player {
@@ -119,8 +139,13 @@ interface Player {
   dir: Direction;
   moving: boolean;
   role: Role;
+  /** Raised hand ticket (see handTicket), or 0. */
+  hand: number;
   lastMoveAt: number;
   chatTimes: number[];
+  /** Reaction rate limit: tokens refilled at REACTIONS_PER_SEC. */
+  reactBudget: number;
+  reactAt: number;
   /** Voice rate limit: a byte budget refilled at VOICE_BYTES_PER_SEC. */
   voiceBudget: number;
   voiceAt: number;
@@ -187,6 +212,15 @@ export class Room {
   /** Every player (local or replica) by map cell, to find who is in view. */
   private readonly grid = new Map<number, Set<Player>>();
   private localVoice: VoiceFrame[] = [];
+  private localReactions: Reaction[] = [];
+  /** The open poll, if any; counts are recounted every POLL_COUNT_MS. */
+  private poll: Poll | null = null;
+  private pollCountedAt = 0;
+  /**
+   * Players who moved since the poll started. Only they vote: newcomers can
+   * spawn inside an answer planet, and that is not a choice.
+   */
+  private readonly pollMovers = new Set<number>();
   private ticker: ReturnType<typeof setInterval> | null = null;
   /** Local players asked to migrate, and when they may be asked again. */
   private readonly migrating = new Map<number, number>();
@@ -221,6 +255,11 @@ export class Room {
   /** Ids of players connected to this server. */
   playerIds(): number[] {
     return [...this.players.values()].filter((p) => p.owner === null).map((p) => p.id);
+  }
+
+  /** The open poll, for a peer that starts mirroring this room. */
+  currentPoll(): Poll | null {
+    return this.poll;
   }
 
   /** Full state of the local players, for a peer that starts mirroring this room. */
@@ -262,6 +301,14 @@ export class Room {
           this.handleChat(player, msg.text);
         } else if (msg.t === "set_role" && player) {
           this.handleSetRole(player, msg.id, msg.role);
+        } else if (msg.t === "react" && player) {
+          this.handleReact(player, msg.kind);
+        } else if (msg.t === "hand" && player) {
+          this.handleHand(player, msg.id, msg.up);
+        } else if (msg.t === "poll_start" && player) {
+          this.handlePollStart(player, msg.question, msg.options);
+        } else if (msg.t === "poll_end" && player) {
+          this.handlePollEnd(player);
         }
       },
       close: () => {
@@ -301,6 +348,7 @@ export class Room {
     this.unfile(p);
     this.forget(p);
     this.queueLeft(id);
+    this.pollMovers.delete(id);
   }
 
   /** Replicated moves go out to our clients with our next tick. */
@@ -314,6 +362,7 @@ export class Room {
       p.moving = s.moving;
       this.file(p);
       this.markChanged(p);
+      if (this.poll) this.pollMovers.add(p.id);
     }
   }
 
@@ -345,6 +394,31 @@ export class Room {
       const p = this.players.get(f.id);
       if (p && p.owner === owner && canSpeak(p.role)) this.queueVoice(f);
     }
+  }
+
+  /** Reactions from players of server `owner`, relayed with our next snapshot. */
+  remoteReactions(owner: number, list: Reaction[]): void {
+    for (const r of list) if (this.players.get(r.id)?.owner === owner) this.queueReaction(r);
+  }
+
+  /** The owner of a replica raised or lowered its hand. */
+  remoteHand(owner: number, id: number, hand: number): void {
+    const p = this.players.get(id);
+    if (!p || p.owner !== owner || p.hand === hand) return;
+    p.hand = hand;
+    this.queueHand(id, hand);
+  }
+
+  /** Another server's host lowered the hand of one of our players. */
+  remoteSetHand(id: number, hand: number): void {
+    const p = this.players.get(id);
+    if (p?.owner === null && hand === 0) this.setHand(p, 0);
+  }
+
+  /** The host (on another server) started or ended a poll. */
+  remotePoll(poll: Poll): void {
+    if (poll.open) this.startPoll(poll);
+    else if (this.poll?.id === poll.id) this.endPoll(poll);
   }
 
   /** A server went away: its players leave this room for our clients. */
@@ -444,6 +518,7 @@ export class Room {
       dir: start.dir,
       moving: false,
       role,
+      hand: role === "guest" ? (resume?.hand ?? 0) : 0,
       ...fresh(),
     };
 
@@ -457,6 +532,7 @@ export class Room {
       players: [...others, player].map(toInfo),
       chat: this.chat,
       snapshotHz: this.snapshotHz,
+      poll: this.poll,
     });
     // Our clients already see a migrating player; only its position may change.
     if (!wasReplica) this.queueJoined(player.id);
@@ -589,6 +665,114 @@ export class Room {
     }
     this.broadcast({ t: "role", id: p.id, role });
     this.opts.sync?.role(p.id, role);
+    // Invited to speak (or made host): the hand did its job.
+    if (role !== "guest") this.setHand(p, 0);
+  }
+
+  // ------------------------------------------------------------ reactions, hands, polls
+
+  private handleReact(player: Player, kind: number): void {
+    const now = Date.now();
+    player.reactBudget = Math.min(
+      REACTION_BURST,
+      player.reactBudget + ((now - player.reactAt) / 1000) * REACTIONS_PER_SEC,
+    );
+    player.reactAt = now;
+    if (player.reactBudget < 1) return;
+    player.reactBudget -= 1;
+    const reaction = { id: player.id, kind };
+    this.queueReaction(reaction);
+    if (this.opts.sync) this.localReactions.push(reaction);
+  }
+
+  private queueReaction(reaction: Reaction): void {
+    for (const g of this.pending) if (g.reactions.length < MAX_REACTIONS_PER_SNAPSHOT) g.reactions.push(reaction);
+  }
+
+  /** Guests raise and lower their own hand; the host may lower anyone's. */
+  private handleHand(requester: Player, id: number, up: boolean): void {
+    if (id === requester.id) {
+      if (up && requester.role !== "guest") return;
+      if (up !== (requester.hand !== 0)) this.setHand(requester, up ? handTicket() : 0);
+      return;
+    }
+    if (up || requester.role !== "host") return;
+    const target = this.players.get(id);
+    if (!target || target.hand === 0) return;
+    if (target.owner === null) this.setHand(target, 0);
+    else this.opts.sync?.setHand(target.owner, id, 0);
+  }
+
+  /** Change a local player's hand; everyone hears with the next snapshot. */
+  private setHand(p: Player, hand: number): void {
+    if (p.hand === hand) return;
+    p.hand = hand;
+    this.queueHand(p.id, hand);
+    this.opts.sync?.hand(p.id, hand);
+  }
+
+  private queueHand(id: number, hand: number): void {
+    for (const g of this.pending) g.hands.set(id, hand);
+  }
+
+  private handlePollStart(requester: Player, question: string, options: string[]): void {
+    if (requester.role !== "host") {
+      send(requester.peer!, { t: "error", message: "Only the host can start a poll." });
+      return;
+    }
+    const clean = cleanPoll(question, options);
+    if (!clean) {
+      send(requester.peer!, { t: "error", message: "A poll needs a question and 2 to 4 answers." });
+      return;
+    }
+    const poll: Poll = { id: (Math.random() * 0x1_0000_0000) >>> 0, ...clean, open: true, counts: [] };
+    this.startPoll(poll);
+    this.opts.sync?.poll(this.poll!);
+  }
+
+  private handlePollEnd(requester: Player): void {
+    if (requester.role !== "host" || !this.poll) return;
+    const final: Poll = { ...this.poll, open: false, counts: this.countVotes(this.poll.options.length) };
+    this.endPoll(final);
+    this.opts.sync?.poll(final);
+  }
+
+  /** A new poll replaces any open one; counts start from where everyone is now. */
+  private startPoll(poll: Poll): void {
+    if (this.poll?.id !== poll.id) this.pollMovers.clear();
+    this.poll = { ...poll, counts: this.countVotes(poll.options.length) };
+    this.pollCountedAt = Date.now();
+    for (const g of this.pending) g.pollCounts = null;
+    this.broadcast({ t: "poll", poll: this.poll });
+  }
+
+  private endPoll(final: Poll): void {
+    this.poll = null;
+    this.pollMovers.clear();
+    for (const g of this.pending) g.pollCounts = null;
+    this.broadcast({ t: "poll", poll: final });
+  }
+
+  /** Votes are positions: everyone who flew since the poll started, by the answer planet they are in. */
+  private countVotes(options: number): number[] {
+    const counts = new Array<number>(options).fill(0);
+    for (const id of this.pollMovers) {
+      const p = this.players.get(id);
+      if (!p || p.role === "host") continue;
+      const zone = pollZoneAt(p.x, p.y, options);
+      if (zone >= 0) counts[zone]++;
+    }
+    return counts;
+  }
+
+  private recountPoll(now: number): void {
+    const poll = this.poll;
+    if (!poll || now - this.pollCountedAt < POLL_COUNT_MS) return;
+    this.pollCountedAt = now;
+    const counts = this.countVotes(poll.options.length);
+    if (counts.every((n, i) => n === poll.counts[i])) return;
+    poll.counts = counts;
+    for (const g of this.pending) g.pollCounts = counts;
   }
 
   private handleVoice(player: Player, seq: number, data: Uint8Array): void {
@@ -634,6 +818,7 @@ export class Room {
     this.removeViewer(player);
     this.forget(player);
     this.queueLeft(player.id);
+    this.pollMovers.delete(player.id);
     this.applySchedule(this.localCount);
     this.opts.onLeft?.(player.id);
     this.opts.sync?.left(player.id);
@@ -660,6 +845,7 @@ export class Room {
     this.file(player);
     this.markChanged(player);
     this.moveViewer(player);
+    if (this.poll) this.pollMovers.add(player.id);
   }
 
   // ------------------------------------------------------------ area of interest
@@ -776,12 +962,15 @@ export class Room {
     if (this.ticks % Math.max(1, Math.round(this.tickHz / TICK_RATE)) === 0) {
       if (this.opts.sync) {
         if (this.localVoice.length > 0) this.opts.sync.voice(this.localVoice);
+        if (this.localReactions.length > 0) this.opts.sync.reactions(this.localReactions);
         const local = [...this.tickChanged].filter((p) => p.owner === null);
         if (local.length > 0) this.opts.sync.moves(local.map(toState));
       }
       this.localVoice = [];
+      this.localReactions = [];
       this.tickChanged.clear();
     }
+    this.recountPoll(now);
     let sent: boolean;
     if (this.groups === 2) {
       sent = this.flush([this.ticks % 2], now);
@@ -809,11 +998,20 @@ export class Room {
     const periodMs = 1000 / this.snapshotHz;
     const voiceDue =
       p.voice.length > 0 && (p.changed.size > 0 || now - p.voiceSince + periodMs >= VOICE_FLUSH_MS);
-    const roster = p.joined.size > 0 || p.left.length > 0;
-    if (p.changed.size === 0 && !voiceDue && !roster) return false;
+    // Joins, leaves, reactions, hands and poll counts go out with the next snapshot.
+    const extras =
+      p.joined.size > 0 || p.left.length > 0 || p.reactions.length > 0 || p.hands.size > 0 || p.pollCounts !== null;
+    if (p.changed.size === 0 && !voiceDue && !extras) return false;
     const voice = voiceDue ? p.voice : [];
     // Each part is encoded once and copied into the snapshots of every cell that sees it.
-    const tail = snapshotTail(voice, this.joinedInfos(p.joined), p.left);
+    const tail = snapshotTail({
+      voice,
+      joined: this.joinedInfos(p.joined),
+      left: p.left,
+      reactions: p.reactions,
+      hands: [...p.hands].map(([id, hand]) => ({ id, hand })),
+      pollCounts: p.pollCounts ?? [],
+    });
 
     // The host and speakers are always in view; everyone else by map cell.
     const stage: Uint8Array[] = [];
@@ -852,7 +1050,7 @@ export class Room {
           if (movers) for (const m of movers) if (inView(m.p.x, m.p.y, cell)) entries.push(m.entry);
         }
       }
-      if (entries.length === 0 && voice.length === 0 && !roster) continue;
+      if (entries.length === 0 && voice.length === 0 && !extras) continue;
       const data = assembleSnapshot(entries, tail);
       groups.forEach((g, i) => {
         if (counts[i] > 0) this.publishView(cell, g, viewers, data, counts[i]);
@@ -862,6 +1060,9 @@ export class Room {
       this.pending[g].changed.clear();
       this.pending[g].joined.clear();
       this.pending[g].left = [];
+      this.pending[g].reactions = [];
+      this.pending[g].hands.clear();
+      this.pending[g].pollCounts = null;
       if (voiceDue) this.pending[g].voice = [];
     }
     return true;
@@ -891,17 +1092,43 @@ function send(peer: Peer, msg: ServerMessage): void {
 }
 
 function toInfo(p: Player): PlayerInfo {
-  return { id: p.id, name: p.name, appearance: p.appearance, x: p.x, y: p.y, dir: p.dir, moving: p.moving, role: p.role };
+  return {
+    id: p.id,
+    name: p.name,
+    appearance: p.appearance,
+    x: p.x,
+    y: p.y,
+    dir: p.dir,
+    moving: p.moving,
+    role: p.role,
+    hand: p.hand,
+  };
 }
 
 function newPending(): Pending {
-  return { changed: new Set(), voice: [], voiceSince: 0, joined: new Set(), left: [] };
+  return {
+    changed: new Set(),
+    voice: [],
+    voiceSince: 0,
+    joined: new Set(),
+    left: [],
+    reactions: [],
+    hands: new Map(),
+    pollCounts: null,
+  };
 }
 
 /** Per-player bookkeeping that starts over on every server. */
 function fresh() {
   const now = Date.now();
-  return { lastMoveAt: now, chatTimes: [] as number[], voiceBudget: VOICE_BYTES_PER_SEC, voiceAt: now };
+  return {
+    lastMoveAt: now,
+    chatTimes: [] as number[],
+    voiceBudget: VOICE_BYTES_PER_SEC,
+    voiceAt: now,
+    reactBudget: REACTION_BURST,
+    reactAt: now,
+  };
 }
 
 function toState(p: Player): PlayerState {

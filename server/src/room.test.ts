@@ -6,6 +6,7 @@ import {
   type ClientMessage,
   type ServerMessage,
 } from "../../shared/src/protocol.ts";
+import { POLL_COUNT_MS, pollZones } from "../../shared/src/poll.ts";
 import { Room, type PeerEvents } from "./room.ts";
 
 
@@ -40,6 +41,21 @@ class FakeSocket {
 }
 
 const byNumber = (a: number, b: number) => a - b;
+
+/** RoomSync members a test does not watch. */
+const quietSync = {
+  joined() {},
+  left() {},
+  moves() {},
+  chat() {},
+  role() {},
+  setRole() {},
+  voice() {},
+  reactions() {},
+  hand() {},
+  setHand() {},
+  poll() {},
+};
 
 /** Ids that joined / left, as carried by snapshots. */
 const joinedIn = (msgs: ServerMessage[]) => msgs.flatMap((m) => (m.t === "snapshot" ? m.joined.map((p) => p.id) : []));
@@ -181,6 +197,7 @@ function syncedRoom() {
   const room = new Room("sync", {
     onEmpty: () => {},
     sync: {
+      ...quietSync,
       joined: (p) => sent.joined.push(p.id),
       left: (id) => sent.left.push(id),
       moves: (players) => sent.moves.push(players.map((p) => p.id)),
@@ -209,6 +226,7 @@ const remoteInfo = {
   dir: "south" as const,
   moving: false,
   role: "guest" as const,
+  hand: 0,
 };
 
 test("local joins, moves, chat and leaves are mirrored; remote ones are not echoed", () => {
@@ -444,6 +462,7 @@ test("cluster: roles and voice cross servers through the owner", () => {
   const sent = { roles: [] as unknown[], setRoles: [] as unknown[], voice: [] as number[][] };
   const { room, tick, join, everyone } = hostedRoom({
     sync: {
+      ...quietSync,
       joined: () => {},
       left: () => {},
       moves: () => {},
@@ -533,7 +552,8 @@ test("cluster: local voice goes to peers every tick, even while clients wait", (
   const frames: number[][] = [];
   const noop = () => {};
   const { tick, join } = hostedRoom({
-    sync: { joined: noop, left: noop, moves: noop, chat: noop, role: noop, setRole: noop, voice: (f) => frames.push(f.map((x) => x.seq)) },
+    sync: {
+      ...quietSync, joined: noop, left: noop, moves: noop, chat: noop, role: noop, setRole: noop, voice: (f) => frames.push(f.map((x) => x.seq)) },
   });
   const host = join("Hana", HOST_KEY, 1);
   host.s.deliver({ t: "voice", seq: 1, data: new Uint8Array([1]) });
@@ -665,7 +685,8 @@ test("a fixed 40 Hz x 2 groups schedule: 20 Hz per player, half per tick, mesh a
   const room = new Room("ab", {
     onEmpty: noop,
     schedule: { tickHz: 40, groups: 2 },
-    sync: { joined: noop, left: noop, moves: (ps) => meshMoves.push(ps.map((p) => p.id)), chat: noop, role: noop, setRole: noop, voice: noop },
+    sync: {
+      ...quietSync, joined: noop, left: noop, moves: (ps) => meshMoves.push(ps.map((p) => p.id)), chat: noop, role: noop, setRole: noop, voice: noop },
   });
   const tick = () => (room as unknown as { tick(now: number): void }).tick(Date.now());
   const [a, b] = ["Ann", "Ben"].map((name) => {
@@ -758,4 +779,116 @@ test("AOI: entering another cell sends who just came into view, idle players inc
   // Moving inside the same cell sends no view.
   a.s.deliver({ t: "move", x: 1876, y: 5000, dir: "east", moving: true });
   assert.ok(!a.s.take().some((m) => m.t === "view"));
+});
+
+// ------------------------------------------------------------ reactions, hands, polls
+
+const snapshotsOf = (msgs: ServerMessage[]) => msgs.flatMap((m) => (m.t === "snapshot" ? [m] : []));
+
+test("reactions ride the next snapshot, five in a burst at most", () => {
+  const { tick, join, everyone } = hostedRoom();
+  const a = join("Ann");
+  const b = join("Ben");
+  everyone(a.s, b.s);
+  for (let i = 0; i < 8; i++) a.s.deliver({ t: "react", kind: i % 6 });
+  assert.deepEqual(b.s.take(), []);
+  tick();
+  const reactions = snapshotsOf(b.s.take()).flatMap((m) => m.reactions);
+  assert.deepEqual(reactions.map((r) => [r.id, r.kind]), [0, 1, 2, 3, 4].map((k) => [a.self.id, k]));
+});
+
+test("guests raise hands in order; the host lowers them, and inviting a speaker does too", () => {
+  const { tick, join, everyone } = hostedRoom();
+  const host = join("Hana", HOST_KEY);
+  const a = join("Ann");
+  const b = join("Ben");
+  everyone(host.s, a.s, b.s);
+  a.s.deliver({ t: "hand", id: a.self.id, up: true });
+  b.s.deliver({ t: "hand", id: b.self.id, up: true });
+  host.s.deliver({ t: "hand", id: host.self.id, up: true }); // the host has the floor already
+  tick();
+  const hands = snapshotsOf(host.s.take()).flatMap((m) => m.hands);
+  assert.deepEqual(hands.map((h) => h.id), [a.self.id, b.self.id]);
+  assert.ok(hands.every((h) => h.hand > 0));
+  everyone(a.s, b.s);
+
+  // A newcomer sees raised hands in its welcome.
+  const late = join("Cat");
+  const welcome = late.s.take().find((m) => m.t === "welcome");
+  assert.ok(welcome?.t === "welcome" && welcome.players.find((p) => p.id === a.self.id)!.hand > 0);
+
+  // Only the host may lower someone else's hand.
+  a.s.deliver({ t: "hand", id: b.self.id, up: false });
+  host.s.deliver({ t: "hand", id: a.self.id, up: false });
+  host.s.deliver({ t: "set_role", id: b.self.id, role: "speaker" });
+  tick();
+  const lowered = snapshotsOf(late.s.take()).flatMap((m) => m.hands);
+  assert.deepEqual(lowered, [{ id: a.self.id, hand: 0 }, { id: b.self.id, hand: 0 }]);
+  // A speaker cannot raise a hand.
+  b.s.deliver({ t: "hand", id: b.self.id, up: true });
+  tick();
+  assert.deepEqual(snapshotsOf(late.s.take()).flatMap((m) => m.hands), []);
+});
+
+test("the host runs a poll answered by flying to a planet", () => {
+  const { room, tick, join, everyone } = hostedRoom();
+  const host = join("Hana", HOST_KEY);
+  const a = join("Ann");
+  everyone(host.s, a.s);
+  a.s.deliver({ t: "poll_start", question: "Tea?", options: ["Yes", "No"] });
+  assert.deepEqual(a.s.take().map((m) => m.t), ["error"]);
+  host.s.deliver({ t: "poll_start", question: "  Tea?  ", options: ["Yes", " ", "No"] });
+  const started = a.s.take().find((m) => m.t === "poll");
+  assert.ok(started?.t === "poll");
+  assert.deepEqual([started.poll.question, started.poll.options, started.poll.open], ["Tea?", ["Yes", "No"], true]);
+
+  // Players of another server: two fly to "No" (the bottom planet); one appears
+  // there without moving, which is not a vote.
+  const [, no] = pollZones(2);
+  for (const id of [42, 43, 44]) room.remoteJoined(2, { ...remoteInfo, id, x: no.x, y: no.y - 20 });
+  room.remoteMoves(2, [42, 43].map((id) => ({ id, x: no.x, y: no.y, dir: "south" as const, moving: false })));
+  tick(POLL_COUNT_MS + 10);
+  assert.deepEqual(snapshotsOf(a.s.take()).map((m) => m.pollCounts).filter((c) => c.length), [[0, 2]]);
+
+  // A newcomer gets the open poll in its welcome.
+  const late = join("Cat");
+  const welcome = late.s.take().find((m) => m.t === "welcome");
+  assert.equal(welcome?.t === "welcome" && welcome.poll?.id, started.poll.id);
+
+  host.s.deliver({ t: "poll_end" });
+  const ended = a.s.take().find((m) => m.t === "poll");
+  assert.ok(ended?.t === "poll");
+  assert.deepEqual([ended.poll.open, ended.poll.counts], [false, [0, 2]]);
+});
+
+test("cluster: hands, reactions and polls are mirrored to peers", () => {
+  const sent: string[] = [];
+  const { room, tick, join, everyone } = hostedRoom({
+    sync: {
+      ...quietSync,
+      reactions: (list) => sent.push(`react:${list.length}`),
+      hand: (id, hand) => sent.push(`hand:${id}:${hand > 0}`),
+      setHand: (owner, id, hand) => sent.push(`set_hand:${owner}:${id}:${hand}`),
+      poll: (poll) => sent.push(`poll:${poll.open}`),
+    },
+  });
+  const host = join("Hana", HOST_KEY, 1);
+  const a = join("Ann", "", 2);
+  everyone(host.s, a.s);
+  room.remoteJoined(5, { ...remoteInfo, hand: 123 });
+  a.s.deliver({ t: "react", kind: 0 });
+  a.s.deliver({ t: "hand", id: 2, up: true });
+  host.s.deliver({ t: "hand", id: 42, up: false }); // a hand on server 5
+  host.s.deliver({ t: "poll_start", question: "Q", options: ["a", "b"] });
+  host.s.deliver({ t: "poll_end" });
+  tick();
+  assert.deepEqual(sent, ["hand:2:true", "set_hand:5:42:0", "poll:true", "poll:false", "react:1"]);
+
+  // From a peer: its host's poll, and its player's lowered hand.
+  room.remotePoll({ id: 9, question: "Q2", options: ["x", "y", "z"], open: true, counts: [] });
+  room.remoteHand(5, 42, 0);
+  tick();
+  const got = a.s.take();
+  assert.ok(got.some((m) => m.t === "poll" && m.poll.id === 9 && m.poll.counts.length === 3));
+  assert.ok(snapshotsOf(got).some((m) => m.hands.some((h) => h.id === 42 && h.hand === 0)));
 });

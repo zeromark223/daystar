@@ -1,6 +1,14 @@
 import { decode, encode, Type, type Struct } from "../../../shared/src/binary/schema.ts";
+import { isReactionKind, type Reaction } from "../../../shared/src/audience.ts";
+import type { Poll } from "../../../shared/src/poll.ts";
 import {
   ChatStruct,
+  HandStruct,
+  pollFromWire,
+  PollStruct,
+  pollToWire,
+  ReactionStruct,
+  type WirePoll,
   infoFromWire,
   infoToWire,
   PlayerInfoStruct,
@@ -44,7 +52,15 @@ export type MeshMessage =
   /** Ask the receiver (the player's server) to change the role of its player `id`. */
   | { t: "set_role"; room: string; id: number; role: Role }
   /** Voice frames from the sender's speakers during one tick. */
-  | { t: "voice"; room: string; frames: VoiceFrame[] };
+  | { t: "voice"; room: string; frames: VoiceFrame[] }
+  /** Reactions from the sender's players during one tick. */
+  | { t: "reactions"; room: string; list: Reaction[] }
+  /** The sender's player `id` raised (ticket) or lowered (0) its hand. */
+  | { t: "hand"; room: string; id: number; hand: number }
+  /** Ask the receiver (the player's server) to set the hand of its player `id`. */
+  | { t: "set_hand"; room: string; id: number; hand: number }
+  /** The sender's host started (open) or ended a poll. */
+  | { t: "poll"; room: string; poll: Poll };
 
 const Op = {
   interest: 100,
@@ -58,7 +74,13 @@ const Op = {
   role: 108,
   set_role: 109,
   voice: 110,
+  reactions: 111,
+  hand: 112,
+  set_hand: 113,
+  poll: 114,
 } as const;
+
+const HandMeshStruct: Struct = { room: Type.String, ...HandStruct };
 
 const RoleStruct: Struct = { room: Type.String, id: Type.UInt16, role: Type.UInt8 };
 
@@ -74,6 +96,10 @@ const Schemas: Record<number, Struct> = {
   [Op.role]: RoleStruct,
   [Op.set_role]: RoleStruct,
   [Op.voice]: { room: Type.String, frames: Type.Object8, frames_Struct: VoiceFrameStruct },
+  [Op.reactions]: { room: Type.String, list: Type.Object16, list_Struct: ReactionStruct },
+  [Op.hand]: HandMeshStruct,
+  [Op.set_hand]: HandMeshStruct,
+  [Op.poll]: { room: Type.String, poll: Type.Object8, poll_Struct: PollStruct },
 };
 
 export function encodeMesh(msg: MeshMessage): Uint8Array<ArrayBuffer> {
@@ -105,6 +131,13 @@ export function encodeMesh(msg: MeshMessage): Uint8Array<ArrayBuffer> {
       return encode(Schemas[Op[msg.t]], { room: msg.room, id: msg.id, role: roleIndex(msg.role) }, Op[msg.t]);
     case "voice":
       return encode(Schemas[Op.voice], msg, Op.voice);
+    case "reactions":
+      return encode(Schemas[Op.reactions], msg, Op.reactions);
+    case "hand":
+    case "set_hand":
+      return encode(Schemas[Op[msg.t]], msg, Op[msg.t]);
+    case "poll":
+      return encode(Schemas[Op.poll], { room: msg.room, poll: [pollToWire(msg.poll)] }, Op.poll);
   }
 }
 
@@ -152,6 +185,19 @@ export function decodeMesh(bytes: Uint8Array): MeshMessage | null {
       }
       case Op.voice:
         return { t: "voice", ...decode<{ room: string; frames: VoiceFrame[] }>(schema, bytes, 1) };
+      case Op.reactions: {
+        const m = decode<{ room: string; list: Reaction[] }>(schema, bytes, 1);
+        return { t: "reactions", room: m.room, list: m.list.filter((r) => isReactionKind(r.kind)) };
+      }
+      case Op.hand:
+      case Op.set_hand: {
+        const m = decode<{ room: string; id: number; hand: number }>(schema, bytes, 1);
+        return { t: op === Op.hand ? "hand" : "set_hand", ...m };
+      }
+      case Op.poll: {
+        const m = decode<{ room: string; poll: WirePoll[] }>(schema, bytes, 1);
+        return m.poll.length === 1 ? { t: "poll", room: m.room, poll: pollFromWire(m.poll[0]) } : null;
+      }
       default:
         return null;
     }

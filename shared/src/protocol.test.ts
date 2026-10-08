@@ -13,7 +13,7 @@ import {
   type ServerMessage,
 } from "./protocol.ts";
 
-const player = { id: 7, name: "Mochi", appearance: 5, x: 540.5, y: 600.25, dir: "west" as const, moving: true, role: "speaker" as const };
+const player = { id: 7, name: "Mochi", appearance: 5, x: 540.5, y: 600.25, dir: "west" as const, moving: true, role: "speaker" as const, hand: 0 };
 
 test("client messages round-trip", () => {
   const messages: ClientMessage[] = [
@@ -24,25 +24,45 @@ test("client messages round-trip", () => {
     { t: "set_role", id: 9, role: "speaker" },
     { t: "set_role", id: 9, role: "guest" },
     { t: "voice", seq: 65535, data: new Uint8Array([1, 2, 3]) },
+    { t: "react", kind: 5 },
+    { t: "hand", id: 9, up: true },
+    { t: "hand", id: 9, up: false },
+    { t: "poll_start", question: "Lunch?", options: ["Phở", "Bún chả", "Cơm tấm"] },
+    { t: "poll_end" },
   ];
   for (const m of messages) assert.deepEqual(decodeClientMessage(encodeClientMessage(m)), m);
 });
 
+const emptyTail = { voice: [], joined: [], left: [], reactions: [], hands: [], pollCounts: [] };
+const poll = { id: 4_000_000_001, question: "Which planet next?", options: ["Mars 🔴", "Venus", "Neptune"], open: true, counts: [0, 2, 1] };
+
 test("server messages round-trip", () => {
   const chat = { id: 3, playerId: 7, name: "Mochi", text: "hi", ts: 1_790_219_348_670 };
   const messages: ServerMessage[] = [
-    { t: "welcome", selfId: 7, players: [player], chat: [chat], snapshotHz: 20 },
+    { t: "welcome", selfId: 7, players: [player, { ...player, id: 8, hand: 17_900_000_000 % 2 ** 32 }], chat: [chat], snapshotHz: 20, poll: null },
+    { t: "welcome", selfId: 7, players: [], chat: [], snapshotHz: 10, poll },
     { t: "player_joined", player },
     { t: "player_left", id: 7 },
     { t: "chat", message: chat },
     { t: "correction", x: 10, y: 20.5 },
     { t: "error", message: "nope" },
-    { t: "snapshot", players: [{ id: 1, x: 9999.75, y: 0, dir: "south", moving: true }], voice: [], joined: [], left: [] },
-    { t: "snapshot", players: [], voice: [{ id: 2, seq: 4, data: new Uint8Array([9, 8]) }], joined: [player], left: [3, 65535] },
+    { t: "snapshot", players: [{ id: 1, x: 9999.75, y: 0, dir: "south", moving: true }], ...emptyTail },
+    {
+      t: "snapshot",
+      players: [],
+      voice: [{ id: 2, seq: 4, data: new Uint8Array([9, 8]) }],
+      joined: [player],
+      left: [3, 65535],
+      reactions: [{ id: 7, kind: 0 }, { id: 8, kind: 5 }],
+      hands: [{ id: 7, hand: 4_000_000_000 }, { id: 8, hand: 0 }],
+      pollCounts: [3, 0, 65535],
+    },
     { t: "migrate" },
     { t: "role", id: 7, role: "host" },
     { t: "rate", snapshotHz: 10 },
     { t: "view", from: 300, to: 301, players: [{ id: 3, x: 1200.5, y: 4000, dir: "north", moving: false }] },
+    { t: "poll", poll },
+    { t: "poll", poll: { ...poll, open: false, counts: [12, 30, 0] } },
   ];
   for (const m of messages) assert.deepEqual(decodeServerMessage(encodeServerMessage(m)), m);
 });
@@ -57,8 +77,8 @@ test("positions are quantized to the wire grid", () => {
 
 test("snapshot costs 7 bytes per player", () => {
   const players = Array.from({ length: 100 }, (_, i) => ({ id: i, x: i, y: i, dir: "south" as const, moving: false }));
-  // + 1 (no voice) + 2 (no joins) + 2 (no leaves)
-  assert.equal(encodeServerMessage({ t: "snapshot", players, voice: [], joined: [], left: [] }).length, 1 + 2 + 100 * 7 + 5);
+  // + 1 (no voice) + 2 (no joins) + 2 (no leaves) + 2 (no reactions) + 2 (no hands) + 1 (no poll counts)
+  assert.equal(encodeServerMessage({ t: "snapshot", players, ...emptyTail }).length, 1 + 2 + 100 * 7 + 10);
 });
 
 test("malformed or unknown frames decode to null", () => {
@@ -86,8 +106,12 @@ test("snapshots assembled from parts match the regular encoder", () => {
   for (const v of [[], voice]) {
     for (const joined of [[], [player]]) {
       const left = joined.length ? [9, 10] : [];
-      const regular = encodeServerMessage({ t: "snapshot", players, voice: v, joined, left });
-      const parts = assembleSnapshot(players.map(snapshotEntry), snapshotTail(v, joined, left));
+      const extras = joined.length
+        ? { reactions: [{ id: 3, kind: 1 }], hands: [{ id: 7, hand: 99 }], pollCounts: [4, 5] }
+        : { reactions: [], hands: [], pollCounts: [] };
+      const tail = { voice: v, joined, left, ...extras };
+      const regular = encodeServerMessage({ t: "snapshot", players, ...tail });
+      const parts = assembleSnapshot(players.map(snapshotEntry), snapshotTail(tail));
       assert.deepEqual([...parts], [...regular]);
     }
   }

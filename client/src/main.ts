@@ -1,13 +1,16 @@
 import "./style.css";
 import { ROOM_ID_PATTERN } from "../../shared/src/constants.ts";
+import type { Poll } from "../../shared/src/poll.ts";
 import type { PlayerInfo, ServerMessage } from "../../shared/src/protocol.ts";
 import { canSpeak, ROLE_LABELS, type Role } from "../../shared/src/roles.ts";
 import { setSnapshotRate } from "./game/avatar.ts";
 import { Game } from "./game/game.ts";
 import { Connection, createRoom } from "./net.ts";
+import { AudienceBar } from "./ui/audience.ts";
 import { ChatPanel } from "./ui/chat.ts";
 import { runLobby, type LobbyChoice } from "./ui/lobby.ts";
 import { PeoplePanel } from "./ui/people.ts";
+import { PollPanel } from "./ui/poll.ts";
 import { unlockAudio } from "./voice/audio.ts";
 import { Microphone } from "./voice/microphone.ts";
 import { voiceProblem } from "./voice/support.ts";
@@ -42,8 +45,8 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const RECONNECT_ATTEMPTS = 5;
 
 const HINTS = {
-  player: "WASD / arrows or tap to move · wheel or +/− to zoom · Enter to chat · Esc to stop typing",
-  host: "You are the sun · tap a player to choose speakers · wheel or +/− to zoom · Enter to chat",
+  player: "WASD / arrows or tap to move · 1–6 react · H raise hand · wheel or +/− to zoom · Enter to chat",
+  host: "You are the sun · tap a player to choose speakers · 1–6 react · wheel or +/− to zoom · Enter to chat",
   touchPlayer: "Drag anywhere to move · tap to go there · pinch to zoom",
   touchHost: "You are the sun · tap a player to choose speakers · pinch to zoom",
 };
@@ -74,7 +77,28 @@ async function main(): Promise<void> {
 
   const player = new VoicePlayer();
   const mic = new Microphone((seq, data) => conn?.send({ t: "voice", seq, data }));
-  const people = new PeoplePanel({ setRole: (id, role) => conn?.send({ t: "set_role", id, role }) });
+  const people = new PeoplePanel({
+    setRole: (id, role) => conn?.send({ t: "set_role", id, role }),
+    lowerHand: (id) => conn?.send({ t: "hand", id, up: false }),
+  });
+  const audience = new AudienceBar({
+    react: (kind) => conn?.send({ t: "react", kind }),
+    hand: (up) => conn?.send({ t: "hand", id: selfId, up }),
+  });
+  const polls = new PollPanel({
+    start: (question, options) => conn?.send({ t: "poll_start", question, options }),
+    end: () => conn?.send({ t: "poll_end" }),
+  });
+
+  /** A poll started or ended (or was already open when we joined). */
+  const showPoll = (poll: Poll, announce: boolean) => {
+    game!.showPoll(poll);
+    polls.show(poll);
+    hint.classList.remove("touch"); // the card takes its place on phones
+    if (!announce) return;
+    if (poll.open) chat?.addSystem(`Poll: ${poll.question} Fly to an answer's planet around the sun to vote.`);
+    else chat?.addSystem(`Poll closed: ${poll.options.map((o, i) => `${o} ${poll.counts[i] ?? 0}`).join(" · ")}`);
+  };
   if (new URLSearchParams(location.search).has("debug")) Object.assign(window, { voice: player, mic });
 
   const updateCount = () => {
@@ -126,6 +150,8 @@ async function main(): Promise<void> {
     roleChip.hidden = role === "guest";
     roleChip.textContent = ROLE_LABELS[role];
     roleChip.className = `role-chip ${role}`;
+    audience.setCanRaise(role === "guest");
+    polls.setHost(role === "host");
     if (TOUCH) hint.textContent = role === "host" ? HINTS.touchHost : HINTS.touchPlayer;
     else hint.textContent = role === "host" ? HINTS.host : HINTS.player;
     if (TOUCH && (!announce || before !== role)) {
@@ -144,8 +170,17 @@ async function main(): Promise<void> {
   // ------------------------------------------------------------ messages
 
   const addPlayer = (p: PlayerInfo) => {
-    people.upsert(p.id, p.name, p.role);
+    people.upsert(p.id, p.name, p.role, p.hand);
     game!.addPlayer(p);
+    if (p.id === selfId) audience.setHand(p.hand > 0);
+  };
+
+  const handChanged = (id: number, hand: number) => {
+    const before = people.handOf(id);
+    people.setHand(id, hand);
+    game!.setHand(id, hand > 0);
+    if (id === selfId) audience.setHand(hand > 0);
+    else if (selfRole === "host" && hand > 0 && before === 0) chat?.addSystem(`${people.nameOf(id)} raised a hand.`);
   };
 
   const playerLeft = (id: number) => {
@@ -173,6 +208,8 @@ async function main(): Promise<void> {
         people.setSelf(msg.selfId);
         for (const p of msg.players) addPlayer(p);
         setSelfRole(msg.players.find((p) => p.id === msg.selfId)?.role ?? "guest", rejoin);
+        if (msg.poll) showPoll(msg.poll, !rejoin);
+        else if (rejoin) polls.hide();
         if (!rejoin) {
           msg.chat.forEach((m) => chat!.addMessage(m));
           chat.addSystem(`You joined ${roomId}.`);
@@ -228,10 +265,19 @@ async function main(): Promise<void> {
         if (msg.joined.length) updateCount();
         game.applySnapshot(msg.players);
         player.push(msg.voice.filter((frame) => frame.id !== selfId));
+        for (const r of msg.reactions) game.react(r.id, r.kind);
+        for (const h of msg.hands) handChanged(h.id, h.hand);
+        if (msg.pollCounts.length > 0) {
+          game.setPollCounts(msg.pollCounts);
+          polls.setCounts(msg.pollCounts);
+        }
         for (const id of msg.left) playerLeft(id);
         break;
       case "correction":
         game.applyCorrection(msg.x, msg.y);
+        break;
+      case "poll":
+        showPoll(msg.poll, true);
         break;
       case "migrate":
         void migrate();
@@ -305,6 +351,8 @@ async function main(): Promise<void> {
       pick: (id, x, y) => people.openMenu(id, x, y),
     });
     chat = new ChatPanel((text) => conn?.send({ t: "chat", text }));
+    // Which answer planet we are on, for the poll card.
+    setInterval(() => polls.setMine(game!.pollAnswer), 200);
     adopt(first);
   });
 
@@ -320,6 +368,7 @@ async function main(): Promise<void> {
     setTimeout(() => (button.textContent = "Copy invite link"), 1500);
   });
   hud.hidden = false;
+  audience.show();
 }
 
 main();

@@ -2,6 +2,8 @@ import { decode, encode, Type, type Struct } from "./binary/schema.ts";
 import { isAppearanceId, type AppearanceId } from "./appearance.ts";
 import { DIRECTIONS, type Direction } from "./direction.ts";
 import { roleFromIndex, roleIndex, type Role } from "./roles.ts";
+import { isReactionKind, type HandChange, type Reaction } from "./audience.ts";
+import { POLL_MAX_OPTIONS, type Poll } from "./poll.ts";
 
 // Every frame is binary: one opcode byte, then the message body laid out by
 // its schema (see ./binary/schema.ts).
@@ -15,6 +17,8 @@ export interface PlayerInfo {
   dir: Direction;
   moving: boolean;
   role: Role;
+  /** Raised hand: when it went up (see handTicket), or 0. */
+  hand: number;
 }
 
 export interface PlayerState {
@@ -51,11 +55,19 @@ export type ClientMessage =
   /** Host only: make a player a speaker or a guest again. */
   | { t: "set_role"; id: number; role: "speaker" | "guest" }
   /** Host and speakers only: one encoded frame from the microphone. */
-  | { t: "voice"; seq: number; data: Uint8Array };
+  | { t: "voice"; seq: number; data: Uint8Array }
+  /** An emoji reaction (index into REACTIONS). */
+  | { t: "react"; kind: number }
+  /** Raise or lower our own hand; the host may also lower anyone's. */
+  | { t: "hand"; id: number; up: boolean }
+  /** Host only: ask the room a question, answered by flying to a planet. */
+  | { t: "poll_start"; question: string; options: string[] }
+  /** Host only: close the poll and show the result. */
+  | { t: "poll_end" };
 
 export type ServerMessage =
   /** `snapshotHz`: how often this client will get snapshots (see SNAPSHOT_GROUPS_AT). */
-  | { t: "welcome"; selfId: number; players: PlayerInfo[]; chat: ChatMessage[]; snapshotHz: number }
+  | { t: "welcome"; selfId: number; players: PlayerInfo[]; chat: ChatMessage[]; snapshotHz: number; poll: Poll | null }
   | { t: "player_joined"; player: PlayerInfo }
   | { t: "player_left"; id: number }
   | { t: "chat"; message: ChatMessage }
@@ -65,9 +77,19 @@ export type ServerMessage =
    * Once per tick: players that changed, voice frames received since the last one,
    * and who joined (full info) or left the room meanwhile. Joins and leaves ride the
    * snapshot so a burst of arrivals costs no extra sends; a client applies `joined`
-   * first, then positions and voice, then `left`.
+   * first, then positions and voice, then `left`. Reactions, raised or lowered
+   * hands and new poll counts (empty when unchanged) ride along the same way.
    */
-  | { t: "snapshot"; players: PlayerState[]; voice: VoiceFrame[]; joined: PlayerInfo[]; left: number[] }
+  | {
+      t: "snapshot";
+      players: PlayerState[];
+      voice: VoiceFrame[];
+      joined: PlayerInfo[];
+      left: number[];
+      reactions: Reaction[];
+      hands: HandChange[];
+      pollCounts: number[];
+    }
   | { t: "role"; id: number; role: Role }
   /** The room switched snapshot groups: snapshots now arrive `snapshotHz` times a second. */
   | { t: "rate"; snapshotHz: number }
@@ -79,7 +101,9 @@ export type ServerMessage =
    */
   | { t: "view"; from: number; to: number; players: PlayerState[] }
   /** Cluster: reconnect elsewhere (ask the agent's /api/migrate); the server is shedding load. */
-  | { t: "migrate" };
+  | { t: "migrate" }
+  /** The host started a poll, or ended it (`open` false, with the final counts). */
+  | { t: "poll"; poll: Poll };
 
 // ------------------------------------------------------------------ positions
 
@@ -114,8 +138,20 @@ export const PlayerInfoStruct: Struct = {
   name: Type.String,
   appearance: Type.UInt8,
   role: Type.UInt8,
+  hand: Type.UInt32,
 };
 export const VoiceFrameStruct: Struct = { id: Type.UInt16, seq: Type.UInt16, data: Type.Bytes };
+export const ReactionStruct: Struct = { id: Type.UInt16, kind: Type.UInt8 };
+export const HandStruct: Struct = { id: Type.UInt16, hand: Type.UInt32 };
+export const PollStruct: Struct = {
+  id: Type.UInt32,
+  question: Type.String,
+  options: Type.Array8,
+  options_Type: Type.String,
+  open: Type.UInt8,
+  counts: Type.Array8,
+  counts_Type: Type.UInt16,
+};
 export const ChatStruct: Struct = {
   id: Type.UInt32,
   playerId: Type.UInt16,
@@ -131,6 +167,10 @@ const Op = {
   move: 3,
   set_role: 4,
   voice: 5,
+  react: 6,
+  hand: 7,
+  poll_start: 8,
+  poll_end: 9,
   // server -> client
   welcome: 10,
   player_joined: 11,
@@ -143,6 +183,7 @@ const Op = {
   role: 18,
   rate: 19,
   view: 20,
+  poll: 21,
 } as const;
 
 /** Opcode of server snapshots, for callers that only need to recognize them. */
@@ -183,11 +224,27 @@ const TailPart: Struct = {
   joined_Struct: PlayerInfoStruct,
   left: Type.Array16,
   left_Type: Type.UInt16,
+  reactions: Type.Object16,
+  reactions_Struct: ReactionStruct,
+  hands: Type.Object16,
+  hands_Struct: HandStruct,
+  pollCounts: Type.Array8,
+  pollCounts_Type: Type.UInt16,
 };
 
-/** What ends a snapshot, the same for every cell: voice frames, joins and leaves. */
-export function snapshotTail(voice: VoiceFrame[], joined: PlayerInfo[], left: number[]): Uint8Array {
-  return encode(TailPart, { voice, joined: joined.map(infoToWire), left });
+/** Everything after the players in a snapshot; the same for every cell. */
+export interface SnapshotTail {
+  voice: VoiceFrame[];
+  joined: PlayerInfo[];
+  left: number[];
+  reactions: Reaction[];
+  hands: HandChange[];
+  pollCounts: number[];
+}
+
+/** What ends a snapshot, the same for every cell: voice, joins and leaves, reactions, hands, poll counts. */
+export function snapshotTail(tail: SnapshotTail): Uint8Array {
+  return encode(TailPart, { ...tail, joined: tail.joined.map(infoToWire) });
 }
 
 export function assembleSnapshot(entries: Uint8Array[], tail: Uint8Array): Uint8Array<ArrayBuffer> {
@@ -211,6 +268,10 @@ const Schemas: Record<number, Struct> = {
   [Op.move]: { x: Type.UInt16, y: Type.UInt16, motion: Type.UInt8 },
   [Op.set_role]: { id: Type.UInt16, role: Type.UInt8 },
   [Op.voice]: { seq: Type.UInt16, data: Type.Bytes },
+  [Op.react]: { kind: Type.UInt8 },
+  [Op.hand]: { id: Type.UInt16, up: Type.UInt8 },
+  [Op.poll_start]: { question: Type.String, options: Type.Array8, options_Type: Type.String },
+  [Op.poll_end]: {},
   [Op.welcome]: {
     selfId: Type.UInt16,
     players: Type.Object16,
@@ -218,26 +279,20 @@ const Schemas: Record<number, Struct> = {
     chat: Type.Object8,
     chat_Struct: ChatStruct,
     snapshotHz: Type.UInt8,
+    poll: Type.Object8,
+    poll_Struct: PollStruct,
   },
   [Op.player_joined]: PlayerInfoStruct,
   [Op.player_left]: { id: Type.UInt16 },
   [Op.server_chat]: ChatStruct,
   [Op.correction]: { x: Type.UInt16, y: Type.UInt16 },
   [Op.error]: { message: Type.String },
-  [Op.snapshot]: {
-    players: Type.Object16,
-    players_Struct: PlayerStateStruct,
-    voice: Type.Object8,
-    voice_Struct: VoiceFrameStruct,
-    joined: Type.Object16,
-    joined_Struct: PlayerInfoStruct,
-    left: Type.Array16,
-    left_Type: Type.UInt16,
-  },
+  [Op.snapshot]: { players: Type.Object16, players_Struct: PlayerStateStruct, ...TailPart },
   [Op.migrate]: {},
   [Op.role]: { id: Type.UInt16, role: Type.UInt8 },
   [Op.rate]: { snapshotHz: Type.UInt8 },
   [Op.view]: { from: Type.UInt16, to: Type.UInt16, players: Type.Object16, players_Struct: PlayerStateStruct },
+  [Op.poll]: { poll: Type.Object8, poll_Struct: PollStruct },
 };
 
 // ------------------------------------------------------------------ wire <-> message
@@ -253,7 +308,19 @@ export interface WireInfo extends WireState {
   name: string;
   appearance: number;
   role: number;
+  hand: number;
 }
+
+export interface WirePoll {
+  id: number;
+  question: string;
+  options: string[];
+  open: number;
+  counts: number[];
+}
+
+export const pollToWire = (p: Poll): WirePoll => ({ ...p, open: p.open ? 1 : 0 });
+export const pollFromWire = (w: WirePoll): Poll => ({ ...w, open: w.open === 1 });
 
 export function stateToWire(p: PlayerState): WireState {
   return { id: p.id, x: toWire(p.x), y: toWire(p.y), motion: packMotion(p.dir, p.moving) };
@@ -264,14 +331,14 @@ export function stateFromWire(w: WireState): PlayerState {
 }
 
 export function infoToWire(p: PlayerInfo): WireInfo {
-  return { ...stateToWire(p), name: p.name, appearance: p.appearance, role: roleIndex(p.role) };
+  return { ...stateToWire(p), name: p.name, appearance: p.appearance, role: roleIndex(p.role), hand: p.hand };
 }
 
 export function infoFromWire(w: WireInfo): PlayerInfo {
   if (!isAppearanceId(w.appearance)) throw new RangeError("Unknown appearance");
   const role = roleFromIndex(w.role);
   if (!role) throw new RangeError("Unknown role");
-  return { ...stateFromWire(w), name: w.name, appearance: w.appearance, role };
+  return { ...stateFromWire(w), name: w.name, appearance: w.appearance, role, hand: w.hand };
 }
 
 export function encodeClientMessage(msg: ClientMessage): Uint8Array<ArrayBuffer> {
@@ -290,6 +357,14 @@ export function encodeClientMessage(msg: ClientMessage): Uint8Array<ArrayBuffer>
       return encode(Schemas[Op.set_role], { id: msg.id, role: roleIndex(msg.role) }, Op.set_role);
     case "voice":
       return encode(Schemas[Op.voice], msg, Op.voice);
+    case "react":
+      return encode(Schemas[Op.react], msg, Op.react);
+    case "hand":
+      return encode(Schemas[Op.hand], { id: msg.id, up: msg.up ? 1 : 0 }, Op.hand);
+    case "poll_start":
+      return encode(Schemas[Op.poll_start], msg, Op.poll_start);
+    case "poll_end":
+      return encode(Schemas[Op.poll_end], {}, Op.poll_end);
   }
 }
 
@@ -317,6 +392,21 @@ export function decodeClientMessage(bytes: Uint8Array): ClientMessage | null {
       }
       case Op.voice:
         return { t: "voice", ...decode<{ seq: number; data: Uint8Array }>(Schemas[op], bytes, 1) };
+      case Op.react: {
+        const m = decode<{ kind: number }>(Schemas[op], bytes, 1);
+        return isReactionKind(m.kind) ? { t: "react", kind: m.kind } : null;
+      }
+      case Op.hand: {
+        const m = decode<{ id: number; up: number }>(Schemas[op], bytes, 1);
+        return m.up <= 1 ? { t: "hand", id: m.id, up: m.up === 1 } : null;
+      }
+      case Op.poll_start: {
+        const m = decode<{ question: string; options: string[] }>(Schemas[op], bytes, 1);
+        return m.options.length <= POLL_MAX_OPTIONS ? { t: "poll_start", question: m.question, options: m.options } : null;
+      }
+      case Op.poll_end:
+        decode(Schemas[op], bytes, 1);
+        return { t: "poll_end" };
       default:
         return null;
     }
@@ -330,7 +420,13 @@ export function encodeServerMessage(msg: ServerMessage): Uint8Array<ArrayBuffer>
     case "welcome":
       return encode(
         Schemas[Op.welcome],
-        { selfId: msg.selfId, players: msg.players.map(infoToWire), chat: msg.chat, snapshotHz: msg.snapshotHz },
+        {
+          selfId: msg.selfId,
+          players: msg.players.map(infoToWire),
+          chat: msg.chat,
+          snapshotHz: msg.snapshotHz,
+          poll: msg.poll ? [pollToWire(msg.poll)] : [],
+        },
         Op.welcome,
       );
     case "player_joined":
@@ -346,7 +442,7 @@ export function encodeServerMessage(msg: ServerMessage): Uint8Array<ArrayBuffer>
     case "snapshot":
       return encode(
         Schemas[Op.snapshot],
-        { players: msg.players.map(stateToWire), voice: msg.voice, joined: msg.joined.map(infoToWire), left: msg.left },
+        { ...msg, players: msg.players.map(stateToWire), joined: msg.joined.map(infoToWire) },
         Op.snapshot,
       );
     case "migrate":
@@ -357,6 +453,8 @@ export function encodeServerMessage(msg: ServerMessage): Uint8Array<ArrayBuffer>
       return encode(Schemas[Op.rate], msg, Op.rate);
     case "view":
       return encode(Schemas[Op.view], { from: msg.from, to: msg.to, players: msg.players.map(stateToWire) }, Op.view);
+    case "poll":
+      return encode(Schemas[Op.poll], { poll: [pollToWire(msg.poll)] }, Op.poll);
   }
 }
 
@@ -366,8 +464,19 @@ export function decodeServerMessage(bytes: Uint8Array): ServerMessage | null {
     const schema = Schemas[op];
     switch (op) {
       case Op.welcome: {
-        const m = decode<{ selfId: number; players: WireInfo[]; chat: ChatMessage[]; snapshotHz: number }>(schema, bytes, 1);
-        return { t: "welcome", selfId: m.selfId, players: m.players.map(infoFromWire), chat: m.chat, snapshotHz: m.snapshotHz };
+        const m = decode<{ selfId: number; players: WireInfo[]; chat: ChatMessage[]; snapshotHz: number; poll: WirePoll[] }>(
+          schema,
+          bytes,
+          1,
+        );
+        return {
+          t: "welcome",
+          selfId: m.selfId,
+          players: m.players.map(infoFromWire),
+          chat: m.chat,
+          snapshotHz: m.snapshotHz,
+          poll: m.poll.length ? pollFromWire(m.poll[0]) : null,
+        };
       }
       case Op.player_joined:
         return { t: "player_joined", player: infoFromWire(decode<WireInfo>(schema, bytes, 1)) };
@@ -382,8 +491,14 @@ export function decodeServerMessage(bytes: Uint8Array): ServerMessage | null {
       case Op.error:
         return { t: "error", ...decode<{ message: string }>(schema, bytes, 1) };
       case Op.snapshot: {
-        const m = decode<{ players: WireState[]; voice: VoiceFrame[]; joined: WireInfo[]; left: number[] }>(schema, bytes, 1);
-        return { t: "snapshot", players: m.players.map(stateFromWire), voice: m.voice, joined: m.joined.map(infoFromWire), left: m.left };
+        const m = decode<Omit<SnapshotTail, "joined"> & { players: WireState[]; joined: WireInfo[] }>(schema, bytes, 1);
+        return {
+          t: "snapshot",
+          ...m,
+          players: m.players.map(stateFromWire),
+          joined: m.joined.map(infoFromWire),
+          reactions: m.reactions.filter((r) => isReactionKind(r.kind)),
+        };
       }
       case Op.migrate:
         decode(schema, bytes, 1);
@@ -400,6 +515,10 @@ export function decodeServerMessage(bytes: Uint8Array): ServerMessage | null {
       case Op.view: {
         const m = decode<{ from: number; to: number; players: WireState[] }>(schema, bytes, 1);
         return { t: "view", from: m.from, to: m.to, players: m.players.map(stateFromWire) };
+      }
+      case Op.poll: {
+        const m = decode<{ poll: WirePoll[] }>(schema, bytes, 1);
+        return m.poll.length ? { t: "poll", poll: pollFromWire(m.poll[0]) } : null;
       }
       default:
         return null;
