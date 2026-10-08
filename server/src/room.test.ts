@@ -13,6 +13,8 @@ import { Room, type PeerEvents } from "./room.ts";
 /** Stand-in peer: records what the room sends and feeds it client messages. */
 class FakeSocket {
   received: ServerMessage[] = [];
+  /** Like Bun past its backpressure limit: frames to this socket are silently dropped. */
+  dropping = false;
   events!: PeerEvents;
   readonly channels = new Set<string>();
   get subscribed(): boolean {
@@ -25,6 +27,7 @@ class FakeSocket {
     this.channels.delete(channel);
   }
   send(data: Uint8Array): void {
+    if (this.dropping) return;
     this.received.push(decodeServerMessage(data)!);
   }
   close(): void {
@@ -905,4 +908,37 @@ test("snapshots carry the tick's time and how old each position is", () => {
   const entry = snap.players.find((p) => p.id === a.self.id)!;
   assert.ok(Math.abs(snap.time - ((movedAt + 40) % 2 ** 32)) < 20);
   assert.ok(entry.age >= 35 && entry.age <= 60, `age ${entry.age}`);
+});
+
+test("a socket that missed a join sees the player in snapshots without knowing who it is", () => {
+  const topic = fakeTopic();
+  const { room, tick, sockets, done } = setup(topic);
+  const [ann] = sockets;
+  ann.dropping = true; // e.g. a phone in the background with a full send buffer
+  const dan = new FakeSocket();
+  topic.sockets.push(dan);
+  dan.events = room.accept(dan);
+  dan.deliver({ t: "join", name: "Dan", appearance: 9, hostKey: "" });
+  const w = dan.take().find((m) => m.t === "welcome");
+  const danId = w?.t === "welcome" ? w.selfId : -1;
+  const me = w?.t === "welcome" ? w.players.find((p) => p.id === danId)! : null!;
+  tick();
+  ann.dropping = false;
+  dan.deliver({ t: "move", x: me.x + 1, y: me.y, dir: "east", moving: true });
+  tick();
+  const got = ann.take();
+  assert.ok(snapshotsOf(got).some((m) => m.players.some((p) => p.id === danId)));
+  assert.deepEqual(joinedIn(got), []); // the join is gone for good
+
+  // The fix: ask who they are.
+  ann.deliver({ t: "who", ids: [danId, 9999] });
+  const reply = ann.take().find((m) => m.t === "players");
+  assert.ok(reply?.t === "players");
+  assert.deepEqual(reply.players.map((p) => [p.id, p.name]), [[danId, "Dan"]]);
+  assert.deepEqual(reply.missing, [9999]);
+  // Asking again right away is ignored (rate limit).
+  ann.deliver({ t: "who", ids: [danId] });
+  assert.deepEqual(ann.take(), []);
+  dan.close();
+  done();
 });

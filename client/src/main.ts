@@ -4,6 +4,7 @@ import type { Poll } from "../../shared/src/poll.ts";
 import type { PlayerInfo, ServerMessage } from "../../shared/src/protocol.ts";
 import { canSpeak, ROLE_LABELS, type Role } from "../../shared/src/roles.ts";
 import { Game } from "./game/game.ts";
+import { MissingPlayers } from "./missing-players.ts";
 import { Connection, createRoom } from "./net.ts";
 import { AudienceBar } from "./ui/audience.ts";
 import { ChatPanel } from "./ui/chat.ts";
@@ -92,6 +93,7 @@ async function main(): Promise<void> {
     end: () => conn?.send({ t: "poll_end" }),
   });
 
+  const missing = new MissingPlayers((ids) => conn?.send({ t: "who", ids }));
   const tutorial = new Tutorial();
   new SettingsPanel({ replayTutorial: () => tutorial.replay(selfRole) });
 
@@ -177,6 +179,7 @@ async function main(): Promise<void> {
   // ------------------------------------------------------------ messages
 
   const addPlayer = (p: PlayerInfo) => {
+    missing.found(p.id);
     people.upsert(p.id, p.name, p.role, p.hand);
     game!.addPlayer(p);
     if (p.id === selfId) audience.setHand(p.hand > 0);
@@ -207,6 +210,7 @@ async function main(): Promise<void> {
         // A second welcome means we moved or reconnected: rebuild the room from it.
         const rejoin = joined;
         game.resetPlayers();
+        missing.reset();
         people.clear();
         player.clear();
         selfId = msg.selfId;
@@ -260,6 +264,7 @@ async function main(): Promise<void> {
         break;
       case "view":
         game.applyView(msg.from, msg.to, msg.players);
+        for (const p of msg.players) if (p.id !== selfId && people.nameOf(p.id) === undefined) missing.saw(p.id);
         break;
       case "snapshot":
         // Joins first (positions may refer to them), leaves last. A newcomer also gets
@@ -271,6 +276,8 @@ async function main(): Promise<void> {
         }
         if (msg.joined.length) updateCount();
         game.applySnapshot(msg.players, msg.time);
+        // Someone we never heard join (a frame to us was dropped): ask who it is.
+        for (const p of msg.players) if (p.id !== selfId && people.nameOf(p.id) === undefined) missing.saw(p.id);
         player.push(msg.voice.filter((frame) => frame.id !== selfId));
         for (const r of msg.reactions) game.react(r.id, r.kind);
         for (const h of msg.hands) handChanged(h.id, h.hand);
@@ -285,6 +292,13 @@ async function main(): Promise<void> {
         break;
       case "poll":
         showPoll(msg.poll, true);
+        break;
+      case "players":
+        // Answer to "who": players we missed the join of, quietly added; ids that
+        // are gone we drop if we still show them (we missed their leave too).
+        for (const p of msg.players) if (p.id !== selfId && people.nameOf(p.id) === undefined) addPlayer(p);
+        for (const id of msg.missing) playerLeft(id);
+        if (msg.players.length) updateCount();
         break;
       case "migrate":
         void migrate();

@@ -29,6 +29,7 @@ test("client messages round-trip", () => {
     { t: "hand", id: 9, up: false },
     { t: "poll_start", question: "Lunch?", options: ["Phở", "Bún chả", "Cơm tấm"] },
     { t: "poll_end" },
+    { t: "who", ids: [1, 300, 65535] },
   ];
   for (const m of messages) assert.deepEqual(decodeClientMessage(encodeClientMessage(m)), m);
 });
@@ -64,6 +65,7 @@ test("server messages round-trip", () => {
     { t: "view", from: 300, to: 301, players: [{ id: 3, x: 1200.5, y: 4000, dir: "north", moving: false }] },
     { t: "poll", poll },
     { t: "poll", poll: { ...poll, open: false, counts: [12, 30, 0] } },
+    { t: "players", players: [player], missing: [4, 5] },
   ];
   for (const m of messages) assert.deepEqual(decodeServerMessage(encodeServerMessage(m)), m);
 });

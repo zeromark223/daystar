@@ -330,6 +330,15 @@ What we learned:
   The capacity figures above were measured before this.
 - Rooms live in memory and disappear when the last socket closes; each keeps the
   last 100 chat messages.
+- **Missed joins:** when a socket stops reading (a phone in the background, a weak
+  network) and more than `WS_BACKPRESSURE_LIMIT` (16 MB) waits for it, Bun drops
+  frames to it while the connection stays open. A dropped snapshot can hold a join,
+  and that player would then move around in later snapshots unnamed and unseen. The
+  client spots ids it does not know in snapshots and `view`s and asks the server
+  (`who`, batched, at most every 250 ms); the answer (`players`) carries their info,
+  and lists ids that are gone so a missed leave is undone too. Reproduced end to end
+  with a frozen client and 2,000 bots joining: 25 players unseen without it, none
+  with it.
 
 ## Load testing
 
@@ -412,7 +421,9 @@ to require `Authorization: Bearer <token>` on `/api/health` in production. WebSo
 Set `EGRESS_BUDGET_MBPS` to the outgoing bandwidth the server may use (e.g. a bit under
 the link's capacity) so the overcharge lowers snapshot rates before the link saturates.
 Set `ROOM_SECRET` (any long random string) so hosts keep their rooms across restarts
-(a cluster uses `CLUSTER_SECRET` for this). The microphone needs HTTPS.
+(a cluster uses `CLUSTER_SECRET` for this). `WS_BACKPRESSURE_LIMIT` (bytes, default
+16 MB) is how much unsent data a socket may hold before Bun drops frames to it. The
+microphone needs HTTPS.
 
 ## License
 

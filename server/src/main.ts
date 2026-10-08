@@ -83,6 +83,9 @@ const server = Bun.serve<SocketData>({
   websocket: {
     // Mesh frames (a whole room's state) can be large; client frames are capped below.
     maxPayloadLength: 16 * 1024 * 1024,
+    // Past this much unsent data for one socket (a phone in the background, a bad
+    // network) Bun drops frames to it; clients recover players they missed ("who").
+    backpressureLimit: Number(process.env.WS_BACKPRESSURE_LIMIT) || 16 * 1024 * 1024,
     idleTimeout: IDLE_TIMEOUT_SEC,
     sendPings: true,
     open(ws) {

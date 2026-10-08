@@ -72,7 +72,12 @@ export type ClientMessage =
   /** Host only: ask the room a question, answered by flying to a planet. */
   | { t: "poll_start"; question: string; options: string[] }
   /** Host only: close the poll and show the result. */
-  | { t: "poll_end" };
+  | { t: "poll_end" }
+  /**
+   * Who are these? Players we see in snapshots but never got the join of: the
+   * server dropped frames to us (a backgrounded tab, a slow network).
+   */
+  | { t: "who"; ids: number[] };
 
 export type ServerMessage =
   /** `snapshotHz`: how often this client will get snapshots (see SNAPSHOT_GROUPS_AT). */
@@ -114,7 +119,9 @@ export type ServerMessage =
   /** Cluster: reconnect elsewhere (ask the agent's /api/migrate); the server is shedding load. */
   | { t: "migrate" }
   /** The host started a poll, or ended it (`open` false, with the final counts). */
-  | { t: "poll"; poll: Poll };
+  | { t: "poll"; poll: Poll }
+  /** Answer to "who": the players the server has, and the ids it has not (they left). */
+  | { t: "players"; players: PlayerInfo[]; missing: number[] };
 
 // ------------------------------------------------------------------ positions
 
@@ -196,7 +203,14 @@ const Op = {
   rate: 19,
   view: 20,
   poll: 21,
+  // client -> server
+  who: 22,
+  // server -> client
+  players: 23,
 } as const;
+
+/** At most this many ids per "who" (and players per answer). */
+export const MAX_WHO_IDS = 255;
 
 /** Opcode of server snapshots, for callers that only need to recognize them. */
 export const SNAPSHOT_OPCODE = Op.snapshot;
@@ -310,6 +324,8 @@ const Schemas: Record<number, Struct> = {
   [Op.rate]: { snapshotHz: Type.UInt8 },
   [Op.view]: { from: Type.UInt16, to: Type.UInt16, players: Type.Object16, players_Struct: PlayerStateStruct },
   [Op.poll]: { poll: Type.Object8, poll_Struct: PollStruct },
+  [Op.who]: { ids: Type.Array8, ids_Type: Type.UInt16 },
+  [Op.players]: { players: Type.Object8, players_Struct: PlayerInfoStruct, missing: Type.Array8, missing_Type: Type.UInt16 },
 };
 
 // ------------------------------------------------------------------ wire <-> message
@@ -382,6 +398,8 @@ export function encodeClientMessage(msg: ClientMessage): Uint8Array<ArrayBuffer>
       return encode(Schemas[Op.poll_start], msg, Op.poll_start);
     case "poll_end":
       return encode(Schemas[Op.poll_end], {}, Op.poll_end);
+    case "who":
+      return encode(Schemas[Op.who], msg, Op.who);
   }
 }
 
@@ -424,6 +442,8 @@ export function decodeClientMessage(bytes: Uint8Array): ClientMessage | null {
       case Op.poll_end:
         decode(Schemas[op], bytes, 1);
         return { t: "poll_end" };
+      case Op.who:
+        return { t: "who", ...decode<{ ids: number[] }>(Schemas[op], bytes, 1) };
       default:
         return null;
     }
@@ -472,6 +492,8 @@ export function encodeServerMessage(msg: ServerMessage): Uint8Array<ArrayBuffer>
       return encode(Schemas[Op.view], { from: msg.from, to: msg.to, players: msg.players.map(stateToWire) }, Op.view);
     case "poll":
       return encode(Schemas[Op.poll], { poll: [pollToWire(msg.poll)] }, Op.poll);
+    case "players":
+      return encode(Schemas[Op.players], { players: msg.players.map(infoToWire), missing: msg.missing }, Op.players);
   }
 }
 
@@ -540,6 +562,10 @@ export function decodeServerMessage(bytes: Uint8Array): ServerMessage | null {
       case Op.poll: {
         const m = decode<{ poll: WirePoll[] }>(schema, bytes, 1);
         return m.poll.length ? { t: "poll", poll: pollFromWire(m.poll[0]) } : null;
+      }
+      case Op.players: {
+        const m = decode<{ players: WireInfo[]; missing: number[] }>(schema, bytes, 1);
+        return { t: "players", players: m.players.map(infoFromWire), missing: m.missing };
       }
       default:
         return null;

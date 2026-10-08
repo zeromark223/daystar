@@ -46,6 +46,8 @@ const CHAT_BURST = 5;
 const CHAT_WINDOW_MS = 5000;
 /** A player asked to migrate is not asked again for this long (and stays if it never moves). */
 const MIGRATE_RETRY_MS = 30_000;
+/** A player may ask "who" this often. */
+const WHO_MIN_MS = 250;
 /** Voice frames held for one tick at most (a tick normally carries 2-3 per speaker). */
 const MAX_PENDING_VOICE = 200;
 
@@ -145,6 +147,8 @@ interface Player {
   /** When this server last got the player's state (a move, here or from its server); snapshots carry its age. */
   movedAt: number;
   chatTimes: number[];
+  /** When the player last asked "who" (rate limit). */
+  whoAt: number;
   /** Reaction rate limit: tokens refilled at REACTIONS_PER_SEC. */
   reactBudget: number;
   reactAt: number;
@@ -311,6 +315,8 @@ export class Room {
           this.handlePollStart(player, msg.question, msg.options);
         } else if (msg.t === "poll_end" && player) {
           this.handlePollEnd(player);
+        } else if (msg.t === "who" && player) {
+          this.handleWho(player, msg.ids);
         }
       },
       close: () => {
@@ -670,6 +676,25 @@ export class Room {
     this.opts.sync?.role(p.id, role);
     // Invited to speak (or made host): the hand did its job.
     if (role !== "guest") this.setHand(p, 0);
+  }
+
+  /**
+   * A client saw players in snapshots it never got the join of (Bun drops frames
+   * to a socket past its backpressure limit): tell it who they are, and which of
+   * them are gone. Answered to that client only, at most every WHO_MIN_MS.
+   */
+  private handleWho(player: Player, ids: number[]): void {
+    const now = Date.now();
+    if (now - player.whoAt < WHO_MIN_MS) return;
+    player.whoAt = now;
+    const players: PlayerInfo[] = [];
+    const missing: number[] = [];
+    for (const id of new Set(ids)) {
+      const p = this.players.get(id);
+      if (p) players.push(toInfo(p));
+      else missing.push(id);
+    }
+    send(player.peer!, { t: "players", players, missing });
   }
 
   // ------------------------------------------------------------ reactions, hands, polls
@@ -1129,6 +1154,7 @@ function fresh() {
   return {
     lastMoveAt: now,
     movedAt: now,
+    whoAt: 0,
     chatTimes: [] as number[],
     voiceBudget: VOICE_BYTES_PER_SEC,
     voiceAt: now,
