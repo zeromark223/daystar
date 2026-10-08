@@ -12,6 +12,8 @@ import { inviteUrl, setupInviteQr } from "./ui/invite.ts";
 import { runLobby, type LobbyChoice } from "./ui/lobby.ts";
 import { PeoplePanel } from "./ui/people.ts";
 import { PollPanel } from "./ui/poll.ts";
+import { SettingsPanel } from "./ui/settings.ts";
+import { Tutorial } from "./ui/tutorial.ts";
 import { unlockAudio } from "./voice/audio.ts";
 import { Microphone } from "./voice/microphone.ts";
 import { voiceProblem } from "./voice/support.ts";
@@ -91,6 +93,9 @@ async function main(): Promise<void> {
     end: () => conn?.send({ t: "poll_end" }),
   });
 
+  const tutorial = new Tutorial();
+  new SettingsPanel({ replayTutorial: () => tutorial.replay(selfRole) });
+
   /** A poll started or ended (or was already open when we joined). */
   const showPoll = (poll: Poll, announce: boolean) => {
     game!.showPoll(poll);
@@ -162,6 +167,8 @@ async function main(): Promise<void> {
     }
     if (!canSpeak(role)) mic.stop();
     renderMic();
+    // First time in this role: a short tour (after the HUD has laid out).
+    setTimeout(() => tutorial.offer(role), 600);
     if (!announce || before === role) return;
     if (role === "speaker") chat?.addSystem("The host invited you to speak. Turn your mic on when you are ready.");
     else if (before === "speaker" && role === "guest") chat?.addSystem("You are a guest again; your mic is off.");

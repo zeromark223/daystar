@@ -117,6 +117,9 @@ tools/          load test
   when counts change). Only players who moved since the poll started count, so
   nobody votes by spawning inside a planet. The host ends the poll to show the result.
 - In cluster mode reactions, hands and polls are mirrored between servers like roles.
+- **Tutorial:** a short guided tour the first time someone joins as a guest, becomes a
+  speaker or hosts, with a spotlight on each control. Skip or finish it and the
+  browser remembers (local storage); ⚙ Settings → Replay tutorial shows it again.
 
 ## Capacity
 
