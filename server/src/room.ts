@@ -142,6 +142,8 @@ interface Player {
   /** Raised hand ticket (see handTicket), or 0. */
   hand: number;
   lastMoveAt: number;
+  /** When this server last got the player's state (a move, here or from its server); snapshots carry its age. */
+  movedAt: number;
   chatTimes: number[];
   /** Reaction rate limit: tokens refilled at REACTIONS_PER_SEC. */
   reactBudget: number;
@@ -360,6 +362,7 @@ export class Room {
       p.y = s.y;
       p.dir = s.dir;
       p.moving = s.moving;
+      p.movedAt = Date.now();
       this.file(p);
       this.markChanged(p);
       if (this.poll) this.pollMovers.add(p.id);
@@ -657,7 +660,7 @@ export class Room {
       const spot = this.spawnFor(p.id);
       p.x = spot.x;
       p.y = spot.y;
-      p.lastMoveAt = Date.now();
+      p.lastMoveAt = p.movedAt = Date.now();
       this.markChanged(p);
       send(p.peer!, { t: "correction", x: p.x, y: p.y });
       this.file(p);
@@ -842,6 +845,7 @@ export class Room {
     player.dir = move.dir;
     player.moving = move.moving;
     player.lastMoveAt = now;
+    player.movedAt = now;
     this.file(player);
     this.markChanged(player);
     this.moveViewer(player);
@@ -1005,6 +1009,7 @@ export class Room {
     const voice = voiceDue ? p.voice : [];
     // Each part is encoded once and copied into the snapshots of every cell that sees it.
     const tail = snapshotTail({
+      time: now % 0x1_0000_0000,
       voice,
       joined: this.joinedInfos(p.joined),
       left: p.left,
@@ -1017,7 +1022,7 @@ export class Room {
     const stage: Uint8Array[] = [];
     const byCell = new Map<number, { p: Player; entry: Uint8Array }[]>();
     for (const q of p.changed) {
-      const entry = snapshotEntry(q);
+      const entry = snapshotEntry(q, now - q.movedAt);
       if (q.role !== "guest") {
         stage.push(entry);
         continue;
@@ -1123,6 +1128,7 @@ function fresh() {
   const now = Date.now();
   return {
     lastMoveAt: now,
+    movedAt: now,
     chatTimes: [] as number[],
     voiceBudget: VOICE_BYTES_PER_SEC,
     voiceAt: now,

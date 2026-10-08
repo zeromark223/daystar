@@ -2,7 +2,7 @@ import { Application, Container, Rectangle } from "pixi.js";
 import { appearanceOf } from "../../../shared/src/appearance.ts";
 import { MOVE_SPEED, TICK_RATE } from "../../../shared/src/constants.ts";
 import { facing, type Direction } from "../../../shared/src/direction.ts";
-import { quantize, type PlayerInfo, type PlayerState } from "../../../shared/src/protocol.ts";
+import { quantize, type PlayerInfo, type PlayerState, type SnapshotPlayer } from "../../../shared/src/protocol.ts";
 import { fogAt, inView } from "../../../shared/src/aoi.ts";
 import type { Role } from "../../../shared/src/roles.ts";
 import { canBeAt, moveInSpace } from "../../../shared/src/space.ts";
@@ -10,6 +10,7 @@ import { Avatar } from "./avatar.ts";
 import { KeyboardInput } from "./input.ts";
 import { Minimap } from "./minimap.ts";
 import { PollZones } from "./poll-zones.ts";
+import { PlayoutClock, Track } from "./timeline.ts";
 import type { Poll } from "../../../shared/src/poll.ts";
 import { SpaceScene } from "./space-scene.ts";
 import { TouchStick } from "./touch.ts";
@@ -41,6 +42,8 @@ export class Game {
   private readonly trails = new Container();
   private readonly bodies = new Container();
   private readonly pollZones = new PollZones();
+  /** Server time to draw remote players at (see timeline.ts). */
+  private readonly clock = new PlayoutClock();
   /** Screen-space layer for names and chat bubbles. */
   private readonly overlay = new Container();
   private readonly avatars = new Map<number, Avatar>();
@@ -97,7 +100,7 @@ export class Game {
 
   addPlayer(info: PlayerInfo): void {
     this.avatars.get(info.id)?.destroy();
-    const avatar = new Avatar(info, this.trails, this.bodies, this.overlay, info.id === this.selfId);
+    const avatar = new Avatar(info, this.clock.latest, this.trails, this.bodies, this.overlay, info.id === this.selfId);
     avatar.setHand(info.hand > 0);
     this.avatars.set(info.id, avatar);
     if (info.id === this.selfId && info.role === "host") this.becameHost();
@@ -160,23 +163,34 @@ export class Game {
     this.avatars.delete(id);
   }
 
-  /** Forget every avatar, e.g. before a fresh "welcome" after reconnecting. */
+  /** Forget every avatar, e.g. before a fresh "welcome" after reconnecting (maybe to another server). */
   resetPlayers(): void {
     for (const avatar of this.avatars.values()) avatar.destroy();
     this.avatars.clear();
+    this.clock.reset();
   }
 
-  applySnapshot(players: PlayerState[]): void {
-    const now = performance.now();
-    for (const p of players) {
-      if (p.id === this.selfId) continue;
-      const avatar = this.avatars.get(p.id);
-      if (!avatar) continue;
-      // Back in view after a while: appear where it is, do not slide from where it was.
-      if (avatar.inView) avatar.pushSample(now, p);
-      else avatar.teleport(now, p);
-      avatar.inView = true;
-    }
+  /** Snapshots now come `hz` times a second. */
+  setSnapshotRate(hz: number): void {
+    this.clock.intervalMs = 1000 / hz;
+    // Three intervals without a position means the player stood still.
+    Track.idleGapMs = 3000 / hz;
+  }
+
+  /** A snapshot taken at server time `time`; each position is `age` ms older than that. */
+  applySnapshot(players: SnapshotPlayer[], time: number): void {
+    const serverTime = this.clock.observe(time, performance.now());
+    for (const p of players) this.place(p, serverTime - p.age);
+  }
+
+  private place(p: PlayerState, t: number): void {
+    if (p.id === this.selfId) return;
+    const avatar = this.avatars.get(p.id);
+    if (!avatar) return;
+    // Back in view after a while: appear where it is, do not slide from where it was.
+    if (avatar.inView) avatar.pushSample(t, p);
+    else avatar.teleport(t, p);
+    avatar.inView = true;
   }
 
   /**
@@ -190,7 +204,8 @@ export class Game {
       if (a.id === this.selfId || a.role !== "guest" || listed.has(a.id)) continue;
       if (inView(a.x, a.y, to) && !inView(a.x, a.y, from)) a.inView = false;
     }
-    this.applySnapshot(players);
+    // A view carries no time; it follows the newest snapshot.
+    for (const p of players) this.place(p, this.clock.latest);
   }
 
   /**
@@ -262,8 +277,9 @@ export class Game {
   private update(deltaMs: number): void {
     const now = performance.now();
     this.updateSelf(Math.min(deltaMs, 100) / 1000, now);
+    const renderTime = this.clock.renderTime(now);
     for (const avatar of this.avatars.values()) {
-      if (avatar.id !== this.selfId) avatar.interpolate(now);
+      if (avatar.id !== this.selfId) avatar.interpolate(renderTime);
     }
     this.updateCamera();
     const { width, height } = this.app.screen;

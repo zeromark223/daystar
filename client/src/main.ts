@@ -3,7 +3,6 @@ import { ROOM_ID_PATTERN } from "../../shared/src/constants.ts";
 import type { Poll } from "../../shared/src/poll.ts";
 import type { PlayerInfo, ServerMessage } from "../../shared/src/protocol.ts";
 import { canSpeak, ROLE_LABELS, type Role } from "../../shared/src/roles.ts";
-import { setSnapshotRate } from "./game/avatar.ts";
 import { Game } from "./game/game.ts";
 import { Connection, createRoom } from "./net.ts";
 import { AudienceBar } from "./ui/audience.ts";
@@ -211,7 +210,7 @@ async function main(): Promise<void> {
         people.clear();
         player.clear();
         selfId = msg.selfId;
-        setSnapshotRate(msg.snapshotHz);
+        game.setSnapshotRate(msg.snapshotHz);
         game.setSelf(msg.selfId);
         people.setSelf(msg.selfId);
         for (const p of msg.players) addPlayer(p);
@@ -253,7 +252,7 @@ async function main(): Promise<void> {
       }
       case "rate":
         // The room got big (or small again): snapshots now come at a different rate.
-        setSnapshotRate(msg.snapshotHz);
+        game.setSnapshotRate(msg.snapshotHz);
         break;
       case "chat":
         chat.addMessage(msg.message);
@@ -271,7 +270,7 @@ async function main(): Promise<void> {
           chat.addSystem(`${p.name} joined.`);
         }
         if (msg.joined.length) updateCount();
-        game.applySnapshot(msg.players);
+        game.applySnapshot(msg.players, msg.time);
         player.push(msg.voice.filter((frame) => frame.id !== selfId));
         for (const r of msg.reactions) game.react(r.id, r.kind);
         for (const h of msg.hands) handChanged(h.id, h.hand);

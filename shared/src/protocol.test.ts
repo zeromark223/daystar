@@ -33,7 +33,7 @@ test("client messages round-trip", () => {
   for (const m of messages) assert.deepEqual(decodeClientMessage(encodeClientMessage(m)), m);
 });
 
-const emptyTail = { voice: [], joined: [], left: [], reactions: [], hands: [], pollCounts: [] };
+const emptyTail = { time: 4_294_967_295, voice: [], joined: [], left: [], reactions: [], hands: [], pollCounts: [] };
 const poll = { id: 4_000_000_001, question: "Which planet next?", options: ["Mars 🔴", "Venus", "Neptune"], open: true, counts: [0, 2, 1] };
 
 test("server messages round-trip", () => {
@@ -46,9 +46,10 @@ test("server messages round-trip", () => {
     { t: "chat", message: chat },
     { t: "correction", x: 10, y: 20.5 },
     { t: "error", message: "nope" },
-    { t: "snapshot", players: [{ id: 1, x: 9999.75, y: 0, dir: "south", moving: true }], ...emptyTail },
+    { t: "snapshot", players: [{ id: 1, x: 9999.75, y: 0, dir: "south", moving: true, age: 255 }], ...emptyTail },
     {
       t: "snapshot",
+      time: 0,
       players: [],
       voice: [{ id: 2, seq: 4, data: new Uint8Array([9, 8]) }],
       joined: [player],
@@ -75,10 +76,10 @@ test("positions are quantized to the wire grid", () => {
   assert.equal(quantize(200.9), 201);
 });
 
-test("snapshot costs 7 bytes per player", () => {
-  const players = Array.from({ length: 100 }, (_, i) => ({ id: i, x: i, y: i, dir: "south" as const, moving: false }));
-  // + 1 (no voice) + 2 (no joins) + 2 (no leaves) + 2 (no reactions) + 2 (no hands) + 1 (no poll counts)
-  assert.equal(encodeServerMessage({ t: "snapshot", players, ...emptyTail }).length, 1 + 2 + 100 * 7 + 10);
+test("snapshot costs 8 bytes per player", () => {
+  const players = Array.from({ length: 100 }, (_, i) => ({ id: i, x: i, y: i, dir: "south" as const, moving: false, age: i }));
+  // + 4 (time) + 1 (no voice) + 2 (no joins) + 2 (no leaves) + 2 (no reactions) + 2 (no hands) + 1 (no poll counts)
+  assert.equal(encodeServerMessage({ t: "snapshot", players, ...emptyTail }).length, 1 + 2 + 100 * 8 + 14);
 });
 
 test("malformed or unknown frames decode to null", () => {
@@ -101,6 +102,7 @@ test("snapshots assembled from parts match the regular encoder", () => {
     y: Math.random() * 10000,
     dir: (["north", "south", "east", "west"] as const)[i % 4],
     moving: i % 3 === 0,
+    age: (i * 37) % 256,
   }));
   const voice = [{ id: 3, seq: 9, data: new Uint8Array([1, 2, 3]) }];
   for (const v of [[], voice]) {
@@ -109,9 +111,9 @@ test("snapshots assembled from parts match the regular encoder", () => {
       const extras = joined.length
         ? { reactions: [{ id: 3, kind: 1 }], hands: [{ id: 7, hand: 99 }], pollCounts: [4, 5] }
         : { reactions: [], hands: [], pollCounts: [] };
-      const tail = { voice: v, joined, left, ...extras };
+      const tail = { time: 123_456_789, voice: v, joined, left, ...extras };
       const regular = encodeServerMessage({ t: "snapshot", players, ...tail });
-      const parts = assembleSnapshot(players.map(snapshotEntry), snapshotTail(tail));
+      const parts = assembleSnapshot(players.map((p) => snapshotEntry(p, p.age)), snapshotTail(tail));
       assert.deepEqual([...parts], [...regular]);
     }
   }

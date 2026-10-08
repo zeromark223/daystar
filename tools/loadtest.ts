@@ -28,6 +28,7 @@ import {
   POSITION_SCALE,
   quantize,
   SERVER_OPCODES,
+  SNAPSHOT_ENTRY_BYTES as SNAPSHOT_ENTRY,
   SNAPSHOT_OPCODE,
 } from "../shared/src/protocol.ts";
 import { roleFromIndex, type Role } from "../shared/src/roles.ts";
@@ -169,8 +170,12 @@ function voiceSample(i: number): Uint8Array[] {
   return voiceSamples[i % voiceSamples.length];
 }
 
-/** Snapshot body: UInt16 count, then per player id, x, y (UInt16 LE) and motion (UInt8). */
-const SNAPSHOT_ENTRY = 7;
+/**
+ * Snapshot body: UInt16 count, then per player id, x, y (UInt16 LE), motion and age
+ * (UInt8). After the players the tail starts with the tick's time (UInt32), then the
+ * voice count.
+ */
+const VOICE_COUNT_AFTER_PLAYERS = 4;
 
 /**
  * What a bot needs from "welcome" (its own entry, the snapshot rate) without
@@ -347,7 +352,7 @@ function runWorker(): void {
       if (op === SNAPSHOT_OPCODE) {
         counters.snapshots++;
         const data = new DataView(event.data);
-        counters.voiceRx += data.getUint8(3 + data.getUint16(1, true) * SNAPSHOT_ENTRY);
+        counters.voiceRx += data.getUint8(3 + data.getUint16(1, true) * SNAPSHOT_ENTRY + VOICE_COUNT_AFTER_PLAYERS);
         if (!bot.measured) return;
         const now = performance.now();
         if (bot.lastSnapshot) gaps.add(now - bot.lastSnapshot);
@@ -427,9 +432,9 @@ function runWorker(): void {
 
   // ------------------------------------------------------------ voice
 
-  /** Voice frames in a raw snapshot: after the players, a UInt8 count of {id, seq, len, data}. */
+  /** Voice frames in a raw snapshot: after the players and the time, a UInt8 count of {id, seq, len, data}. */
   function readVoice(data: DataView): void {
-    let o = 3 + data.getUint16(1, true) * SNAPSHOT_ENTRY;
+    let o = 3 + data.getUint16(1, true) * SNAPSHOT_ENTRY + VOICE_COUNT_AFTER_PLAYERS;
     const count = data.getUint8(o);
     o += 1;
     if (count === 0) return;

@@ -892,3 +892,17 @@ test("cluster: hands, reactions and polls are mirrored to peers", () => {
   assert.ok(got.some((m) => m.t === "poll" && m.poll.id === 9 && m.poll.counts.length === 3));
   assert.ok(snapshotsOf(got).some((m) => m.hands.some((h) => h.id === 42 && h.hand === 0)));
 });
+
+test("snapshots carry the tick's time and how old each position is", () => {
+  const { tick, join, everyone } = hostedRoom();
+  const a = join("Ann");
+  const b = join("Ben");
+  everyone(a.s, b.s);
+  const movedAt = Date.now();
+  a.s.deliver({ t: "move", x: a.self.x + 1, y: a.self.y, dir: "east", moving: true });
+  tick(40);
+  const snap = snapshotsOf(b.s.take()).at(-1)!;
+  const entry = snap.players.find((p) => p.id === a.self.id)!;
+  assert.ok(Math.abs(snap.time - ((movedAt + 40) % 2 ** 32)) < 20);
+  assert.ok(entry.age >= 35 && entry.age <= 60, `age ${entry.age}`);
+});

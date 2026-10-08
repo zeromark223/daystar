@@ -29,6 +29,15 @@ export interface PlayerState {
   moving: boolean;
 }
 
+/**
+ * A player in a snapshot: its state, and how long before the snapshot's tick the
+ * server got that state (ms, capped at 255). Clients place it on the server's
+ * timeline at `time - age`, so uneven sends and network jitter do not show.
+ */
+export interface SnapshotPlayer extends PlayerState {
+  age: number;
+}
+
 export interface ChatMessage {
   id: number;
   playerId: number;
@@ -79,10 +88,12 @@ export type ServerMessage =
    * snapshot so a burst of arrivals costs no extra sends; a client applies `joined`
    * first, then positions and voice, then `left`. Reactions, raised or lowered
    * hands and new poll counts (empty when unchanged) ride along the same way.
+   * `time` is the server's clock at the tick (Unix ms modulo 2^32).
    */
   | {
       t: "snapshot";
-      players: PlayerState[];
+      time: number;
+      players: SnapshotPlayer[];
       voice: VoiceFrame[];
       joined: PlayerInfo[];
       left: number[];
@@ -133,6 +144,7 @@ function unpackMotion(bits: number): { dir: Direction; moving: boolean } {
 // ------------------------------------------------------------------ schemas
 
 export const PlayerStateStruct: Struct = { id: Type.UInt16, x: Type.UInt16, y: Type.UInt16, motion: Type.UInt8 };
+export const SnapshotPlayerStruct: Struct = { ...PlayerStateStruct, age: Type.UInt8 };
 export const PlayerInfoStruct: Struct = {
   ...PlayerStateStruct,
   name: Type.String,
@@ -204,20 +216,24 @@ export const SERVER_OPCODES = {
  * (byte-identical to encodeServerMessage), instead of re-encoding every player
  * for every cell.
  */
-export const SNAPSHOT_ENTRY_BYTES = 7;
+export const SNAPSHOT_ENTRY_BYTES = 8;
+/** Snapshot entries say how old their state is in ms, up to this. */
+export const MAX_SNAPSHOT_AGE = 255;
 
-/** One player's snapshot entry (the PlayerStateStruct layout). */
-export function snapshotEntry(p: PlayerState): Uint8Array {
+/** One player's snapshot entry (the SnapshotPlayerStruct layout); `age` in ms. */
+export function snapshotEntry(p: PlayerState, age: number): Uint8Array {
   const bytes = new Uint8Array(SNAPSHOT_ENTRY_BYTES);
   const view = new DataView(bytes.buffer);
   view.setUint16(0, p.id, true);
   view.setUint16(2, toWire(p.x), true);
   view.setUint16(4, toWire(p.y), true);
   view.setUint8(6, packMotion(p.dir, p.moving));
+  view.setUint8(7, Math.max(0, Math.min(MAX_SNAPSHOT_AGE, Math.round(age))));
   return bytes;
 }
 
 const TailPart: Struct = {
+  time: Type.UInt32,
   voice: Type.Object8,
   voice_Struct: VoiceFrameStruct,
   joined: Type.Object16,
@@ -234,6 +250,7 @@ const TailPart: Struct = {
 
 /** Everything after the players in a snapshot; the same for every cell. */
 export interface SnapshotTail {
+  time: number;
   voice: VoiceFrame[];
   joined: PlayerInfo[];
   left: number[];
@@ -242,7 +259,7 @@ export interface SnapshotTail {
   pollCounts: number[];
 }
 
-/** What ends a snapshot, the same for every cell: voice, joins and leaves, reactions, hands, poll counts. */
+/** What ends a snapshot, the same for every cell: the tick's time, voice, joins and leaves, reactions, hands, poll counts. */
 export function snapshotTail(tail: SnapshotTail): Uint8Array {
   return encode(TailPart, { ...tail, joined: tail.joined.map(infoToWire) });
 }
@@ -287,7 +304,7 @@ const Schemas: Record<number, Struct> = {
   [Op.server_chat]: ChatStruct,
   [Op.correction]: { x: Type.UInt16, y: Type.UInt16 },
   [Op.error]: { message: Type.String },
-  [Op.snapshot]: { players: Type.Object16, players_Struct: PlayerStateStruct, ...TailPart },
+  [Op.snapshot]: { players: Type.Object16, players_Struct: SnapshotPlayerStruct, ...TailPart },
   [Op.migrate]: {},
   [Op.role]: { id: Type.UInt16, role: Type.UInt8 },
   [Op.rate]: { snapshotHz: Type.UInt8 },
@@ -442,7 +459,7 @@ export function encodeServerMessage(msg: ServerMessage): Uint8Array<ArrayBuffer>
     case "snapshot":
       return encode(
         Schemas[Op.snapshot],
-        { ...msg, players: msg.players.map(stateToWire), joined: msg.joined.map(infoToWire) },
+        { ...msg, players: msg.players.map((p) => ({ ...stateToWire(p), age: p.age })), joined: msg.joined.map(infoToWire) },
         Op.snapshot,
       );
     case "migrate":
@@ -491,11 +508,15 @@ export function decodeServerMessage(bytes: Uint8Array): ServerMessage | null {
       case Op.error:
         return { t: "error", ...decode<{ message: string }>(schema, bytes, 1) };
       case Op.snapshot: {
-        const m = decode<Omit<SnapshotTail, "joined"> & { players: WireState[]; joined: WireInfo[] }>(schema, bytes, 1);
+        const m = decode<Omit<SnapshotTail, "joined"> & { players: (WireState & { age: number })[]; joined: WireInfo[] }>(
+          schema,
+          bytes,
+          1,
+        );
         return {
           t: "snapshot",
           ...m,
-          players: m.players.map(stateFromWire),
+          players: m.players.map((w) => ({ ...stateFromWire(w), age: w.age })),
           joined: m.joined.map(infoFromWire),
           reactions: m.reactions.filter((r) => isReactionKind(r.kind)),
         };

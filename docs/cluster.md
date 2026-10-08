@@ -110,7 +110,7 @@ client has a single code path.
 ## Ids and tickets
 
 - **Player ids are allocated by the agent, unique within a room**, still `u16`, so
-  snapshots stay 7 bytes per player. Freed ids are reused only after a delay.
+  snapshot entries stay small (8 bytes per player). Freed ids are reused only after a delay.
   > Future: a global id scheme (e.g. `u32`, +2 bytes per snapshot entry, ~28% more
   > snapshot bandwidth) or ids minted by servers under a shared rule, so the agent
   > is not on the id path. Kept simple for now.

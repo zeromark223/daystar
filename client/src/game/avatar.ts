@@ -1,32 +1,17 @@
 import { Container, Graphics, Sprite, Text } from "pixi.js";
 import { appearanceOf, type AppearanceId, type BodyKind } from "../../../shared/src/appearance.ts";
-import { SUN_RADIUS, TICK_RATE, WORLD_CENTER } from "../../../shared/src/constants.ts";
+import { SUN_RADIUS, WORLD_CENTER } from "../../../shared/src/constants.ts";
 import type { Direction } from "../../../shared/src/direction.ts";
 import type { PlayerInfo } from "../../../shared/src/protocol.ts";
 import { ROLE_LABELS, type Role } from "../../../shared/src/roles.ts";
 import { brightnessAt } from "../../../shared/src/space.ts";
 import { BodyView, SIZES } from "./bodies.ts";
+import { Track } from "./timeline.ts";
 import { REACTIONS } from "../../../shared/src/audience.ts";
 import { emojiTexture, glowTexture } from "./textures.ts";
 
 const BUBBLE_MS = 6000;
 const BUBBLE_MAX_WIDTH = 220;
-/** A gap longer than this between samples means the player was idle. */
-let sampleGapMs = 150;
-/** Remote players are drawn this far in the past so there are two samples to blend. */
-let interpolationDelayMs = 100;
-/** Time between snapshots, as announced by the server (see SNAPSHOT_GROUPS_AT). */
-let snapshotIntervalMs = 1000 / TICK_RATE;
-
-/**
- * Snapshots arrive `hz` times a second: draw remote players two intervals in the
- * past (two samples to blend), and treat three intervals without one as idle.
- */
-export function setSnapshotRate(hz: number): void {
-  snapshotIntervalMs = 1000 / hz;
-  interpolationDelayMs = 2 * snapshotIntervalMs;
-  sampleGapMs = 3 * snapshotIntervalMs;
-}
 
 /** Trail: positions kept while moving, and how often one is recorded. */
 const TRAIL_POINTS = 14;
@@ -43,13 +28,6 @@ const MAX_REACTIONS_PER_AVATAR = 4;
 const MAX_LIVE_REACTIONS = 80;
 let liveReactions = 0;
 
-interface Sample {
-  t: number;
-  x: number;
-  y: number;
-  dir: Direction;
-  moving: boolean;
-}
 
 /**
  * One player: a glowing body (and its trail) in the world layer; the name tag
@@ -93,7 +71,8 @@ export class Avatar {
   private readonly roleTag: Text;
   private bubble: Container | null = null;
   private bubbleUntil = 0;
-  private readonly samples: Sample[] = [];
+  /** Positions on the server's timeline (remote players only). */
+  private readonly track = new Track();
   /**
    * Area of interest: whether our knowledge of this player is current. False once
    * the server's "view" left it out (its last position may be stale); it comes
@@ -101,7 +80,8 @@ export class Avatar {
    */
   inView = true;
 
-  constructor(info: PlayerInfo, trails: Container, bodies: Container, overlay: Container, isSelf: boolean) {
+  /** `serverTime`: the server time `info` was true at (the newest one we know). */
+  constructor(info: PlayerInfo, serverTime: number, trails: Container, bodies: Container, overlay: Container, isSelf: boolean) {
     this.id = info.id;
     this.name = info.name;
     this.appearance = info.appearance;
@@ -160,7 +140,7 @@ export class Avatar {
     overlay.addChild(this.tag);
     this.setRole(info.role);
 
-    this.pushSample(performance.now(), info);
+    this.pushSample(serverTime, info);
   }
 
   setRole(role: Role): void {
@@ -239,41 +219,25 @@ export class Avatar {
 
   /** Jump to a position without blending from the old one (e.g. back in view after a while). */
   teleport(t: number, s: { x: number; y: number; dir: Direction; moving: boolean }): void {
-    this.samples.length = 0;
+    this.track.clear();
     this.trailPoints.length = 0;
     this.x = s.x;
     this.y = s.y;
     this.pushSample(t, s);
   }
 
+  /** A position the server had at server time `t`. */
   pushSample(t: number, s: { x: number; y: number; dir: Direction; moving: boolean }): void {
-    // Snapshots skip idle players, so after a pause the previous sample can be
-    // seconds old. Re-anchor it one tick back so the move starts from rest
-    // instead of being blended across the whole pause.
-    const last = this.samples.at(-1);
-    if (last && t - last.t > sampleGapMs) this.samples.push({ ...last, t: t - snapshotIntervalMs });
-    this.samples.push({ t, x: s.x, y: s.y, dir: s.dir, moving: s.moving });
-    if (this.samples.length > 30) this.samples.shift();
+    this.track.push({ t, x: s.x, y: s.y, dir: s.dir, moving: s.moving });
   }
 
-  /** Blend buffered server samples for a remote player. */
-  interpolate(now: number): void {
-    const renderT = now - interpolationDelayMs;
-    const s = this.samples;
-    while (s.length >= 2 && s[1].t <= renderT) s.shift();
-
-    const a = s[0];
-    const b = s[1];
-    if (!b || renderT <= a.t) {
-      this.x = a.x;
-      this.y = a.y;
-      this.setMotion(a.dir, a.moving);
-      return;
-    }
-    const k = (renderT - a.t) / (b.t - a.t);
-    this.x = a.x + (b.x - a.x) * k;
-    this.y = a.y + (b.y - a.y) * k;
-    this.setMotion(b.dir, b.moving);
+  /** Place a remote player where it was at server time `t` (see PlayoutClock). */
+  interpolate(t: number): void {
+    const p = this.track.at(t);
+    if (!p) return;
+    this.x = p.x;
+    this.y = p.y;
+    this.setMotion(p.dir, p.moving);
   }
 
   showBubble(text: string): void {

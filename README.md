@@ -284,11 +284,21 @@ What we learned:
 
 - Every frame is binary: an opcode byte plus a body described by a schema
   (`shared/src/binary/schema.ts`, a port of an older BinaryBuilder/BinaryParser).
-  Positions are UInt16 in 1/20 px steps, so a snapshot costs 7 bytes per player.
+  Positions are UInt16 in 1/4 px steps; with its id, motion and age a player costs
+  8 bytes in a snapshot.
 - Client moves locally (instant response) and sends its position at 20 Hz.
 - Server validates speed and the world limits, sends a `correction` if a move is invalid,
   and broadcasts a binary snapshot at 20 Hz when anything changed.
-- Other players are rendered 100 ms in the past and interpolated between snapshots.
+- **Smooth remote players** (`client/src/game/timeline.ts`): each snapshot carries the
+  server's time at the tick, and each player the age of its position (when the move
+  reached the server), so every position has a server timestamp. Clients draw others
+  on the server's timeline, behind by one snapshot interval + one send + the
+  measured jitter (95th percentile over 4 s), and adjust that delay as slower or
+  faster playback (5-10%), never a jump; a moving player whose next position is late
+  keeps going for up to 80 ms. Stamping positions on arrival, as before, made people
+  speed up and stall: with 80 ms of network jitter 64% of frames were off by more
+  than a quarter, with jumps of 4.5x a frame's move; now 1-2% and 1.1x
+  (`tools/smoothness.ts`).
 - **Snapshot groups:** from 200 players on one server, a room splits them in two
   groups served on alternate ticks and ticks at 40 Hz, so everyone still gets 20 Hz
   but each tick's burst of sends covers half the room (event loop p99 halved in a
@@ -316,8 +326,8 @@ What we learned:
   CPU / one core and, if `EGRESS_BUDGET_MBPS` is set, outgoing traffic / that budget;
   it steps down after 5 s at 0.75 or more, and back up only when the higher rate is
   predicted to stay under 0.65 for 10 s. Rooms of 2,000+ players on one server are
-  capped at 10 Hz. Clients interpolate two snapshot intervals in the past (100 ms at
-  20 Hz, 200 ms at 10 Hz). The capacity figures above were measured before this.
+  capped at 10 Hz. The client's drawing delay follows the snapshot rate (see above).
+  The capacity figures above were measured before this.
 - Rooms live in memory and disappear when the last socket closes; each keeps the
   last 100 chat messages.
 
