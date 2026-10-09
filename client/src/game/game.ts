@@ -56,7 +56,7 @@ const GATHER_JITTER_MS = 200;
 const SWIRL_RADIUS = SUN_RADIUS + 60;
 const SWIRL_THICKNESS = 120;
 const SWIRL_SPEED = (2 * Math.PI * 1.1) / 1000;
-/** How the gather looks for this viewer: A/B test (see ui/settings.ts). */
+/** How the gather looks for this viewer (Corona by default; see ui/settings.ts). */
 export type GatherStyle = "flight" | "corona";
 
 /** Frame times while a gather plays, for comparing the two styles. */
@@ -130,7 +130,7 @@ export class Game {
   private lastFrame = 0;
   /** Names over players in orbit: hidden unless the viewer turned them on in Settings. */
   private orbitNames = false;
-  private gatherStyle: GatherStyle = "flight";
+  private gatherStyle: GatherStyle = "corona";
   private readonly corona = new CoronaEffect();
   private readonly burstTrails = new BurstTrails();
   /** Corona gather: when it started (local time); players fade in by ring after it. */
@@ -326,7 +326,7 @@ export class Game {
     this.flareAt = now + GATHER_IN_MS + GATHER_SWIRL_MS;
   }
 
-  /** A/B test: how this viewer's gathers look. */
+  /** How this viewer's gathers look (Settings). */
   setGatherStyle(style: GatherStyle): void {
     this.gatherStyle = style;
   }

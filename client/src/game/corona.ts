@@ -3,7 +3,7 @@ import { SUN_RADIUS, WORLD_CENTER } from "../../../shared/src/constants.ts";
 import { glowTexture } from "./textures.ts";
 
 /**
- * The "corona" gather (variant B of the A/B test against the fly-in): a reverse
+ * The "corona" gather (the default; it beat the fly-in in an A/B test): a reverse
  * big bang at the sun. A flash and a shock wave, streams of light whirling round
  * the sun, then the streams stretch out like a corona and fade. Players are put
  * in their seats at once, hidden, and appear as it fades (Game drives that).

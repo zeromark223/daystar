@@ -7,26 +7,26 @@ export interface SettingsActions {
 }
 
 const ORBIT_NAMES_KEY = "daystar:orbit-names";
-const GATHER_KEY = "daystar:gather-effect";
-const STYLES: GatherStyle[] = ["flight", "corona"];
-const isStyle = (v: unknown): v is GatherStyle => STYLES.includes(v as GatherStyle);
-
 /**
- * A/B test of the gather effect: ?gather=flight|corona wins, then what this
- * browser chose or was given before, else a coin flip that is remembered.
+ * Only an explicit choice is stored. (A new key: the A/B test stored random
+ * picks under "daystar:gather-effect", and those should not stick.)
  */
+const GATHER_KEY = "daystar:gather-style";
+const STYLES: GatherStyle[] = ["corona", "flight"];
+const isStyle = (v: unknown): v is GatherStyle => STYLES.includes(v as GatherStyle);
+export const DEFAULT_GATHER_STYLE: GatherStyle = "corona";
+
+/** ?gather=corona|flight wins, then what this browser chose in Settings, else Corona. */
 function initialGatherStyle(): GatherStyle {
   const forced = new URLSearchParams(location.search).get("gather");
   if (isStyle(forced)) return forced;
   try {
     const saved = localStorage.getItem(GATHER_KEY);
     if (isStyle(saved)) return saved;
-    const picked = STYLES[Math.floor(Math.random() * STYLES.length)];
-    localStorage.setItem(GATHER_KEY, picked);
-    return picked;
   } catch {
-    return STYLES[Math.floor(Math.random() * STYLES.length)];
+    // Storage blocked: the default.
   }
+  return DEFAULT_GATHER_STYLE;
 }
 
 /** The ⚙ button and its panel: replay the tutorial, names in orbit (remembered in this browser). */

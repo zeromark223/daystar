@@ -123,24 +123,27 @@ tools/          load test
   seat is at any time is one shared function (`shared/src/orbit.ts`), so every
   screen shows the same sky and the server sends no positions while it lasts:
   moves are ignored and snapshots carry only voice and events (plus the seats of
-  newcomers and new speakers). Players spiral in towards the sun, whirl around it in
-  a ring of light while the camera pulls back over the sun, then the sun flares and
-  they fly out to their seats (trails are traced along the true path between
-  frames, so they stay curved at any frame rate). Names are hidden in orbit unless
-  the viewer turns them on in ⚙ Settings. A lighter variant, "Corona", is being
-  A/B tested against this "Fly in": everyone is seated at once, hidden, while a
-  reverse big bang plays at the sun (a flash and a shock wave, 120 streams whirling
-  round it, then stretching out like a corona); as the sun flares, with a second
-  shock wave, they burst out from beside the sun to their seats, riding the
-  streams with white-hot trails, like the fly-in's end (trails are computed from
-  each path and drawn as pooled rope meshes, at most 500 at once). Its cost does not grow with the room (a fixed set of
-  streams, each a rope mesh with one shared texture holding its core and glow, so
-  a frame only moves points). Each browser gets one at random (remembered); `?gather=flight|corona`
-  or ⚙ Settings picks one, and every gather logs its frame rate
+  newcomers and new speakers).
+  - **Corona** (the default): everyone is seated at once, hidden, while a reverse
+    big bang plays at the sun (a flash and a shock wave, 120 streams whirling round
+    it, then stretching out like a corona); as the sun flares, with a second shock
+    wave, they burst out from beside the sun to their seats with white-hot trails.
+    It costs the same whatever the room size: the streams are rope meshes sharing
+    one texture that holds their core and glow (a frame only moves points), and the
+    trails are computed from each path and drawn the same way, at most 500 at once.
+  - **Fly in**: players spiral in towards the sun, whirl around it in a ring of
+    light, then the sun flares and they fly out to their seats (trails traced along
+    the true path between frames, so they stay curved at any frame rate). Heavier:
+    it draws every player's trail.
+
+  The camera pulls back over the sun while it plays. ⚙ Settings or
+  `?gather=corona|flight` picks the effect, and every gather logs its frame rate
   (`[gather] corona, 301 players: 60 fps avg, p95 17 ms`, also in
-  `window.daystarGatherStats`). Trails, rebuilt every frame, are drawn only for the
-  60 moving players nearest the middle of the screen: 301 players in orbit went
-  from 28 to 60 fps, the fly-in from 14 to 35 fps, the corona from 52 to 60 fps
+  `window.daystarGatherStats`). Names are hidden in orbit unless the viewer turns
+  them on in ⚙ Settings. Trails, rebuilt every frame, are drawn only for the 60
+  moving players nearest the middle of the screen. Corona won an A/B comparison
+  with 301 players: 60 fps against the fly-in's 35, and 301 players in orbit went
+  from 28 to 60 fps with the trail budget
   (desktop Chrome). Nobody steers until the host releases them, and then
   everyone stays where its orbit had them (clients compute the same spots, so
   nothing is sent). Polls are off meanwhile; the orbit stays if the host leaves.

@@ -115,7 +115,7 @@ async function main(): Promise<void> {
   const tutorial = new Tutorial();
   /** Settings that apply to the game, which is created after the lobby. */
   let orbitNames = false;
-  let gatherStyle: GatherStyle = "flight";
+  let gatherStyle: GatherStyle = "corona";
   new SettingsPanel({
     gatherStyle: (style) => {
       gatherStyle = style;
