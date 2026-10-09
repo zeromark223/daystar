@@ -117,6 +117,16 @@ tools/          load test
   when counts change). Only players who moved since the poll started count, so
   nobody votes by spawning inside a planet. The host ends the poll to show the result.
 - In cluster mode reactions, hands and polls are mirrored between servers like roles.
+- **Gather (orbit mode):** the host gathers everyone around the sun. The server
+  gives each player a seat (speakers on a stage ring next to the sun, everyone else
+  on rings outward, outer rings turning slower) and the moment it started; where a
+  seat is at any time is one shared function (`shared/src/orbit.ts`), so every
+  screen shows the same sky and the server sends no positions while it lasts:
+  moves are ignored and snapshots carry only voice and events (plus the seats of
+  newcomers and new speakers). Players fly in leaving trails of light and the sun
+  flares as they arrive. Nobody steers until the host releases them, and then
+  everyone stays where its orbit had them (clients compute the same spots, so
+  nothing is sent). Polls are off meanwhile; the orbit stays if the host leaves.
 - **Tutorial:** a short guided tour the first time someone joins as a guest, becomes a
   speaker or hosts, with a spotlight on each control. Skip or finish it and the
   browser remembers (local storage); ⚙ Settings → Replay tutorial shows it again.

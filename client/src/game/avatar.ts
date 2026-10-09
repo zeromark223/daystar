@@ -67,6 +67,8 @@ export class Avatar {
   /** A reaction makes the face open its mouth for a moment. */
   private reactedUntil = 0;
   private handIcon: Sprite | null = null;
+  /** Being pulled to the sun (orbit gather): a longer, brighter trail. */
+  private streak = false;
   private readonly label: Text;
   private readonly roleTag: Text;
   private bubble: Container | null = null;
@@ -195,6 +197,11 @@ export class Avatar {
       const pop = Math.min(1, t * 6);
       r.sprite.width = r.sprite.height = REACTION_SIZE * (0.6 + 0.4 * pop);
     }
+  }
+
+  /** A bright light trail while flying in to the sun (see Game.startOrbit). */
+  setStreak(on: boolean): void {
+    this.streak = on;
   }
 
   /** Show (or hide) a raised hand next to the name. */
@@ -367,9 +374,11 @@ export class Avatar {
 
   private renderTrail(now: number, brightness: number, scale: number): void {
     const pts = this.trailPoints;
-    if (this.moving && now - this.lastTrailAt >= TRAIL_EVERY_MS) {
+    const every = this.streak ? 0 : TRAIL_EVERY_MS;
+    const keep = this.streak ? TRAIL_POINTS * 2 : TRAIL_POINTS;
+    if (this.moving && now - this.lastTrailAt >= every) {
       pts.push({ x: this.x, y: this.y });
-      if (pts.length > TRAIL_POINTS) pts.shift();
+      while (pts.length > keep) pts.shift();
       this.lastTrailAt = now;
     } else if (!this.moving && pts.length > 0 && now - this.lastTrailAt >= TRAIL_EVERY_MS) {
       pts.shift(); // let the trail shrink away once stopped
@@ -378,13 +387,14 @@ export class Avatar {
     this.trail.clear();
     if (pts.length < 2 || brightness <= 0) return;
     // Capped so big bodies do not drag a fat band behind them.
-    const width = Math.min(SIZES[this.kind].core, 11) * 1.1 * scale;
+    const width = Math.min(SIZES[this.kind].core, 11) * (this.streak ? 1.6 : 1.1) * scale;
+    const alpha = this.streak ? 0.85 : 0.5;
     for (let i = 1; i < pts.length; i++) {
       const k = i / pts.length;
       this.trail
         .moveTo(pts[i - 1].x, pts[i - 1].y)
         .lineTo(pts[i].x, pts[i].y)
-        .stroke({ color: this.color, width: width * k, alpha: 0.5 * k * brightness, cap: "round" });
+        .stroke({ color: this.color, width: width * k, alpha: alpha * k * brightness, cap: "round" });
     }
     const head = pts.at(-1)!;
     this.trail.moveTo(head.x, head.y).lineTo(this.x, this.y).stroke({

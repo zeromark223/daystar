@@ -81,6 +81,11 @@ const STEPS: Record<Role, Step[]> = {
       target: "#poll-button",
     },
     {
+      title: "Gather everyone",
+      text: "When you are about to talk, gather everyone: they fly in and circle the sun, speakers closest, until you let them go.",
+      target: "#gather-button",
+    },
+    {
       title: "Invite people",
       text: "Share the invite link or the QR code. Keep using this browser: it holds the key that makes you the host of this room.",
       target: ".room-chip",

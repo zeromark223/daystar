@@ -27,13 +27,17 @@ import {
   type Reaction,
 } from "../../shared/src/audience.ts";
 import { cleanPoll, POLL_COUNT_MS, pollZoneAt, type Poll } from "../../shared/src/poll.ts";
+import { freeSlot, NO_SLOT, orbitPosition, STAGE_SLOTS } from "../../shared/src/orbit.ts";
 import {
   assembleSnapshot,
   decodeClientMessage,
   encodeServerMessage,
   snapshotEntry,
   snapshotTail,
+  quantize,
   type ChatMessage,
+  type OrbitState,
+  type SlotChange,
   type PlayerInfo,
   type PlayerState,
   type ServerMessage,
@@ -88,7 +92,12 @@ interface Pending {
   reactions: Reaction[];
   hands: Map<number, number>;
   pollCounts: number[] | null;
+  /** Orbit mode: seats given since the last snapshot. */
+  slots: Map<number, number>;
 }
+
+/** Orbit mode between servers: started (with every seat), or released at `at` (Unix ms). */
+export type OrbitSync = { active: true; start: number; slots: SlotChange[] } | { active: false; at: number };
 
 /** Events the runtime adapter forwards to the room for one peer. */
 export interface PeerEvents {
@@ -120,6 +129,10 @@ export interface RoomSync {
   setHand(owner: number, id: number, hand: number): void;
   /** Our host started or ended a poll. */
   poll(poll: Poll): void;
+  /** Our host gathered everyone, or let them go. */
+  orbit(orbit: OrbitSync): void;
+  /** Seats we gave our players during an orbit (NO_SLOT: none any more). */
+  slots(list: SlotChange[]): void;
 }
 
 interface Player {
@@ -227,6 +240,8 @@ export class Room {
    * spawn inside an answer planet, and that is not a choice.
    */
   private readonly pollMovers = new Set<number>();
+  /** Orbit mode: when it started (Unix ms) and everyone's seat. Nobody moves meanwhile. */
+  private orbit: { start: number; slots: Map<number, number> } | null = null;
   private ticker: ReturnType<typeof setInterval> | null = null;
   /** Local players asked to migrate, and when they may be asked again. */
   private readonly migrating = new Map<number, number>();
@@ -261,6 +276,11 @@ export class Room {
   /** Ids of players connected to this server. */
   playerIds(): number[] {
     return [...this.players.values()].filter((p) => p.owner === null).map((p) => p.id);
+  }
+
+  /** The orbit, for a peer that starts mirroring this room. */
+  currentOrbit(): OrbitSync | null {
+    return this.orbit ? { active: true, start: this.orbit.start, slots: slotList(this.orbit.slots) } : null;
   }
 
   /** The open poll, for a peer that starts mirroring this room. */
@@ -317,6 +337,10 @@ export class Room {
           this.handlePollEnd(player);
         } else if (msg.t === "who" && player) {
           this.handleWho(player, msg.ids);
+        } else if (msg.t === "gather" && player) {
+          this.handleGather(player);
+        } else if (msg.t === "release" && player) {
+          this.handleRelease(player);
         }
       },
       close: () => {
@@ -357,6 +381,7 @@ export class Room {
     this.forget(p);
     this.queueLeft(id);
     this.pollMovers.delete(id);
+    this.orbit?.slots.delete(id);
   }
 
   /** Replicated moves go out to our clients with our next tick. */
@@ -428,6 +453,22 @@ export class Room {
   remotePoll(poll: Poll): void {
     if (poll.open) this.startPoll(poll);
     else if (this.poll?.id === poll.id) this.endPoll(poll);
+  }
+
+  /** The host (on another server) gathered everyone or let them go. */
+  remoteOrbit(orbit: OrbitSync): void {
+    if (orbit.active) this.startOrbit(orbit.start, new Map(orbit.slots.map((s) => [s.id, s.slot])));
+    else if (this.orbit) this.releaseOrbit(orbit.at);
+  }
+
+  /** Seats another server gave its players. */
+  remoteSlots(list: SlotChange[]): void {
+    if (!this.orbit) return;
+    for (const { id, slot } of list) {
+      if (slot === NO_SLOT) this.orbit.slots.delete(id);
+      else this.orbit.slots.set(id, slot);
+      this.queueSlot(id, slot);
+    }
   }
 
   /** A server went away: its players leave this room for our clients. */
@@ -531,6 +572,8 @@ export class Room {
       ...fresh(),
     };
 
+    // Arriving during an orbit: straight to a seat.
+    if (this.orbit && role !== "host") this.seat(player, this.orbit.slots.get(id));
     // Others hear about a change of snapshot rate before the newcomer's welcome carries it.
     this.applySchedule(this.localCount + 1);
     // A replica with our id (a migration, or a stale copy) is replaced in place.
@@ -542,6 +585,7 @@ export class Room {
       chat: this.chat,
       snapshotHz: this.snapshotHz,
       poll: this.poll,
+      orbit: this.orbitWire(),
     });
     // Our clients already see a migrating player; only its position may change.
     if (!wasReplica) this.queueJoined(player.id);
@@ -661,7 +705,11 @@ export class Room {
     if (p.role === role) return;
     const wasHost = p.role === "host";
     p.role = role;
-    if (wasHost) {
+    if (this.orbit) {
+      // In orbit: the host goes to the sun, a new speaker to the stage, a guest to the rings.
+      if (role === "host") this.unseat(p);
+      else if (wasHost || (role === "speaker") !== (this.orbit.slots.get(p.id) ?? NO_SLOT) < STAGE_SLOTS) this.seat(p);
+    } else if (wasHost) {
       // A former host leaves the sun for a spot near the others.
       const spot = this.spawnFor(p.id);
       p.x = spot.x;
@@ -695,6 +743,98 @@ export class Room {
       else missing.push(id);
     }
     send(player.peer!, { t: "players", players, missing });
+  }
+
+  // ------------------------------------------------------------ orbit mode
+
+  /** The host gathers everyone around the sun: speakers on the stage ring, guests on the rings. */
+  private handleGather(requester: Player): void {
+    if (requester.role !== "host") {
+      send(requester.peer!, { t: "error", message: "Only the host can gather everyone." });
+      return;
+    }
+    if (this.orbit) return;
+    // A poll needs people to fly to an answer; gathering ends it.
+    if (this.poll) {
+      const final: Poll = { ...this.poll, open: false, counts: this.countVotes(this.poll.options.length) };
+      this.endPoll(final);
+      this.opts.sync?.poll(final);
+    }
+    const slots = new Map<number, number>();
+    let stage = 0;
+    let ring = STAGE_SLOTS;
+    for (const p of this.players.values()) {
+      if (p.role === "host") continue;
+      slots.set(p.id, p.role === "speaker" && stage < STAGE_SLOTS ? stage++ : ring++);
+    }
+    const start = Date.now();
+    this.startOrbit(start, slots);
+    this.opts.sync?.orbit({ active: true, start, slots: slotList(slots) });
+  }
+
+  private handleRelease(requester: Player): void {
+    if (requester.role !== "host" || !this.orbit) return;
+    const at = Date.now();
+    this.releaseOrbit(at);
+    this.opts.sync?.orbit({ active: false, at });
+  }
+
+  private startOrbit(start: number, slots: Map<number, number>): void {
+    this.orbit = { start, slots };
+    for (const g of this.pending) g.slots.clear();
+    this.broadcast({ t: "orbit", active: true, ...this.orbitWire()! });
+  }
+
+  /**
+   * Everyone stays where their orbit had them at `at`. Clients compute the same
+   * spots, so nobody is told; we only refile players for the area of interest.
+   */
+  private releaseOrbit(at: number): void {
+    const orbit = this.orbit!;
+    for (const [id, slot] of orbit.slots) {
+      const p = this.players.get(id);
+      if (!p) continue;
+      const spot = orbitPosition(slot, (at - orbit.start) / 1000);
+      p.x = quantize(spot.x);
+      p.y = quantize(spot.y);
+      p.dir = spot.dir;
+      p.moving = false;
+      p.lastMoveAt = p.movedAt = at;
+      this.file(p);
+      if (p.owner === null) this.moveViewer(p, false);
+    }
+    this.orbit = null;
+    for (const g of this.pending) g.slots.clear();
+    this.broadcast({ t: "orbit", active: false, start: orbit.start % 0x1_0000_0000, now: at % 0x1_0000_0000, slots: [] });
+  }
+
+  /** Give a local player a seat (`slot`, or the best free one for its role) and tell everyone. */
+  private seat(p: Player, slot?: number): void {
+    const orbit = this.orbit!;
+    orbit.slots.delete(p.id);
+    const seat = slot ?? freeSlot(p.role === "speaker", orbit.slots.values());
+    orbit.slots.set(p.id, seat);
+    const spot = orbitPosition(seat, (Date.now() - orbit.start) / 1000);
+    p.x = quantize(spot.x);
+    p.y = quantize(spot.y);
+    this.queueSlot(p.id, seat);
+    this.opts.sync?.slots([{ id: p.id, slot: seat }]);
+  }
+
+  private unseat(p: Player): void {
+    if (!this.orbit?.slots.delete(p.id)) return;
+    this.queueSlot(p.id, NO_SLOT);
+    this.opts.sync?.slots([{ id: p.id, slot: NO_SLOT }]);
+  }
+
+  private queueSlot(id: number, slot: number): void {
+    for (const g of this.pending) g.slots.set(id, slot);
+  }
+
+  /** The orbit as clients get it: start and our clock now (both modulo 2^32), and every seat. */
+  private orbitWire(): OrbitState | null {
+    if (!this.orbit) return null;
+    return { start: this.orbit.start % 0x1_0000_0000, now: Date.now() % 0x1_0000_0000, slots: slotList(this.orbit.slots) };
   }
 
   // ------------------------------------------------------------ reactions, hands, polls
@@ -746,6 +886,10 @@ export class Room {
   private handlePollStart(requester: Player, question: string, options: string[]): void {
     if (requester.role !== "host") {
       send(requester.peer!, { t: "error", message: "Only the host can start a poll." });
+      return;
+    }
+    if (this.orbit) {
+      send(requester.peer!, { t: "error", message: "Polls are off while everyone is gathered." });
       return;
     }
     const clean = cleanPoll(question, options);
@@ -847,6 +991,7 @@ export class Room {
     this.forget(player);
     this.queueLeft(player.id);
     this.pollMovers.delete(player.id);
+    this.orbit?.slots.delete(player.id);
     this.applySchedule(this.localCount);
     this.opts.onLeft?.(player.id);
     this.opts.sync?.left(player.id);
@@ -854,6 +999,7 @@ export class Room {
 
   private handleMove(player: Player, move: { x: number; y: number; dir: Direction; moving: boolean }): void {
     if (player.role === "host") return; // the sun does not move
+    if (this.orbit) return; // gathered: everyone follows their orbit
     const now = Date.now();
     const elapsed = Math.min((now - player.lastMoveAt) / 1000, 1);
     const maxDistance = MOVE_SPEED * elapsed + MOVE_SLACK;
@@ -914,7 +1060,8 @@ export class Room {
    * idle players included (their positions never come in snapshots otherwise).
    * The rest of its view was in view already, so it is up to date.
    */
-  private moveViewer(p: Player): void {
+  /** `tell` false: the client already knows who is around (orbit release). */
+  private moveViewer(p: Player, tell = true): void {
     const cell = cellOf(p.x, p.y);
     const from = p.cell;
     if (cell === from) return;
@@ -925,6 +1072,7 @@ export class Room {
     this.removeViewer(p);
     p.cell = cell;
     this.viewersIn(cell).add(p);
+    if (!tell) return;
     const players: PlayerState[] = [];
     for (const near of cellsInView(cell)) {
       // Cells the old view covered entirely hold nobody new.
@@ -1029,7 +1177,12 @@ export class Room {
       p.voice.length > 0 && (p.changed.size > 0 || now - p.voiceSince + periodMs >= VOICE_FLUSH_MS);
     // Joins, leaves, reactions, hands and poll counts go out with the next snapshot.
     const extras =
-      p.joined.size > 0 || p.left.length > 0 || p.reactions.length > 0 || p.hands.size > 0 || p.pollCounts !== null;
+      p.joined.size > 0 ||
+      p.left.length > 0 ||
+      p.reactions.length > 0 ||
+      p.hands.size > 0 ||
+      p.pollCounts !== null ||
+      p.slots.size > 0;
     if (p.changed.size === 0 && !voiceDue && !extras) return false;
     const voice = voiceDue ? p.voice : [];
     // Each part is encoded once and copied into the snapshots of every cell that sees it.
@@ -1041,6 +1194,7 @@ export class Room {
       reactions: p.reactions,
       hands: [...p.hands].map(([id, hand]) => ({ id, hand })),
       pollCounts: p.pollCounts ?? [],
+      slots: slotList(p.slots),
     });
 
     // The host and speakers are always in view; everyone else by map cell.
@@ -1093,6 +1247,7 @@ export class Room {
       this.pending[g].reactions = [];
       this.pending[g].hands.clear();
       this.pending[g].pollCounts = null;
+      this.pending[g].slots.clear();
       if (voiceDue) this.pending[g].voice = [];
     }
     return true;
@@ -1145,6 +1300,7 @@ function newPending(): Pending {
     reactions: [],
     hands: new Map(),
     pollCounts: null,
+    slots: new Map(),
   };
 }
 
@@ -1161,6 +1317,10 @@ function fresh() {
     reactBudget: REACTION_BURST,
     reactAt: now,
   };
+}
+
+function slotList(slots: Map<number, number>): SlotChange[] {
+  return [...slots].map(([id, slot]) => ({ id, slot }));
 }
 
 function toState(p: Player): PlayerState {

@@ -30,18 +30,21 @@ test("client messages round-trip", () => {
     { t: "poll_start", question: "Lunch?", options: ["Phở", "Bún chả", "Cơm tấm"] },
     { t: "poll_end" },
     { t: "who", ids: [1, 300, 65535] },
+    { t: "gather" },
+    { t: "release" },
   ];
   for (const m of messages) assert.deepEqual(decodeClientMessage(encodeClientMessage(m)), m);
 });
 
-const emptyTail = { time: 4_294_967_295, voice: [], joined: [], left: [], reactions: [], hands: [], pollCounts: [] };
+const emptyTail = { time: 4_294_967_295, voice: [], joined: [], left: [], reactions: [], hands: [], pollCounts: [], slots: [] };
+const orbit = { start: 4_294_967_000, now: 300, slots: [{ id: 7, slot: 0 }, { id: 8, slot: 65535 }] };
 const poll = { id: 4_000_000_001, question: "Which planet next?", options: ["Mars 🔴", "Venus", "Neptune"], open: true, counts: [0, 2, 1] };
 
 test("server messages round-trip", () => {
   const chat = { id: 3, playerId: 7, name: "Mochi", text: "hi", ts: 1_790_219_348_670 };
   const messages: ServerMessage[] = [
-    { t: "welcome", selfId: 7, players: [player, { ...player, id: 8, hand: 17_900_000_000 % 2 ** 32 }], chat: [chat], snapshotHz: 20, poll: null },
-    { t: "welcome", selfId: 7, players: [], chat: [], snapshotHz: 10, poll },
+    { t: "welcome", selfId: 7, players: [player, { ...player, id: 8, hand: 17_900_000_000 % 2 ** 32 }], chat: [chat], snapshotHz: 20, poll: null, orbit: null },
+    { t: "welcome", selfId: 7, players: [], chat: [], snapshotHz: 10, poll, orbit },
     { t: "player_joined", player },
     { t: "player_left", id: 7 },
     { t: "chat", message: chat },
@@ -58,6 +61,7 @@ test("server messages round-trip", () => {
       reactions: [{ id: 7, kind: 0 }, { id: 8, kind: 5 }],
       hands: [{ id: 7, hand: 4_000_000_000 }, { id: 8, hand: 0 }],
       pollCounts: [3, 0, 65535],
+      slots: [{ id: 9, slot: 12 }],
     },
     { t: "migrate" },
     { t: "role", id: 7, role: "host" },
@@ -66,6 +70,8 @@ test("server messages round-trip", () => {
     { t: "poll", poll },
     { t: "poll", poll: { ...poll, open: false, counts: [12, 30, 0] } },
     { t: "players", players: [player], missing: [4, 5] },
+    { t: "orbit", active: true, ...orbit },
+    { t: "orbit", active: false, start: 1, now: 2, slots: [] },
   ];
   for (const m of messages) assert.deepEqual(decodeServerMessage(encodeServerMessage(m)), m);
 });
@@ -80,8 +86,9 @@ test("positions are quantized to the wire grid", () => {
 
 test("snapshot costs 8 bytes per player", () => {
   const players = Array.from({ length: 100 }, (_, i) => ({ id: i, x: i, y: i, dir: "south" as const, moving: false, age: i }));
-  // + 4 (time) + 1 (no voice) + 2 (no joins) + 2 (no leaves) + 2 (no reactions) + 2 (no hands) + 1 (no poll counts)
-  assert.equal(encodeServerMessage({ t: "snapshot", players, ...emptyTail }).length, 1 + 2 + 100 * 8 + 14);
+  // + 4 (time) + 1 (no voice) + 2 (no joins) + 2 (no leaves) + 2 (no reactions) + 2 (no hands)
+  // + 1 (no poll counts) + 2 (no seats)
+  assert.equal(encodeServerMessage({ t: "snapshot", players, ...emptyTail }).length, 1 + 2 + 100 * 8 + 16);
 });
 
 test("malformed or unknown frames decode to null", () => {
@@ -111,8 +118,8 @@ test("snapshots assembled from parts match the regular encoder", () => {
     for (const joined of [[], [player]]) {
       const left = joined.length ? [9, 10] : [];
       const extras = joined.length
-        ? { reactions: [{ id: 3, kind: 1 }], hands: [{ id: 7, hand: 99 }], pollCounts: [4, 5] }
-        : { reactions: [], hands: [], pollCounts: [] };
+        ? { reactions: [{ id: 3, kind: 1 }], hands: [{ id: 7, hand: 99 }], pollCounts: [4, 5], slots: [{ id: 3, slot: 9 }] }
+        : { reactions: [], hands: [], pollCounts: [], slots: [] };
       const tail = { time: 123_456_789, voice: v, joined, left, ...extras };
       const regular = encodeServerMessage({ t: "snapshot", players, ...tail });
       const parts = assembleSnapshot(players.map((p) => snapshotEntry(p, p.age)), snapshotTail(tail));

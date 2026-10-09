@@ -1,12 +1,15 @@
 import { decode, encode, Type, type Struct } from "../../../shared/src/binary/schema.ts";
 import { isReactionKind, type Reaction } from "../../../shared/src/audience.ts";
 import type { Poll } from "../../../shared/src/poll.ts";
+import type { OrbitSync } from "../room.ts";
 import {
   ChatStruct,
   HandStruct,
   pollFromWire,
   PollStruct,
   pollToWire,
+  SlotStruct,
+  type SlotChange,
   ReactionStruct,
   type WirePoll,
   infoFromWire,
@@ -60,7 +63,11 @@ export type MeshMessage =
   /** Ask the receiver (the player's server) to set the hand of its player `id`. */
   | { t: "set_hand"; room: string; id: number; hand: number }
   /** The sender's host started (open) or ended a poll. */
-  | { t: "poll"; room: string; poll: Poll };
+  | { t: "poll"; room: string; poll: Poll }
+  /** The sender's host gathered everyone (with every seat) or let them go. */
+  | { t: "orbit"; room: string; orbit: OrbitSync }
+  /** Seats the sender gave its players during an orbit. */
+  | { t: "slots"; room: string; list: SlotChange[] };
 
 const Op = {
   interest: 100,
@@ -78,6 +85,8 @@ const Op = {
   hand: 112,
   set_hand: 113,
   poll: 114,
+  orbit: 115,
+  slots: 116,
 } as const;
 
 const HandMeshStruct: Struct = { room: Type.String, ...HandStruct };
@@ -100,6 +109,9 @@ const Schemas: Record<number, Struct> = {
   [Op.hand]: HandMeshStruct,
   [Op.set_hand]: HandMeshStruct,
   [Op.poll]: { room: Type.String, poll: Type.Object8, poll_Struct: PollStruct },
+  // Times as Doubles: full Unix ms between servers.
+  [Op.orbit]: { room: Type.String, active: Type.UInt8, time: Type.Double, slots: Type.Object16, slots_Struct: SlotStruct },
+  [Op.slots]: { room: Type.String, list: Type.Object16, list_Struct: SlotStruct },
 };
 
 export function encodeMesh(msg: MeshMessage): Uint8Array<ArrayBuffer> {
@@ -138,6 +150,13 @@ export function encodeMesh(msg: MeshMessage): Uint8Array<ArrayBuffer> {
       return encode(Schemas[Op[msg.t]], msg, Op[msg.t]);
     case "poll":
       return encode(Schemas[Op.poll], { room: msg.room, poll: [pollToWire(msg.poll)] }, Op.poll);
+    case "orbit": {
+      const o = msg.orbit;
+      const body = o.active ? { active: 1, time: o.start, slots: o.slots } : { active: 0, time: o.at, slots: [] };
+      return encode(Schemas[Op.orbit], { room: msg.room, ...body }, Op.orbit);
+    }
+    case "slots":
+      return encode(Schemas[Op.slots], msg, Op.slots);
   }
 }
 
@@ -198,6 +217,14 @@ export function decodeMesh(bytes: Uint8Array): MeshMessage | null {
         const m = decode<{ room: string; poll: WirePoll[] }>(schema, bytes, 1);
         return m.poll.length === 1 ? { t: "poll", room: m.room, poll: pollFromWire(m.poll[0]) } : null;
       }
+      case Op.orbit: {
+        const m = decode<{ room: string; active: number; time: number; slots: SlotChange[] }>(schema, bytes, 1);
+        const orbit: OrbitSync =
+          m.active === 1 ? { active: true, start: m.time, slots: m.slots } : { active: false, at: m.time };
+        return { t: "orbit", room: m.room, orbit };
+      }
+      case Op.slots:
+        return { t: "slots", ...decode<{ room: string; list: SlotChange[] }>(schema, bytes, 1) };
       default:
         return null;
     }

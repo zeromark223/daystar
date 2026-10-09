@@ -118,6 +118,8 @@ export class Mesh {
             link?.send(encodeMesh({ t: "room_state", room: msg.room, players: room.localState() }));
             const poll = room.currentPoll();
             if (poll) link?.send(encodeMesh({ t: "poll", room: msg.room, poll }));
+            const orbit = room.currentOrbit();
+            if (orbit) link?.send(encodeMesh({ t: "orbit", room: msg.room, orbit }));
           }
         } else {
           peers?.delete(server);
@@ -161,6 +163,12 @@ export class Mesh {
         break;
       case "poll":
         room?.remotePoll(msg.poll);
+        break;
+      case "orbit":
+        room?.remoteOrbit(msg.orbit);
+        break;
+      case "slots":
+        room?.remoteSlots(msg.list);
         break;
       case "takeover": {
         // The player reconnected to `server`: stop owning it and send its state over.
@@ -226,6 +234,8 @@ export class Mesh {
       hand: (id, hand) => send({ t: "hand", room, id, hand }),
       setHand: (owner, id, hand) => this.links.get(owner)?.send(encodeMesh({ t: "set_hand", room, id, hand })),
       poll: (poll) => send({ t: "poll", room, poll }),
+      orbit: (orbit) => send({ t: "orbit", room, orbit }),
+      slots: (list) => send({ t: "slots", room, list }),
     };
   }
 

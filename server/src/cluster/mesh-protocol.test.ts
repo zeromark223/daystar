@@ -24,6 +24,9 @@ test("every mesh message round-trips", () => {
     { t: "hand", room: "r", id: 9, hand: 179_000_000 },
     { t: "set_hand", room: "r", id: 9, hand: 0 },
     { t: "poll", room: "r", poll: { id: 7, question: "Q?", options: ["a", "b"], open: false, counts: [1, 2] } },
+    { t: "orbit", room: "r", orbit: { active: true, start: 1_791_000_000_123, slots: [{ id: 9, slot: 0 }] } },
+    { t: "orbit", room: "r", orbit: { active: false, at: 1_791_000_060_456 } },
+    { t: "slots", room: "r", list: [{ id: 9, slot: 65535 }] },
   ];
   for (const m of messages) assert.deepEqual(decodeMesh(encodeMesh(m)), m);
 });

@@ -1019,3 +1019,36 @@ button.secondary {
     top: 108px;
   }
 }
+
+/* ---------- orbit mode ---------- */
+
+.orbit-banner {
+  position: absolute;
+  left: 50%;
+  bottom: 100px;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 7px 14px;
+  border-radius: 999px;
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  font-size: 0.85rem;
+  white-space: nowrap;
+  backdrop-filter: blur(8px);
+}
+
+#gather-button[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+@media (max-width: 600px) {
+  .orbit-banner {
+    bottom: auto;
+    top: 112px;
+    max-width: calc(100vw - 32px);
+    white-space: normal;
+    text-align: center;
+  }
+}

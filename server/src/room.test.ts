@@ -3,10 +3,12 @@ import { test } from "node:test";
 import {
   decodeServerMessage,
   encodeClientMessage,
+  quantize,
   type ClientMessage,
   type ServerMessage,
 } from "../../shared/src/protocol.ts";
 import { POLL_COUNT_MS, pollZones } from "../../shared/src/poll.ts";
+import { orbitPosition, STAGE_SLOTS } from "../../shared/src/orbit.ts";
 import { Room, type PeerEvents } from "./room.ts";
 
 
@@ -58,6 +60,8 @@ const quietSync = {
   hand() {},
   setHand() {},
   poll() {},
+  orbit() {},
+  slots() {},
 };
 
 /** Ids that joined / left, as carried by snapshots. */
@@ -941,4 +945,88 @@ test("a socket that missed a join sees the player in snapshots without knowing w
   assert.deepEqual(ann.take(), []);
   dan.close();
   done();
+});
+
+// ------------------------------------------------------------ orbit mode
+
+test("the host gathers everyone: speakers on the stage, guests on the rings, nobody moves, no polls", () => {
+  const { tick, join, everyone } = hostedRoom();
+  const host = join("Hana", HOST_KEY);
+  const a = join("Ann");
+  const b = join("Ben");
+  everyone(host.s, a.s, b.s);
+  host.s.deliver({ t: "set_role", id: b.self.id, role: "speaker" });
+  host.s.deliver({ t: "poll_start", question: "Tea?", options: ["Yes", "No"] });
+  everyone(host.s, a.s, b.s);
+
+  a.s.deliver({ t: "gather" });
+  assert.deepEqual(a.s.take().map((m) => m.t), ["error"]);
+  host.s.deliver({ t: "gather" });
+  const got = a.s.take();
+  // The open poll ends first.
+  assert.deepEqual(got.map((m) => m.t), ["poll", "orbit"]);
+  const orbit = got[1];
+  assert.ok(orbit.t === "orbit" && orbit.active);
+  const seat = new Map(orbit.slots.map((s) => [s.id, s.slot]));
+  assert.equal(seat.has(host.self.id), false);
+  assert.ok(seat.get(b.self.id)! < STAGE_SLOTS);
+  assert.ok(seat.get(a.self.id)! >= STAGE_SLOTS);
+
+  // Moves are ignored (no correction either), polls refused.
+  a.s.deliver({ t: "move", x: a.self.x + 1, y: a.self.y, dir: "east", moving: true });
+  tick();
+  assert.deepEqual(snapshotsOf(b.s.take()).flatMap((m) => m.players), []);
+  assert.deepEqual(a.s.take().filter((m) => m.t === "correction"), []);
+  host.s.take();
+  host.s.deliver({ t: "poll_start", question: "Q", options: ["x", "y"] });
+  assert.deepEqual(host.s.take().map((m) => m.t), ["error"]);
+});
+
+test("in orbit: newcomers get a seat, new speakers move to the stage, the host leaving changes nothing", () => {
+  const { tick, join, everyone } = hostedRoom();
+  const host = join("Hana", HOST_KEY);
+  const a = join("Ann");
+  everyone(host.s, a.s);
+  host.s.deliver({ t: "gather" });
+  everyone(host.s, a.s);
+
+  const late = join("Cat");
+  const welcome = late.s.take().find((m) => m.t === "welcome");
+  assert.ok(welcome?.t === "welcome" && welcome.orbit);
+  const lateSeat = welcome.orbit.slots.find((s) => s.id === late.self.id)?.slot;
+  assert.ok(lateSeat !== undefined && lateSeat >= STAGE_SLOTS);
+  tick();
+  assert.deepEqual(snapshotsOf(a.s.take()).flatMap((m) => m.slots), [{ id: late.self.id, slot: lateSeat }]);
+
+  host.s.deliver({ t: "set_role", id: a.self.id, role: "speaker" });
+  tick();
+  const moved = snapshotsOf(late.s.take()).flatMap((m) => m.slots);
+  assert.ok(moved.some((s) => s.id === a.self.id && s.slot < STAGE_SLOTS));
+
+  host.s.close();
+  const back = join("Hana", HOST_KEY);
+  const again = back.s.take().find((m) => m.t === "welcome");
+  assert.ok(again?.t === "welcome" && again.orbit !== null);
+});
+
+test("release: everyone stays where the orbit had them, and can walk on from there", () => {
+  const { tick, join, everyone } = hostedRoom();
+  const host = join("Hana", HOST_KEY);
+  const a = join("Ann");
+  everyone(host.s, a.s);
+  host.s.deliver({ t: "gather" });
+  const start = host.s.take().find((m) => m.t === "orbit");
+  assert.ok(start?.t === "orbit");
+  const seat = start.slots.find((s) => s.id === a.self.id)!.slot;
+  a.s.take();
+  host.s.deliver({ t: "release" });
+  const end = a.s.take().find((m) => m.t === "orbit");
+  assert.ok(end?.t === "orbit" && !end.active);
+  const at = orbitPosition(seat, ((end.now - start.start + 2 ** 32) % 2 ** 32) / 1000);
+  // From exactly that spot a step is accepted (no correction) and seen by others.
+  a.s.deliver({ t: "move", x: quantize(at.x) + 2, y: quantize(at.y), dir: "east", moving: true });
+  tick(30);
+  assert.deepEqual(a.s.take().filter((m) => m.t === "correction"), []);
+  const seen = snapshotsOf(host.s.take()).flatMap((m) => m.players).find((p) => p.id === a.self.id);
+  assert.deepEqual(seen && [seen.x, seen.y], [quantize(at.x) + 2, quantize(at.y)]);
 });

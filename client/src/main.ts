@@ -94,6 +94,24 @@ async function main(): Promise<void> {
   });
 
   const missing = new MissingPlayers((ids) => conn?.send({ t: "who", ids }));
+  const gatherButton = document.getElementById("gather-button") as HTMLButtonElement;
+  const orbitBanner = document.getElementById("orbit-banner")!;
+  let orbiting = false;
+  gatherButton.addEventListener("click", () => conn?.send({ t: orbiting ? "release" : "gather" }));
+
+  /** Orbit mode on or off: the host's button, the banner, polls. */
+  const showOrbit = (on: boolean, announce: boolean) => {
+    orbiting = on;
+    gatherButton.textContent = on ? "Release" : "Gather";
+    gatherButton.setAttribute("aria-pressed", String(on));
+    orbitBanner.hidden = !on || selfRole === "host";
+    if (on) hint.classList.remove("touch"); // the banner takes its place on phones
+    polls.setLocked(on);
+    if (on) polls.hide();
+    if (!announce) return;
+    if (on) chat?.addSystem("The host gathered everyone around the sun.");
+    else chat?.addSystem("The host let everyone go. You can move again.");
+  };
   const tutorial = new Tutorial();
   new SettingsPanel({ replayTutorial: () => tutorial.replay(selfRole) });
 
@@ -159,6 +177,8 @@ async function main(): Promise<void> {
     roleChip.className = `role-chip ${role}`;
     audience.setCanRaise(role === "guest");
     polls.setHost(role === "host");
+    gatherButton.hidden = role !== "host";
+    orbitBanner.hidden = !orbiting || role === "host";
     if (TOUCH) hint.textContent = role === "host" ? HINTS.touchHost : HINTS.touchPlayer;
     else hint.textContent = role === "host" ? HINTS.host : HINTS.player;
     if (TOUCH && (!announce || before !== role)) {
@@ -221,6 +241,8 @@ async function main(): Promise<void> {
         setSelfRole(msg.players.find((p) => p.id === msg.selfId)?.role ?? "guest", rejoin);
         if (msg.poll) showPoll(msg.poll, !rejoin);
         else if (rejoin) polls.hide();
+        if (msg.orbit) game.startOrbit(msg.orbit, false);
+        showOrbit(msg.orbit !== null, false);
         if (!rejoin) {
           msg.chat.forEach((m) => chat!.addMessage(m));
           chat.addSystem(`You joined ${roomId}.`);
@@ -276,6 +298,7 @@ async function main(): Promise<void> {
         }
         if (msg.joined.length) updateCount();
         game.applySnapshot(msg.players, msg.time);
+        for (const s of msg.slots) game.setSlot(s.id, s.slot);
         // Someone we never heard join (a frame to us was dropped): ask who it is.
         for (const p of msg.players) if (p.id !== selfId && people.nameOf(p.id) === undefined) missing.saw(p.id);
         player.push(msg.voice.filter((frame) => frame.id !== selfId));
@@ -292,6 +315,11 @@ async function main(): Promise<void> {
         break;
       case "poll":
         showPoll(msg.poll, true);
+        break;
+      case "orbit":
+        if (msg.active) game.startOrbit(msg, true);
+        else game.releaseOrbit(msg);
+        showOrbit(msg.active, true);
         break;
       case "players":
         // Answer to "who": players we missed the join of, quietly added; ids that

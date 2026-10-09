@@ -23,6 +23,7 @@ export class PollPanel {
   private readonly actions: PollActions;
   private poll: Poll | null = null;
   private isHost = false;
+  private locked = false;
   private mine = -1;
   private hideTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -66,6 +67,13 @@ export class PollPanel {
     this.render();
   }
 
+  /** No polls while everyone is gathered: answering means flying. */
+  setLocked(locked: boolean): void {
+    this.locked = locked;
+    this.button.disabled = locked || this.poll?.open === true;
+    this.button.title = locked ? "Polls are off while everyone is gathered" : "";
+  }
+
   get visible(): boolean {
     return !this.card.hidden;
   }
@@ -74,7 +82,7 @@ export class PollPanel {
   show(poll: Poll): void {
     clearTimeout(this.hideTimer);
     this.poll = poll;
-    this.button.disabled = poll.open;
+    this.button.disabled = poll.open || this.locked;
     if (!poll.open) this.hideTimer = setTimeout(() => this.hide(), RESULT_MS);
     this.render();
   }
@@ -95,7 +103,7 @@ export class PollPanel {
   hide(): void {
     clearTimeout(this.hideTimer);
     this.poll = null;
-    this.button.disabled = false;
+    this.button.disabled = this.locked;
     this.card.hidden = true;
   }
 

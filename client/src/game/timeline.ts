@@ -85,6 +85,11 @@ export class PlayoutClock {
     return now - this.lag;
   }
 
+  /** The server's clock now, as best we know (NaN before any time arrived). */
+  serverNow(now: number): number {
+    return Number.isFinite(this.fastest) ? now - this.fastest : NaN;
+  }
+
   /** How far behind the newest snapshot we draw, in ms (for debugging). */
   get delayMs(): number {
     return this.lag - this.fastest;

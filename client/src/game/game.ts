@@ -2,7 +2,13 @@ import { Application, Container, Rectangle } from "pixi.js";
 import { appearanceOf } from "../../../shared/src/appearance.ts";
 import { MOVE_SPEED, TICK_RATE } from "../../../shared/src/constants.ts";
 import { facing, type Direction } from "../../../shared/src/direction.ts";
-import { quantize, type PlayerInfo, type PlayerState, type SnapshotPlayer } from "../../../shared/src/protocol.ts";
+import {
+  quantize,
+  type OrbitState,
+  type PlayerInfo,
+  type PlayerState,
+  type SnapshotPlayer,
+} from "../../../shared/src/protocol.ts";
 import { fogAt, inView } from "../../../shared/src/aoi.ts";
 import type { Role } from "../../../shared/src/roles.ts";
 import { canBeAt, moveInSpace } from "../../../shared/src/space.ts";
@@ -12,6 +18,7 @@ import { Minimap } from "./minimap.ts";
 import { PollZones } from "./poll-zones.ts";
 import { PlayoutClock, Track } from "./timeline.ts";
 import type { Poll } from "../../../shared/src/poll.ts";
+import { orbitPosition } from "../../../shared/src/orbit.ts";
 import { SpaceScene } from "./space-scene.ts";
 import { TouchStick } from "./touch.ts";
 
@@ -24,6 +31,11 @@ export interface GameCallbacks {
 }
 
 const SEND_INTERVAL_MS = 1000 / TICK_RATE;
+/** Gather: each player flies in over this long, the farthest leaving up to GATHER_STAGGER_MS later. */
+const GATHER_MS = 1_800;
+const GATHER_STAGGER_MS = 700;
+/** A player changing seat mid-orbit (made speaker, ...) glides there in this long. */
+const RESEAT_MS = 1_200;
 const ARRIVE_DISTANCE = 3;
 const MIN_ZOOM = 0.12;
 const MAX_ZOOM = 2.5;
@@ -44,6 +56,12 @@ export class Game {
   private readonly pollZones = new PollZones();
   /** Server time to draw remote players at (see timeline.ts). */
   private readonly clock = new PlayoutClock();
+  /** Orbit mode: when it started (server time) and everyone's seat; positions come from the clock. */
+  private orbit: { start: number; slots: Map<number, number> } | null = null;
+  /** Flights from where a player was to its seat (gather, reseat). */
+  private readonly flights = new Map<number, { x: number; y: number; at: number; ms: number }>();
+  /** When the sun flares as everyone arrives (local time). */
+  private flareAt = 0;
   /** Screen-space layer for names and chat bubbles. */
   private readonly overlay = new Container();
   private readonly avatars = new Map<number, Avatar>();
@@ -78,7 +96,7 @@ export class Game {
     app.stage.addChild(game.scene.sky, game.world, game.overlay, game.minimap.view);
     game.setupPointer();
     game.setupZoom();
-    game.touch = new TouchStick(app.canvas, () => !game.selfIsHost, (factor) => game.zoomBy(factor));
+    game.touch = new TouchStick(app.canvas, () => !game.selfIsHost && !game.orbiting, (factor) => game.zoomBy(factor));
     game.minimap.layout(app.screen.width, app.screen.height);
     app.renderer.on("resize", (w: number, h: number) => game.minimap.layout(w, h));
     app.ticker.add((ticker) => game.update(ticker.deltaMS));
@@ -168,6 +186,107 @@ export class Game {
     for (const avatar of this.avatars.values()) avatar.destroy();
     this.avatars.clear();
     this.clock.reset();
+    this.orbit = null;
+    this.flights.clear();
+  }
+
+  get orbiting(): boolean {
+    return this.orbit !== null;
+  }
+
+  /**
+   * The host gathered everyone (or we joined while gathered: `animate` false).
+   * Every player flies from where it is to its seat, leaving a trail of light, and
+   * from then on follows its orbit; nobody steers.
+   */
+  startOrbit(state: OrbitState, animate: boolean): void {
+    const serverNow = this.clock.observe(state.now, performance.now());
+    // The start is modulo 2^32 too; how long ago it was is what counts.
+    const start = serverNow - ((state.now - state.start) >>> 0);
+    this.orbit = { start, slots: new Map(state.slots.map((s) => [s.id, s.slot])) };
+    this.tapTarget = null;
+    this.flights.clear();
+    if (!animate) return;
+    const now = performance.now();
+    const self = this.self;
+    let farthest = 1;
+    for (const a of this.avatars.values()) if (self) farthest = Math.max(farthest, Math.hypot(a.x - self.x, a.y - self.y));
+    for (const [id] of this.orbit.slots) {
+      const a = this.avatars.get(id);
+      if (!a) continue;
+      // The far ones start first, so the whole sky arrives together.
+      const lead = self ? (Math.hypot(a.x - self.x, a.y - self.y) / farthest) * GATHER_STAGGER_MS : 0;
+      this.flights.set(id, { x: a.x, y: a.y, at: now + GATHER_STAGGER_MS - lead, ms: GATHER_MS });
+      a.setStreak(true);
+    }
+    this.flareAt = now + GATHER_STAGGER_MS + GATHER_MS;
+  }
+
+  /** A seat given (or taken) mid-orbit: the player glides to it. */
+  setSlot(id: number, slot: number): void {
+    if (!this.orbit) return;
+    const a = this.avatars.get(id);
+    if (slot === 0xffff) this.orbit.slots.delete(id);
+    else this.orbit.slots.set(id, slot);
+    if (a && this.orbit.slots.has(id)) this.flights.set(id, { x: a.x, y: a.y, at: performance.now(), ms: RESEAT_MS });
+  }
+
+  /** The host let everyone go: each player stays where its orbit had it at `state.now`. */
+  releaseOrbit(state: OrbitState): void {
+    const orbit = this.orbit;
+    if (!orbit) return;
+    const at = this.clock.observe(state.now, performance.now());
+    const seconds = ((state.now - state.start) >>> 0) / 1000;
+    for (const [id, slot] of orbit.slots) {
+      const a = this.avatars.get(id);
+      if (!a) continue;
+      const spot = orbitPosition(slot, seconds);
+      const p = { x: quantize(spot.x), y: quantize(spot.y), dir: spot.dir, moving: false };
+      a.setStreak(false);
+      if (id === this.selfId) {
+        a.x = p.x;
+        a.y = p.y;
+        a.setMotion(p.dir, false);
+        // The server has us exactly here; the next move starts from it.
+        this.lastSent = { ...p };
+        this.lastSentAt = performance.now();
+      } else {
+        a.teleport(at, p);
+        a.inView = true;
+      }
+    }
+    this.orbit = null;
+    this.flights.clear();
+  }
+
+  /** Orbit mode: put everyone with a seat where its orbit (or its flight to it) has it now. */
+  private placeInOrbit(now: number): void {
+    const orbit = this.orbit!;
+    const serverNow = this.clock.serverNow(now);
+    if (Number.isNaN(serverNow)) return;
+    const seconds = (serverNow - orbit.start) / 1000;
+    for (const [id, slot] of orbit.slots) {
+      const a = this.avatars.get(id);
+      if (!a) continue;
+      const seat = orbitPosition(slot, seconds);
+      let { x, y } = seat;
+      const flight = this.flights.get(id);
+      if (flight) {
+        const k = Math.min(1, Math.max(0, (now - flight.at) / flight.ms));
+        // Slow to leave, fast at the end: pulled in.
+        const e = k * k * k;
+        x = flight.x + (x - flight.x) * e;
+        y = flight.y + (y - flight.y) * e;
+        if (k >= 1) {
+          this.flights.delete(id);
+          a.setStreak(false);
+        }
+      }
+      a.x = x;
+      a.y = y;
+      a.setMotion(seat.dir, true);
+      a.inView = true;
+    }
   }
 
   /** Snapshots now come `hz` times a second. */
@@ -244,6 +363,7 @@ export class Game {
         if (picked) this.callbacks.pick(picked.id, e.global.x, e.global.y);
         return;
       }
+      if (this.orbit) return; // gathered: nobody steers
       this.tapTarget = {
         x: (e.global.x - this.world.x) / this.zoom,
         y: (e.global.y - this.world.y) / this.zoom,
@@ -279,8 +399,9 @@ export class Game {
     this.updateSelf(Math.min(deltaMs, 100) / 1000, now);
     const renderTime = this.clock.renderTime(now);
     for (const avatar of this.avatars.values()) {
-      if (avatar.id !== this.selfId) avatar.interpolate(renderTime);
+      if (avatar.id !== this.selfId && !this.orbit?.slots.has(avatar.id)) avatar.interpolate(renderTime);
     }
+    if (this.orbit) this.placeInOrbit(now);
     this.updateCamera();
     const { width, height } = this.app.screen;
     let hostLevel = 0;
@@ -290,7 +411,9 @@ export class Game {
       if (avatar.role === "host") hostLevel = level;
       else avatar.setVoiceLevel(level);
     }
-    this.scene.setHostVoiceLevel(hostLevel);
+    // Everyone arriving makes the sun flare.
+    const flare = Math.max(0, 1 - Math.abs(now - this.flareAt) / 600);
+    this.scene.setHostVoiceLevel(Math.max(hostLevel, flare));
     this.scene.update(now, this.world.x, this.world.y, this.zoom, width, height);
     if (this.self) this.pollZones.update(now, this.self.x, this.self.y);
     const seen = new Map<Avatar, number>();
@@ -316,6 +439,7 @@ export class Game {
   private updateSelf(dt: number, now: number): void {
     const self = this.self;
     if (!self || self.role === "host") return;
+    if (this.orbit?.slots.has(self.id)) return; // gathered: the orbit moves us
 
     let { x: vx, y: vy } = this.keyboard.vector();
     /** Share of full speed: the thumbstick walks slower near its center. */

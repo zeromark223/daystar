@@ -38,6 +38,22 @@ export interface SnapshotPlayer extends PlayerState {
   age: number;
 }
 
+/** A player's seat in orbit mode (see shared/src/orbit.ts); NO_SLOT for none. */
+export interface SlotChange {
+  id: number;
+  slot: number;
+}
+
+/**
+ * Orbit mode on the wire: when it started and the server's time now (both Unix
+ * ms modulo 2^32, so the client can tell how long ago that was), and every seat.
+ */
+export interface OrbitState {
+  start: number;
+  now: number;
+  slots: SlotChange[];
+}
+
 export interface ChatMessage {
   id: number;
   playerId: number;
@@ -77,11 +93,22 @@ export type ClientMessage =
    * Who are these? Players we see in snapshots but never got the join of: the
    * server dropped frames to us (a backgrounded tab, a slow network).
    */
-  | { t: "who"; ids: number[] };
+  | { t: "who"; ids: number[] }
+  /** Host only: gather everyone around the sun (orbit mode), or let them go. */
+  | { t: "gather" }
+  | { t: "release" };
 
 export type ServerMessage =
   /** `snapshotHz`: how often this client will get snapshots (see SNAPSHOT_GROUPS_AT). */
-  | { t: "welcome"; selfId: number; players: PlayerInfo[]; chat: ChatMessage[]; snapshotHz: number; poll: Poll | null }
+  | {
+      t: "welcome";
+      selfId: number;
+      players: PlayerInfo[];
+      chat: ChatMessage[];
+      snapshotHz: number;
+      poll: Poll | null;
+      orbit: OrbitState | null;
+    }
   | { t: "player_joined"; player: PlayerInfo }
   | { t: "player_left"; id: number }
   | { t: "chat"; message: ChatMessage }
@@ -105,6 +132,8 @@ export type ServerMessage =
       reactions: Reaction[];
       hands: HandChange[];
       pollCounts: number[];
+      /** Orbit mode: seats given since the last snapshot (newcomers, new speakers). */
+      slots: SlotChange[];
     }
   | { t: "role"; id: number; role: Role }
   /** The room switched snapshot groups: snapshots now arrive `snapshotHz` times a second. */
@@ -121,7 +150,12 @@ export type ServerMessage =
   /** The host started a poll, or ended it (`open` false, with the final counts). */
   | { t: "poll"; poll: Poll }
   /** Answer to "who": the players the server has, and the ids it has not (they left). */
-  | { t: "players"; players: PlayerInfo[]; missing: number[] };
+  | { t: "players"; players: PlayerInfo[]; missing: number[] }
+  /**
+   * The host gathered everyone (`active`, with every seat) or let them go: then
+   * `now` is the moment of release, where everyone stays.
+   */
+  | ({ t: "orbit"; active: boolean } & OrbitState);
 
 // ------------------------------------------------------------------ positions
 
@@ -171,6 +205,8 @@ export const PollStruct: Struct = {
   counts: Type.Array8,
   counts_Type: Type.UInt16,
 };
+export const SlotStruct: Struct = { id: Type.UInt16, slot: Type.UInt16 };
+export const OrbitStruct: Struct = { start: Type.UInt32, now: Type.UInt32, slots: Type.Object16, slots_Struct: SlotStruct };
 export const ChatStruct: Struct = {
   id: Type.UInt32,
   playerId: Type.UInt16,
@@ -207,6 +243,11 @@ const Op = {
   who: 22,
   // server -> client
   players: 23,
+  // client -> server
+  gather: 24,
+  release: 25,
+  // server -> client
+  orbit: 26,
 } as const;
 
 /** At most this many ids per "who" (and players per answer). */
@@ -260,6 +301,8 @@ const TailPart: Struct = {
   hands_Struct: HandStruct,
   pollCounts: Type.Array8,
   pollCounts_Type: Type.UInt16,
+  slots: Type.Object16,
+  slots_Struct: SlotStruct,
 };
 
 /** Everything after the players in a snapshot; the same for every cell. */
@@ -271,6 +314,7 @@ export interface SnapshotTail {
   reactions: Reaction[];
   hands: HandChange[];
   pollCounts: number[];
+  slots: SlotChange[];
 }
 
 /** What ends a snapshot, the same for every cell: the tick's time, voice, joins and leaves, reactions, hands, poll counts. */
@@ -312,6 +356,8 @@ const Schemas: Record<number, Struct> = {
     snapshotHz: Type.UInt8,
     poll: Type.Object8,
     poll_Struct: PollStruct,
+    orbit: Type.Object8,
+    orbit_Struct: OrbitStruct,
   },
   [Op.player_joined]: PlayerInfoStruct,
   [Op.player_left]: { id: Type.UInt16 },
@@ -326,6 +372,9 @@ const Schemas: Record<number, Struct> = {
   [Op.poll]: { poll: Type.Object8, poll_Struct: PollStruct },
   [Op.who]: { ids: Type.Array8, ids_Type: Type.UInt16 },
   [Op.players]: { players: Type.Object8, players_Struct: PlayerInfoStruct, missing: Type.Array8, missing_Type: Type.UInt16 },
+  [Op.gather]: {},
+  [Op.release]: {},
+  [Op.orbit]: { active: Type.UInt8, ...OrbitStruct },
 };
 
 // ------------------------------------------------------------------ wire <-> message
@@ -400,6 +449,9 @@ export function encodeClientMessage(msg: ClientMessage): Uint8Array<ArrayBuffer>
       return encode(Schemas[Op.poll_end], {}, Op.poll_end);
     case "who":
       return encode(Schemas[Op.who], msg, Op.who);
+    case "gather":
+    case "release":
+      return encode(Schemas[Op[msg.t]], {}, Op[msg.t]);
   }
 }
 
@@ -444,6 +496,10 @@ export function decodeClientMessage(bytes: Uint8Array): ClientMessage | null {
         return { t: "poll_end" };
       case Op.who:
         return { t: "who", ...decode<{ ids: number[] }>(Schemas[op], bytes, 1) };
+      case Op.gather:
+      case Op.release:
+        decode(Schemas[op], bytes, 1);
+        return { t: op === Op.gather ? "gather" : "release" };
       default:
         return null;
     }
@@ -463,6 +519,7 @@ export function encodeServerMessage(msg: ServerMessage): Uint8Array<ArrayBuffer>
           chat: msg.chat,
           snapshotHz: msg.snapshotHz,
           poll: msg.poll ? [pollToWire(msg.poll)] : [],
+          orbit: msg.orbit ? [msg.orbit] : [],
         },
         Op.welcome,
       );
@@ -494,6 +551,8 @@ export function encodeServerMessage(msg: ServerMessage): Uint8Array<ArrayBuffer>
       return encode(Schemas[Op.poll], { poll: [pollToWire(msg.poll)] }, Op.poll);
     case "players":
       return encode(Schemas[Op.players], { players: msg.players.map(infoToWire), missing: msg.missing }, Op.players);
+    case "orbit":
+      return encode(Schemas[Op.orbit], { ...msg, active: msg.active ? 1 : 0 }, Op.orbit);
   }
 }
 
@@ -503,7 +562,14 @@ export function decodeServerMessage(bytes: Uint8Array): ServerMessage | null {
     const schema = Schemas[op];
     switch (op) {
       case Op.welcome: {
-        const m = decode<{ selfId: number; players: WireInfo[]; chat: ChatMessage[]; snapshotHz: number; poll: WirePoll[] }>(
+        const m = decode<{
+          selfId: number;
+          players: WireInfo[];
+          chat: ChatMessage[];
+          snapshotHz: number;
+          poll: WirePoll[];
+          orbit: OrbitState[];
+        }>(
           schema,
           bytes,
           1,
@@ -515,6 +581,7 @@ export function decodeServerMessage(bytes: Uint8Array): ServerMessage | null {
           chat: m.chat,
           snapshotHz: m.snapshotHz,
           poll: m.poll.length ? pollFromWire(m.poll[0]) : null,
+          orbit: m.orbit[0] ?? null,
         };
       }
       case Op.player_joined:
@@ -566,6 +633,10 @@ export function decodeServerMessage(bytes: Uint8Array): ServerMessage | null {
       case Op.players: {
         const m = decode<{ players: WireInfo[]; missing: number[] }>(schema, bytes, 1);
         return { t: "players", players: m.players.map(infoFromWire), missing: m.missing };
+      }
+      case Op.orbit: {
+        const m = decode<OrbitState & { active: number }>(schema, bytes, 1);
+        return { t: "orbit", start: m.start, now: m.now, slots: m.slots, active: m.active === 1 };
       }
       default:
         return null;
