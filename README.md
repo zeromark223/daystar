@@ -136,7 +136,9 @@ tools/          load test
     the true path between frames, so they stay curved at any frame rate). Heavier:
     it draws every player's trail.
 
-  The camera pulls back over the sun while it plays. ⚙ Settings or
+  While in orbit everyone sees it as the host does: the camera looks at the sun
+  with every ring in view (wheel or pinch still zoom), instead of following the
+  player round the sun. ⚙ Settings or
   `?gather=corona|flight` picks the effect, and every gather logs its frame rate
   (`[gather] corona, 301 players: 60 fps avg, p95 17 ms`, also in
   `window.daystarGatherStats`). Names are hidden in orbit unless the viewer turns

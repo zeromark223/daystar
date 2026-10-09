@@ -16,6 +16,8 @@ const BUBBLE_MAX_WIDTH = 220;
 /** Trail: positions kept while moving, and how often one is recorded. */
 const TRAIL_POINTS = 14;
 const TRAIL_EVERY_MS = 45;
+/** A trail point this much later than the last one starts a new trail. */
+const TRAIL_GAP_MS = 250;
 /** A streak (gather) keeps this many points, one per GATHER_TRAIL_STEP_MS of flight (see Game). */
 const STREAK_POINTS = 40;
 /** Bodies never shrink below this share of their size when the camera zooms out. */
@@ -229,6 +231,10 @@ export class Avatar {
     return this.trailPoints.length > 1 || this.moving || this.streak;
   }
 
+  clearTrail(): void {
+    this.trailPoints.length = 0;
+  }
+
   /** Show or hide the name (and role) above the player. */
   setNameVisible(shown: boolean): void {
     if (shown === this.nameShown) return;
@@ -416,6 +422,9 @@ export class Avatar {
     if (this.streak) {
       // Fed by addTrailPoint.
     } else if (this.moving && now - this.lastTrailAt >= TRAIL_EVERY_MS) {
+      // After a gap (a paused tab, a jump into a seat) start afresh instead of
+      // joining the old point to this one with a long straight line.
+      if (now - this.lastTrailAt > TRAIL_GAP_MS) pts.length = 0;
       pts.push({ x: this.x, y: this.y });
       while (pts.length > TRAIL_POINTS) pts.shift();
       this.lastTrailAt = now;

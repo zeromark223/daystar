@@ -124,9 +124,15 @@ export class Game {
   >();
   /** When the sun flares as everyone bursts out to their seats (local time). */
   private flareAt = 0;
-  /** 0: the camera follows us; 1: it shows the whole gather from above the sun. */
+  /**
+   * 0: the camera follows us; 1: it looks at the sun with every ring in view, as
+   * the host sees it. Everyone gets that view while in orbit: following ourselves
+   * round the sun spun the view and could leave the host off a phone's screen.
+   */
   private overview = 0;
   private overviewTarget = 0;
+  /** Zoom (wheel, pinch) in orbit, relative to fitting every ring on screen. */
+  private orbitZoom = 1;
   private lastFrame = 0;
   /** Names over players in orbit: hidden unless the viewer turned them on in Settings. */
   private orbitNames = false;
@@ -274,6 +280,7 @@ export class Game {
     this.coronaAt = -1;
     this.burstTrails.begin();
     this.burstTrails.end();
+    this.overview = this.overviewTarget = 0;
   }
 
   get orbiting(): boolean {
@@ -294,10 +301,16 @@ export class Game {
     this.flights.clear();
     this.corona.stop();
     this.coronaAt = -1;
-    if (!animate) return;
+    this.overviewTarget = 1;
+    this.orbitZoom = 1;
+    if (!animate) {
+      // Seated straight away (we joined mid-orbit): no trail from where they were.
+      this.overview = 1;
+      for (const id of this.orbit.slots.keys()) this.avatars.get(id)?.clearTrail();
+      return;
+    }
     const now = performance.now();
     this.gatherFrames = [];
-    this.overviewTarget = 1;
     if (this.gatherStyle === "corona") {
       // Everyone is in their seat already, hidden; the corona plays and they appear.
       this.coronaAt = now;
@@ -474,10 +487,7 @@ export class Game {
     const coronaDone =
       this.coronaAt < 0 || sinceCorona >= Math.max(CORONA_MS_TOTAL, CORONA_BURST_AT + CORONA_OUT_STAGGER_MS + CORONA_OUT_MS);
     if (coronaDone) this.coronaAt = -1;
-    if (this.overviewTarget === 1 && this.flights.size === 0 && coronaDone) {
-      this.overviewTarget = 0;
-      this.endGatherStats();
-    }
+    if (this.gatherFrames && this.flights.size === 0 && coronaDone) this.endGatherStats();
   }
 
   /**
@@ -654,7 +664,8 @@ export class Game {
 
   /** Mouse wheel and +/- keys zoom around the player. */
   private zoomBy(factor: number): void {
-    this.zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, this.zoom * factor));
+    if (this.orbit) this.orbitZoom = Math.min(8, Math.max(0.5, this.orbitZoom * factor));
+    else this.zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, this.zoom * factor));
   }
 
   private setupZoom(): void {
@@ -790,7 +801,7 @@ export class Game {
     const step = dt * CAMERA_EASE_PER_MS;
     this.overview += Math.max(-step, Math.min(step, this.overviewTarget - this.overview));
     const k = this.overview * this.overview * (3 - 2 * this.overview);
-    const wide = Math.min(this.zoom, Math.min(width, height) / (2 * this.orbitExtent()));
+    const wide = (Math.min(width, height) / (2 * this.orbitExtent())) * this.orbitZoom;
     const zoom = this.zoom + (wide - this.zoom) * k;
     this.world.scale.set(zoom);
     if (!self) return;
