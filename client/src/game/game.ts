@@ -17,7 +17,7 @@ import { KeyboardInput } from "./input.ts";
 import { Minimap } from "./minimap.ts";
 import { PollZones } from "./poll-zones.ts";
 import { PlayoutClock, Track } from "./timeline.ts";
-import { CORONA_MS_TOTAL, CORONA_REVEAL_FROM, CORONA_REVEAL_MS, CoronaEffect } from "./corona.ts";
+import { CORONA_BURST_AT, CORONA_MS_TOTAL, CORONA_OUT_MS, CORONA_OUT_STAGGER_MS, CoronaEffect } from "./corona.ts";
 import type { Poll } from "../../../shared/src/poll.ts";
 import { FIRST_RING, orbitPosition, RING_GAP, SEAT_SPACING, STAGE_SLOTS } from "../../../shared/src/orbit.ts";
 import { SUN_RADIUS, WORLD_CENTER } from "../../../shared/src/constants.ts";
@@ -278,7 +278,8 @@ export class Game {
       // Everyone is in their seat already, hidden; the corona plays and they appear.
       this.coronaAt = now;
       this.corona.play(now, this.orbitExtent());
-      this.flareAt = now + 150;
+      // A flash at the bang, and the big one when everyone bursts out.
+      this.flareAt = now + CORONA_BURST_AT;
       return;
     }
     for (const [id] of this.orbit.slots) {
@@ -385,21 +386,19 @@ export class Game {
     const serverNow = this.clock.serverNow(now);
     if (Number.isNaN(serverNow)) return;
     const seconds = (serverNow - orbit.start) / 1000;
-    // Corona: hidden until the corona fades, then the inner rings appear first.
+    // Corona: hidden until the burst, then shooting out from beside the sun.
     const sinceCorona = this.coronaAt >= 0 ? now - this.coronaAt : Infinity;
     const extent = this.coronaAt >= 0 ? this.orbitExtent() : 1;
     for (const [id, slot] of orbit.slots) {
       const a = this.avatars.get(id);
       if (!a) continue;
       const seat = orbitPosition(slot, seconds);
-      if (sinceCorona < CORONA_REVEAL_FROM + CORONA_REVEAL_MS * 2) {
-        const r = Math.hypot(seat.x - WORLD_CENTER.x, seat.y - WORLD_CENTER.y);
-        const delay = (r / extent) * CORONA_REVEAL_MS;
-        a.setReveal(Math.min(1, Math.max(0, (sinceCorona - CORONA_REVEAL_FROM - delay) / CORONA_REVEAL_MS)));
+      let { x, y } = seat;
+      if (sinceCorona < CORONA_BURST_AT + CORONA_OUT_STAGGER_MS + CORONA_OUT_MS) {
+        ({ x, y } = this.coronaPosition(id, seat, sinceCorona, extent, a));
       } else {
         a.setReveal(1);
       }
-      let { x, y } = seat;
       const flight = this.flights.get(id);
       if (flight) {
         const t = now - flight.at;
@@ -426,7 +425,8 @@ export class Game {
       a.inView = true;
       a.setNameVisible(this.orbitNames);
     }
-    const coronaDone = this.coronaAt < 0 || sinceCorona >= Math.max(CORONA_MS_TOTAL, CORONA_REVEAL_FROM + CORONA_REVEAL_MS * 2);
+    const coronaDone =
+      this.coronaAt < 0 || sinceCorona >= Math.max(CORONA_MS_TOTAL, CORONA_BURST_AT + CORONA_OUT_STAGGER_MS + CORONA_OUT_MS);
     if (coronaDone) this.coronaAt = -1;
     if (this.overviewTarget === 1 && this.flights.size === 0 && coronaDone) {
       this.overviewTarget = 0;
@@ -481,6 +481,33 @@ export class Game {
     }
     if (wanting.length > TRAIL_BUDGET) wanting.sort((p, q) => p.d - q.d);
     for (let i = 0; i < Math.min(TRAIL_BUDGET, wanting.length); i++) wanting[i].a.trailAllowed = true;
+  }
+
+  /**
+   * Corona: where a player is `t` ms after the bang. Hidden beside the sun until
+   * the burst, then out along a spiral, turning the way the streams turn, and
+   * slowing into its seat (`seat`, which keeps moving), like the fly-in's end.
+   */
+  private coronaPosition(
+    id: number,
+    seat: { x: number; y: number },
+    t: number,
+    extent: number,
+    a: Avatar,
+  ): { x: number; y: number } {
+    const seatR = Math.hypot(seat.x - WORLD_CENTER.x, seat.y - WORLD_CENTER.y);
+    const leave = CORONA_BURST_AT + (seatR / extent) * CORONA_OUT_STAGGER_MS;
+    const k = Math.min(1, Math.max(0, (t - leave) / CORONA_OUT_MS));
+    // Visible as soon as it leaves the sun.
+    a.setReveal(Math.min(1, k * 6));
+    const e = easeOut(k);
+    // A steady per-player start just outside the sun, and how far round it travels.
+    const h = ((id * 2654435761) >>> 0) / 0x1_0000_0000;
+    const startR = SWIRL_RADIUS + h * SWIRL_THICKNESS;
+    const seatAngle = Math.atan2(seat.y - WORLD_CENTER.y, seat.x - WORLD_CENTER.x);
+    const angle = seatAngle - (1 - e) * (1 + h * 0.8);
+    const r = startR + (seatR - startR) * e;
+    return { x: WORLD_CENTER.x + Math.cos(angle) * r, y: WORLD_CENTER.y + Math.sin(angle) * r };
   }
 
   /** Radius that holds every seat in use, for the camera's overview. */

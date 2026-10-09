@@ -26,9 +26,14 @@ const SWIRL_MS = 1_750;
 const CORONA_FROM = 1_300;
 const CORONA_MS = 1_900;
 export const CORONA_MS_TOTAL = CORONA_FROM + CORONA_MS;
-/** Players start appearing here, the inner rings first. */
-export const CORONA_REVEAL_FROM = 2_200;
-export const CORONA_REVEAL_MS = 900;
+/**
+ * With the burst (the sun flares as the streams start stretching out) players
+ * shoot out from beside the sun to their seats, riding the streams; the inner
+ * rings leave a little earlier. See Game.coronaPosition.
+ */
+export const CORONA_BURST_AT = 1_550;
+export const CORONA_OUT_MS = 1_300;
+export const CORONA_OUT_STAGGER_MS = 250;
 
 const COLORS = [0xfff1c1, 0xffd166, 0xff8c5a, 0xffe08a, 0xffffff, 0xb38cff, 0x6cb8ff, 0xff7eb6];
 const TURNS_PER_SEC = 0.9;
@@ -153,11 +158,13 @@ export class CoronaEffect {
     const f = clamp01(t / FLASH_MS);
     this.flash.width = this.flash.height = SUN_RADIUS * (2 + 10 * easeOut(f));
     this.flash.alpha = 1 - f;
-    const sk = clamp01(t / SHOCK_MS);
     this.shock.clear();
-    if (sk < 1) {
+    // One shock wave at the bang, a second as everyone bursts out.
+    for (const [from, color] of [[0, 0xfff1c1], [CORONA_BURST_AT, 0xffd166]] as const) {
+      const sk = clamp01((t - from) / SHOCK_MS);
+      if (t < from || sk >= 1) continue;
       this.shock.circle(0, 0, SUN_RADIUS + (this.extent - SUN_RADIUS) * easeOut(sk)).stroke({
-        color: 0xfff1c1,
+        color,
         width: 6 + 30 * (1 - sk),
         alpha: 0.7 * (1 - sk),
       });
