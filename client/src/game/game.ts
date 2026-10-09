@@ -83,7 +83,7 @@ const CAMERA_EASE_PER_MS = 1 / 600;
 
 /** Corona burst: each player's white-hot trail covers this much of its path, this wide on screen. */
 const BURST_TRAIL_MS = 220;
-const BURST_TRAIL_PX = 11;
+const BURST_TRAIL_PX = 33;
 /** A gathering player's trail gets a point every this many ms of its path, whatever the frame rate. */
 const GATHER_TRAIL_STEP_MS = 12;
 
