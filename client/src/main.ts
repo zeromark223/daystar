@@ -3,7 +3,7 @@ import { ROOM_ID_PATTERN } from "../../shared/src/constants.ts";
 import type { Poll } from "../../shared/src/poll.ts";
 import type { PlayerInfo, ServerMessage } from "../../shared/src/protocol.ts";
 import { canSpeak, ROLE_LABELS, type Role } from "../../shared/src/roles.ts";
-import { Game } from "./game/game.ts";
+import { Game, type GatherStyle } from "./game/game.ts";
 import { MissingPlayers } from "./missing-players.ts";
 import { Connection, createRoom } from "./net.ts";
 import { AudienceBar } from "./ui/audience.ts";
@@ -115,7 +115,12 @@ async function main(): Promise<void> {
   const tutorial = new Tutorial();
   /** Settings that apply to the game, which is created after the lobby. */
   let orbitNames = false;
+  let gatherStyle: GatherStyle = "flight";
   new SettingsPanel({
+    gatherStyle: (style) => {
+      gatherStyle = style;
+      game?.setGatherStyle(style);
+    },
     replayTutorial: () => tutorial.replay(selfRole),
     orbitNames: (shown) => {
       orbitNames = shown;
@@ -408,6 +413,7 @@ async function main(): Promise<void> {
       pick: (id, x, y) => people.openMenu(id, x, y),
     });
     game.setOrbitNames(orbitNames);
+    game.setGatherStyle(gatherStyle);
     chat = new ChatPanel((text) => conn?.send({ t: "chat", text }));
     // Which answer planet we are on, for the poll card.
     setInterval(() => polls.setMine(game!.pollAnswer), 200);

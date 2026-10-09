@@ -71,6 +71,14 @@ export class Avatar {
   private handIcon: Sprite | null = null;
   /** Being pulled to the sun (orbit gather): a longer, brighter trail. */
   private streak = false;
+  /**
+   * Trails are the costliest thing to draw (rebuilt every frame): the game lets
+   * only the nearest few dozen have one (see TRAIL_BUDGET in game.ts).
+   */
+  trailAllowed = true;
+  private trailDrawn = false;
+  /** 0..1: hidden while the corona gather plays, fading in after (not drawn at 0). */
+  private reveal = 1;
   /** Orbit mode hides names (unless the viewer turned them on); reactions and bubbles stay. */
   private nameShown = true;
   private readonly label: Text;
@@ -212,6 +220,15 @@ export class Avatar {
     while (this.trailPoints.length > STREAK_POINTS) this.trailPoints.shift();
   }
 
+  setReveal(k: number): void {
+    this.reveal = k;
+  }
+
+  /** Whether a trail would be drawn this frame (moving, or one still fading). */
+  get wantsTrail(): boolean {
+    return this.trailPoints.length > 1 || this.moving || this.streak;
+  }
+
   /** Show or hide the name (and role) above the player. */
   setNameVisible(shown: boolean): void {
     if (shown === this.nameShown) return;
@@ -315,7 +332,7 @@ export class Avatar {
       this.renderOnSun(now, worldX, worldY, zoom);
       return;
     }
-    const brightness = brightnessAt(this.x, this.y) * visibility;
+    const brightness = brightnessAt(this.x, this.y) * visibility * this.reveal;
     this.body.visible = brightness > 0.01;
     this.trail.visible = this.body.visible;
     const scale = Math.max(1, MIN_SCREEN_SCALE / zoom);
@@ -340,7 +357,7 @@ export class Avatar {
     const radius = SIZES[this.kind].core * 2.2 * scale * zoom;
     this.tag.position.set(Math.round(worldX + this.x * zoom), Math.round(worldY + this.y * zoom - radius - 6));
     // Faded players disappear from view, name and bubble included; you still see your own.
-    this.tag.alpha = this.isSelf ? Math.max(brightness, 0.6) : brightness;
+    this.tag.alpha = this.isSelf ? Math.max(brightness, 0.6 * this.reveal) : brightness;
     this.tag.visible = this.tag.alpha > 0.02;
     this.renderBubble(now);
     this.renderTagExtras(now);
@@ -406,8 +423,13 @@ export class Avatar {
       pts.shift(); // let the trail shrink away once stopped
       this.lastTrailAt = now;
     }
+    if (!this.trailAllowed || pts.length < 2 || brightness <= 0) {
+      if (this.trailDrawn) this.trail.clear();
+      this.trailDrawn = false;
+      return;
+    }
     this.trail.clear();
-    if (pts.length < 2 || brightness <= 0) return;
+    this.trailDrawn = true;
     // Capped so big bodies do not drag a fat band behind them.
     const width = Math.min(SIZES[this.kind].core, 11) * (this.streak ? 1.6 : 1.1) * scale;
     const alpha = this.streak ? 0.85 : 0.5;

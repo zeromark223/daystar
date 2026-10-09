@@ -1097,3 +1097,14 @@ button.secondary {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
 }
+
+.settings select {
+  flex: none;
+  padding: 6px 8px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: rgba(4, 6, 18, 0.7);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.85rem;
+}

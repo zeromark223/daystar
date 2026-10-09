@@ -17,6 +17,7 @@ import { KeyboardInput } from "./input.ts";
 import { Minimap } from "./minimap.ts";
 import { PollZones } from "./poll-zones.ts";
 import { PlayoutClock, Track } from "./timeline.ts";
+import { CORONA_MS_TOTAL, CORONA_REVEAL_FROM, CORONA_REVEAL_MS, CoronaEffect } from "./corona.ts";
 import type { Poll } from "../../../shared/src/poll.ts";
 import { FIRST_RING, orbitPosition, RING_GAP, SEAT_SPACING, STAGE_SLOTS } from "../../../shared/src/orbit.ts";
 import { SUN_RADIUS, WORLD_CENTER } from "../../../shared/src/constants.ts";
@@ -46,6 +47,26 @@ const GATHER_JITTER_MS = 200;
 const SWIRL_RADIUS = SUN_RADIUS + 60;
 const SWIRL_THICKNESS = 120;
 const SWIRL_SPEED = (2 * Math.PI * 1.1) / 1000;
+/** How the gather looks for this viewer: A/B test (see ui/settings.ts). */
+export type GatherStyle = "flight" | "corona";
+
+/** Frame times while a gather plays, for comparing the two styles. */
+interface GatherStats {
+  style: GatherStyle;
+  players: number;
+  frames: number;
+  avgFps: number;
+  p95FrameMs: number;
+  worstFrameMs: number;
+}
+
+/**
+ * At most this many players draw a trail each frame, the ones nearest the middle
+ * of the screen. Trails are rebuilt every frame and were what made big gathers
+ * slow (301 players in orbit: 28 fps with every trail, 61 without).
+ */
+const TRAIL_BUDGET = 60;
+
 /** A player changing seat mid-orbit (made speaker, ...) glides there in this long. */
 const RESEAT_MS = 1_200;
 /** While the gather plays the camera eases to the sun (this fast, per ms) and zooms out to see it all. */
@@ -97,6 +118,12 @@ export class Game {
   private lastFrame = 0;
   /** Names over players in orbit: hidden unless the viewer turned them on in Settings. */
   private orbitNames = false;
+  private gatherStyle: GatherStyle = "flight";
+  private readonly corona = new CoronaEffect();
+  /** Corona gather: when it started (local time); players fade in by ring after it. */
+  private coronaAt = -1;
+  /** Frame times of the gather playing now, for GatherStats. */
+  private gatherFrames: number[] | null = null;
   /** Screen-space layer for names and chat bubbles. */
   private readonly overlay = new Container();
   private readonly avatars = new Map<number, Avatar>();
@@ -127,7 +154,7 @@ export class Game {
     stage.appendChild(app.canvas);
 
     const game = new Game(app, callbacks);
-    game.world.addChild(game.scene.backdrop, game.pollZones.view, game.trails, game.bodies);
+    game.world.addChild(game.scene.backdrop, game.pollZones.view, game.trails, game.bodies, game.corona.view);
     app.stage.addChild(game.scene.sky, game.world, game.overlay, game.minimap.view);
     game.setupPointer();
     game.setupZoom();
@@ -241,8 +268,19 @@ export class Game {
     this.orbit = { start, slots: new Map(state.slots.map((s) => [s.id, s.slot])) };
     this.tapTarget = null;
     this.flights.clear();
+    this.corona.stop();
+    this.coronaAt = -1;
     if (!animate) return;
     const now = performance.now();
+    this.gatherFrames = [];
+    this.overviewTarget = 1;
+    if (this.gatherStyle === "corona") {
+      // Everyone is in their seat already, hidden; the corona plays and they appear.
+      this.coronaAt = now;
+      this.corona.play(now, this.orbitExtent());
+      this.flareAt = now + 150;
+      return;
+    }
     for (const [id] of this.orbit.slots) {
       const a = this.avatars.get(id);
       if (!a) continue;
@@ -261,7 +299,33 @@ export class Game {
       a.setStreak(true);
     }
     this.flareAt = now + GATHER_IN_MS + GATHER_SWIRL_MS;
-    this.overviewTarget = 1;
+  }
+
+  /** A/B test: how this viewer's gathers look. */
+  setGatherStyle(style: GatherStyle): void {
+    this.gatherStyle = style;
+  }
+
+  /** The gather finished: report how smoothly it played. */
+  private endGatherStats(): void {
+    const frames = this.gatherFrames;
+    this.gatherFrames = null;
+    if (!frames || frames.length < 5) return;
+    const sorted = [...frames].sort((a, b) => a - b);
+    const total = frames.reduce((a, b) => a + b, 0);
+    const stats: GatherStats = {
+      style: this.gatherStyle,
+      players: this.avatars.size,
+      frames: frames.length,
+      avgFps: Math.round((1000 * frames.length) / total),
+      p95FrameMs: Math.round(sorted[Math.floor(sorted.length * 0.95)]),
+      worstFrameMs: Math.round(sorted.at(-1)!),
+    };
+    const list = ((window as unknown as { daystarGatherStats?: GatherStats[] }).daystarGatherStats ??= []);
+    list.push(stats);
+    console.info(
+      `[gather] ${stats.style}, ${stats.players} players: ${stats.avgFps} fps avg, p95 ${stats.p95FrameMs} ms, worst ${stats.worstFrameMs} ms`,
+    );
   }
 
   /** Settings: names over players in orbit. */
@@ -307,7 +371,12 @@ export class Game {
     this.orbit = null;
     this.flights.clear();
     this.overviewTarget = 0;
-    for (const a of this.avatars.values()) a.setNameVisible(true);
+    this.corona.stop();
+    this.coronaAt = -1;
+    for (const a of this.avatars.values()) {
+      a.setNameVisible(true);
+      a.setReveal(1);
+    }
   }
 
   /** Orbit mode: put everyone with a seat where its orbit (or its flight to it) has it now. */
@@ -316,10 +385,20 @@ export class Game {
     const serverNow = this.clock.serverNow(now);
     if (Number.isNaN(serverNow)) return;
     const seconds = (serverNow - orbit.start) / 1000;
+    // Corona: hidden until the corona fades, then the inner rings appear first.
+    const sinceCorona = this.coronaAt >= 0 ? now - this.coronaAt : Infinity;
+    const extent = this.coronaAt >= 0 ? this.orbitExtent() : 1;
     for (const [id, slot] of orbit.slots) {
       const a = this.avatars.get(id);
       if (!a) continue;
       const seat = orbitPosition(slot, seconds);
+      if (sinceCorona < CORONA_REVEAL_FROM + CORONA_REVEAL_MS * 2) {
+        const r = Math.hypot(seat.x - WORLD_CENTER.x, seat.y - WORLD_CENTER.y);
+        const delay = (r / extent) * CORONA_REVEAL_MS;
+        a.setReveal(Math.min(1, Math.max(0, (sinceCorona - CORONA_REVEAL_FROM - delay) / CORONA_REVEAL_MS)));
+      } else {
+        a.setReveal(1);
+      }
       let { x, y } = seat;
       const flight = this.flights.get(id);
       if (flight) {
@@ -347,7 +426,12 @@ export class Game {
       a.inView = true;
       a.setNameVisible(this.orbitNames);
     }
-    if (this.overviewTarget === 1 && this.flights.size === 0) this.overviewTarget = 0;
+    const coronaDone = this.coronaAt < 0 || sinceCorona >= Math.max(CORONA_MS_TOTAL, CORONA_REVEAL_FROM + CORONA_REVEAL_MS * 2);
+    if (coronaDone) this.coronaAt = -1;
+    if (this.overviewTarget === 1 && this.flights.size === 0 && coronaDone) {
+      this.overviewTarget = 0;
+      this.endGatherStats();
+    }
   }
 
   /**
@@ -383,6 +467,20 @@ export class Game {
       a = whirl + (seatAngle - whirl) * e;
     }
     return { x: WORLD_CENTER.x + Math.cos(a) * r, y: WORLD_CENTER.y + Math.sin(a) * r };
+  }
+
+  /** Give the trail budget to the moving players nearest the middle of the screen (always us). */
+  private shareTrails(width: number, height: number): void {
+    const zoom = this.world.scale.x;
+    const cx = (width / 2 - this.world.x) / zoom;
+    const cy = (height / 2 - this.world.y) / zoom;
+    const wanting: { a: Avatar; d: number }[] = [];
+    for (const a of this.avatars.values()) {
+      a.trailAllowed = false;
+      if (a.wantsTrail) wanting.push({ a, d: a.id === this.selfId ? -1 : (a.x - cx) ** 2 + (a.y - cy) ** 2 });
+    }
+    if (wanting.length > TRAIL_BUDGET) wanting.sort((p, q) => p.d - q.d);
+    for (let i = 0; i < Math.min(TRAIL_BUDGET, wanting.length); i++) wanting[i].a.trailAllowed = true;
   }
 
   /** Radius that holds every seat in use, for the camera's overview. */
@@ -505,12 +603,14 @@ export class Game {
 
   private update(deltaMs: number): void {
     const now = performance.now();
+    this.gatherFrames?.push(deltaMs);
     this.updateSelf(Math.min(deltaMs, 100) / 1000, now);
     const renderTime = this.clock.renderTime(now);
     for (const avatar of this.avatars.values()) {
       if (avatar.id !== this.selfId && !this.orbit?.slots.has(avatar.id)) avatar.interpolate(renderTime);
     }
     if (this.orbit) this.placeInOrbit(now);
+    this.corona.update(now);
     this.updateCamera();
     const { width, height } = this.app.screen;
     let hostLevel = 0;
@@ -525,6 +625,7 @@ export class Game {
     this.scene.setHostVoiceLevel(Math.max(hostLevel, flare));
     this.scene.update(now, this.world.x, this.world.y, this.world.scale.x, width, height);
     if (this.self) this.pollZones.update(now, this.self.x, this.self.y);
+    this.shareTrails(width, height);
     const seen = new Map<Avatar, number>();
     for (const avatar of this.avatars.values()) {
       const visibility = this.visibility(avatar);

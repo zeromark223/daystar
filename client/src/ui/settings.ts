@@ -1,9 +1,33 @@
+import type { GatherStyle } from "../game/game.ts";
+
 export interface SettingsActions {
   replayTutorial(): void;
   orbitNames(shown: boolean): void;
+  gatherStyle(style: GatherStyle): void;
 }
 
 const ORBIT_NAMES_KEY = "daystar:orbit-names";
+const GATHER_KEY = "daystar:gather-effect";
+const STYLES: GatherStyle[] = ["flight", "corona"];
+const isStyle = (v: unknown): v is GatherStyle => STYLES.includes(v as GatherStyle);
+
+/**
+ * A/B test of the gather effect: ?gather=flight|corona wins, then what this
+ * browser chose or was given before, else a coin flip that is remembered.
+ */
+function initialGatherStyle(): GatherStyle {
+  const forced = new URLSearchParams(location.search).get("gather");
+  if (isStyle(forced)) return forced;
+  try {
+    const saved = localStorage.getItem(GATHER_KEY);
+    if (isStyle(saved)) return saved;
+    const picked = STYLES[Math.floor(Math.random() * STYLES.length)];
+    localStorage.setItem(GATHER_KEY, picked);
+    return picked;
+  } catch {
+    return STYLES[Math.floor(Math.random() * STYLES.length)];
+  }
+}
 
 /** The ⚙ button and its panel: replay the tutorial, names in orbit (remembered in this browser). */
 export class SettingsPanel {
@@ -27,6 +51,17 @@ export class SettingsPanel {
       actions.orbitNames(names.checked);
       try {
         localStorage.setItem(ORBIT_NAMES_KEY, names.checked ? "1" : "0");
+      } catch {
+        // Not remembered; it still applies now.
+      }
+    });
+    const effect = document.getElementById("gather-effect") as HTMLSelectElement;
+    effect.value = initialGatherStyle();
+    actions.gatherStyle(effect.value as GatherStyle);
+    effect.addEventListener("change", () => {
+      actions.gatherStyle(effect.value as GatherStyle);
+      try {
+        localStorage.setItem(GATHER_KEY, effect.value);
       } catch {
         // Not remembered; it still applies now.
       }

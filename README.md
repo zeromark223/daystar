@@ -127,7 +127,18 @@ tools/          load test
   a ring of light while the camera pulls back over the sun, then the sun flares and
   they fly out to their seats (trails are traced along the true path between
   frames, so they stay curved at any frame rate). Names are hidden in orbit unless
-  the viewer turns them on in ⚙ Settings. Nobody steers until the host releases them, and then
+  the viewer turns them on in ⚙ Settings. A lighter variant, "Corona", is being
+  A/B tested against this "Fly in": everyone is seated at once, hidden, while a
+  reverse big bang plays at the sun (a flash and a shock wave, streams whirling
+  round it, then stretching out like a corona and fading), and they appear as it
+  fades, inner rings first. Its cost does not grow with the room (a fixed set of
+  streams). Each browser gets one at random (remembered); `?gather=flight|corona`
+  or ⚙ Settings picks one, and every gather logs its frame rate
+  (`[gather] corona, 301 players: 60 fps avg, p95 17 ms`, also in
+  `window.daystarGatherStats`). Trails, rebuilt every frame, are drawn only for the
+  60 moving players nearest the middle of the screen: 301 players in orbit went
+  from 28 to 60 fps, the fly-in from 14 to 35 fps, the corona from 52 to 60 fps
+  (desktop Chrome). Nobody steers until the host releases them, and then
   everyone stays where its orbit had them (clients compute the same spots, so
   nothing is sent). Polls are off meanwhile; the orbit stays if the host leaves.
 - **Tutorial:** a short guided tour the first time someone joins as a guest, becomes a
