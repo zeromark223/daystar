@@ -1,4 +1,4 @@
-import { Container, Graphics, Sprite } from "pixi.js";
+import { Container, Graphics, Mesh, Point, RopeGeometry, Sprite, Texture } from "pixi.js";
 import { SUN_RADIUS, WORLD_CENTER } from "../../../shared/src/constants.ts";
 import { glowTexture } from "./textures.ts";
 
@@ -8,6 +8,12 @@ import { glowTexture } from "./textures.ts";
  * the sun, then the streams stretch out like a corona and fade. Players are put
  * in their seats at once, hidden, and appear as it fades (Game drives that).
  * It costs the same with 10 players or 5,000: a fixed set of streams.
+ *
+ * Each stream is a rope mesh along a few points with one shared texture that
+ * already holds its look (bright core, faint glow, thinner and dimmer towards
+ * the tip), tinted per stream. Moving a stream only moves its points; drawing
+ * the same streams as Graphics strokes, rebuilt every frame, halved the frame
+ * rate.
  */
 
 const STREAMS = 120;
@@ -30,6 +36,42 @@ const TURNS_PER_SEC = 0.9;
 const clamp01 = (k: number) => Math.min(1, Math.max(0, k));
 const easeOut = (k: number) => 1 - (1 - k) ** 3;
 
+/** Rope thickness over the core's: the rest is glow. */
+const GLOW = 2.6;
+let streamTexture: Texture | null = null;
+
+/**
+ * White on transparent; x runs from the sun (left) to the tip (right), y across.
+ * A narrow bright core inside a wide soft glow, narrowing to 65% and fading to
+ * half towards the tip, with a soft end.
+ */
+function streamLook(): Texture {
+  if (streamTexture) return streamTexture;
+  const w = 256;
+  const h = 64;
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d")!;
+  const img = ctx.createImageData(w, h);
+  for (let x = 0; x < w; x++) {
+    const u = x / (w - 1);
+    const narrow = 1 - 0.35 * u;
+    const fade = (1 - 0.5 * u) * Math.min(1, (1 - u) / 0.12);
+    for (let y = 0; y < h; y++) {
+      const v = (y - (h - 1) / 2) / (h / 2);
+      const core = Math.exp(-4 * (v / ((narrow * 1) / GLOW)) ** 2) * 0.9;
+      const glow = Math.exp(-3 * (v / (narrow * 0.9)) ** 2) * 0.22;
+      const i = (y * w + x) * 4;
+      img.data[i] = img.data[i + 1] = img.data[i + 2] = 255;
+      img.data[i + 3] = Math.round(255 * Math.min(1, (core + glow) * fade));
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  streamTexture = Texture.from(canvas);
+  return streamTexture;
+}
+
 interface Stream {
   angle: number;
   /** How far round the sun the stream wraps (radians) while it whirls. */
@@ -38,11 +80,14 @@ interface Stream {
   color: number;
   /** Direction of turn and a little speed variety. */
   spin: number;
+  points: Point[];
+  geometry: RopeGeometry;
+  mesh: Mesh;
 }
 
 export class CoronaEffect {
   readonly view = new Container();
-  private readonly streams = new Graphics();
+  private readonly streams = new Container();
   private readonly shock = new Graphics();
   private readonly flash = new Sprite({ texture: glowTexture(), anchor: 0.5, tint: 0xfff6dc });
   private readonly halo = new Sprite({ texture: glowTexture(), anchor: 0.5, tint: 0xffb347 });
@@ -55,14 +100,25 @@ export class CoronaEffect {
     this.view.blendMode = "add";
     this.view.visible = false;
     this.view.addChild(this.halo, this.streams, this.shock, this.flash);
+    const look = streamLook();
     for (let i = 0; i < STREAMS; i++) {
+      const points = Array.from({ length: SEGMENTS + 1 }, () => new Point());
+      const geometry = new RopeGeometry({ points, width: 1 });
+      const mesh = new Mesh({ geometry, texture: look });
+      const color = COLORS[i % COLORS.length];
+      mesh.tint = color;
+      mesh.blendMode = "add";
+      this.streams.addChild(mesh);
       this.seeds.push({
         angle: (i / STREAMS) * Math.PI * 2 + Math.random() * 0.1,
         twist: 1.4 + Math.random() * 1.6,
-        // Thinner than one would draw a few: they add up (additive blending).
-        width: 3 + Math.random() * 6,
-        color: COLORS[i % COLORS.length],
+        // The core's width in screen pixels (like the fly-in's trails), whatever the zoom.
+        width: 6 + Math.random() * 8,
+        color,
         spin: 0.8 + Math.random() * 0.5,
+        points,
+        geometry,
+        mesh,
       });
     }
   }
@@ -81,11 +137,11 @@ export class CoronaEffect {
   stop(): void {
     this.start = -1;
     this.view.visible = false;
-    this.streams.clear();
     this.shock.clear();
   }
 
-  update(now: number): void {
+  /** `zoom`: the world's scale on screen, so streams keep their width in pixels. */
+  update(now: number, zoom: number): void {
     if (this.start < 0) return;
     const t = now - this.start;
     if (t >= CORONA_MS_TOTAL) {
@@ -114,31 +170,27 @@ export class CoronaEffect {
     this.halo.alpha = Math.min(1, swirl * 3) * (1 - c * c) * 0.9;
 
     // Streams: arcs whirling round the sun, then stretching out and unwinding.
-    this.streams.clear();
     const fadeIn = clamp01((t - SWIRL_FROM) / 300);
     const alpha = fadeIn * (1 - c * c);
-    if (alpha <= 0.01) return;
+    this.streams.visible = alpha > 0.01;
+    if (!this.streams.visible) return;
     const inner = SUN_RADIUS * 1.05;
+    const px = 1 / Math.max(0.05, zoom);
     const whirlOut = SUN_RADIUS * (1.25 + 1.5 * easeOut(swirl));
     const outer = whirlOut + (this.extent * 0.95 - whirlOut) * easeOut(c);
     for (const s of this.seeds) {
       const rotation = s.angle + s.spin * TURNS_PER_SEC * Math.PI * 2 * (t / 1000);
       const twist = s.twist * (1 - easeOut(c));
-      let px = Math.cos(rotation) * inner;
-      let py = Math.sin(rotation) * inner;
-      for (let j = 1; j <= SEGMENTS; j++) {
+      for (let j = 0; j <= SEGMENTS; j++) {
         const k = j / SEGMENTS;
         const r = inner + (outer - inner) * k;
         const a = rotation + twist * k;
-        const x = Math.cos(a) * r;
-        const y = Math.sin(a) * r;
-        this.streams
-          .moveTo(px, py)
-          .lineTo(x, y)
-          .stroke({ color: s.color, width: s.width * (1 - 0.75 * k), alpha: alpha * (1 - k * 0.85), cap: "round" });
-        px = x;
-        py = y;
+        s.points[j].set(Math.cos(a) * r, Math.sin(a) * r);
       }
+      // RopeGeometry keeps its width private; set it in world units for the wanted pixels.
+      (s.geometry as unknown as { _width: number })._width = s.width * GLOW * px;
+      s.geometry.updateVertices();
+      s.mesh.alpha = alpha;
     }
   }
 }

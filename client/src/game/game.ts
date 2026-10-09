@@ -610,7 +610,7 @@ export class Game {
       if (avatar.id !== this.selfId && !this.orbit?.slots.has(avatar.id)) avatar.interpolate(renderTime);
     }
     if (this.orbit) this.placeInOrbit(now);
-    this.corona.update(now);
+    this.corona.update(now, this.world.scale.x);
     this.updateCamera();
     const { width, height } = this.app.screen;
     let hostLevel = 0;

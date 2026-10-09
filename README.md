@@ -132,7 +132,8 @@ tools/          load test
   reverse big bang plays at the sun (a flash and a shock wave, 120 streams whirling
   round it, then stretching out like a corona and fading), and they appear as it
   fades, inner rings first. Its cost does not grow with the room (a fixed set of
-  streams). Each browser gets one at random (remembered); `?gather=flight|corona`
+  streams, each a rope mesh with one shared texture holding its core and glow, so
+  a frame only moves points). Each browser gets one at random (remembered); `?gather=flight|corona`
   or ⚙ Settings picks one, and every gather logs its frame rate
   (`[gather] corona, 301 players: 60 fps avg, p95 17 ms`, also in
   `window.daystarGatherStats`). Trails, rebuilt every frame, are drawn only for the
