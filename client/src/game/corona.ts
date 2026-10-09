@@ -10,7 +10,7 @@ import { glowTexture } from "./textures.ts";
  * It costs the same with 10 players or 5,000: a fixed set of streams.
  */
 
-const STREAMS = 40;
+const STREAMS = 120;
 const SEGMENTS = 14;
 /** Timeline (ms). */
 const FLASH_MS = 450;
@@ -57,9 +57,10 @@ export class CoronaEffect {
     this.view.addChild(this.halo, this.streams, this.shock, this.flash);
     for (let i = 0; i < STREAMS; i++) {
       this.seeds.push({
-        angle: (i / STREAMS) * Math.PI * 2 + Math.random() * 0.3,
+        angle: (i / STREAMS) * Math.PI * 2 + Math.random() * 0.1,
         twist: 1.4 + Math.random() * 1.6,
-        width: 5 + Math.random() * 9,
+        // Thinner than one would draw a few: they add up (additive blending).
+        width: 3 + Math.random() * 6,
         color: COLORS[i % COLORS.length],
         spin: 0.8 + Math.random() * 0.5,
       });

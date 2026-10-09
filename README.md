@@ -129,7 +129,7 @@ tools/          load test
   frames, so they stay curved at any frame rate). Names are hidden in orbit unless
   the viewer turns them on in ⚙ Settings. A lighter variant, "Corona", is being
   A/B tested against this "Fly in": everyone is seated at once, hidden, while a
-  reverse big bang plays at the sun (a flash and a shock wave, streams whirling
+  reverse big bang plays at the sun (a flash and a shock wave, 120 streams whirling
   round it, then stretching out like a corona and fading), and they appear as it
   fades, inner rings first. Its cost does not grow with the room (a fixed set of
   streams). Each browser gets one at random (remembered); `?gather=flight|corona`
