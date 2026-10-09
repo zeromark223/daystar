@@ -363,6 +363,9 @@ room. `bun tools/loadtest.ts --help` lists all options. (`bun run loadtest …` 
 on Linux and macOS; on Windows call the file directly, since Bun's script shell can
 drop flags there.)
 
+To fill a room you host (e.g. to try Gather with a crowd), give its invite link or
+id: `bun tools/loadtest.ts --target https://meet.example.com --room https://meet.example.com/r/<room> --max 200 --moving 0.2 --chat-every 0`.
+
 `--max` finds the knee faster than steps: bots keep arriving at `--ramp` per second
 up to the maximum, then stay `--hold` seconds, with a row every `--report-every`
 seconds (default 5) and a closing summary of the last row that met every target:

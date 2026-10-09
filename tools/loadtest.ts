@@ -655,6 +655,8 @@ const USAGE = `Usage: bun tools/loadtest.ts [options]   (or: bun run loadtest [o
   --port <n>           port for the spawned server or agent      (default 3300)
   --room-prefix <s>    rooms are <prefix>-all or <prefix>-0, -1, ... (default load;
                        not used with --speakers)
+  --room <id|link>     put every bot in this existing room, e.g. the one you host
+                       (its id, or its invite link); not with --room-size or --speakers
   --keep-going         continue ramping after a failed step (--max always goes on)
   --last               reuse the options of the previous run; options given with it
                        override them, e.g. --last --hold 60
@@ -684,6 +686,8 @@ interface Options {
   cluster: number;
   capacity: number;
   roomPrefix: string;
+  /** --room: every bot joins this room. */
+  room: string | null;
   keepGoing: boolean;
   healthToken: string;
   /** Remote server, or null to spawn a local one. */
@@ -750,6 +754,7 @@ function parseOptions(): Options {
         cluster: { type: "string", default: "0" },
         capacity: { type: "string", default: "2000" },
         "room-prefix": { type: "string", default: "load" },
+        room: { type: "string" },
         "keep-going": { type: "boolean", default: false },
         help: { type: "boolean", short: "h", default: false },
       },
@@ -787,6 +792,13 @@ function parseOptions(): Options {
   if (steps.some((n, i) => i > 0 && n <= steps[i - 1])) fail("--steps must be increasing");
   if (!ROOM_ID_PATTERN.test(`${values["room-prefix"]}-all`)) fail("--room-prefix may only use a-z, 0-9 and -");
   if (values.target !== undefined && Number(values.cluster) > 0) fail("--cluster spawns a local cluster; it cannot be combined with --target");
+  // An invite link works too: take the id after /r/.
+  const room = values.room === undefined ? null : (values.room.match(/\/r\/([^/?#]+)/)?.[1] ?? values.room);
+  if (room !== null) {
+    if (!ROOM_ID_PATTERN.test(room)) fail(`--room: "${values.room}" is not a room id or invite link`);
+    if (Number(values["room-size"]) > 0) fail("--room puts every bot in one room; it cannot be combined with --room-size");
+    if (Number(values.speakers) > 0) fail("--room joins an existing room as guests; it cannot be combined with --speakers");
+  }
 
   const options: Options = {
     steps,
@@ -802,6 +814,7 @@ function parseOptions(): Options {
     cluster: int("cluster", values.cluster, 0),
     capacity: int("capacity", values.capacity, 1),
     roomPrefix: values["room-prefix"],
+    room,
     keepGoing: values["keep-going"],
     max: values.max === undefined ? null : int("max", values.max, 1),
     reportEvery: int("report-every", values["report-every"], 1),
@@ -972,7 +985,8 @@ async function runOrchestrator(): Promise<void> {
     const shown = created.slice(0, 3).map((c) => `${httpUrl}/r/${c.room}`);
     console.log(`Invite link${created.length > 1 ? "s" : ""}: ${shown.join("  ")}${created.length > 3 ? `  (+${created.length - 3} more)` : ""}`);
   } else {
-    console.log(`Rooms: /r/${roomSize > 0 ? `${roomPrefix}-0 .. ${roomPrefix}-${roomCount - 1}` : `${roomPrefix}-all`}`);
+    const rooms = opts.room ?? (roomSize > 0 ? `${roomPrefix}-0 .. ${roomPrefix}-${roomCount - 1}` : `${roomPrefix}-all`);
+    console.log(`Rooms: /r/${rooms}`);
   }
 
   const workers: ChildProcess[] = [];
@@ -995,7 +1009,8 @@ async function runOrchestrator(): Promise<void> {
 
   const roomIndex = (i: number) => (roomSize > 0 ? Math.floor(i / roomSize) : 0);
   const roomFor = (i: number) =>
-    speakers > 0 ? created[roomIndex(i)].room : roomSize > 0 ? `${roomPrefix}-${roomIndex(i)}` : `${roomPrefix}-all`;
+    opts.room ??
+    (speakers > 0 ? created[roomIndex(i)].room : roomSize > 0 ? `${roomPrefix}-${roomIndex(i)}` : `${roomPrefix}-all`);
   /** Bots sent to each room so far: every voice frame should reach all of them. */
   const members = new Map<string, number>();
   /** Bot `i`: its part, and the worker it goes to (a room's talkers share one, so the host can promote them). */
