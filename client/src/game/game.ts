@@ -606,11 +606,15 @@ export class Game {
 
   /**
    * How visible a player is: the host, speakers and we are always fully visible;
-   * others fade out with distance (fog) and vanish when the server left them out.
+   * others fade out with distance (fog) and vanish when the server left them out,
+   * except in orbit, where everyone is.
    */
   private visibility(a: Avatar): number {
     const self = this.self;
     if (!self || a === self || a.role !== "guest") return 1;
+    // In orbit everyone's place is known (their seat), so everyone shows, as
+    // the host sees it; the area-of-interest fog would hide the far side of the rings.
+    if (this.orbit?.slots.has(a.id)) return 1;
     if (!a.inView) return 0;
     return fogAt(Math.hypot(a.x - self.x, a.y - self.y));
   }
