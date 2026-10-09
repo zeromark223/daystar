@@ -94,6 +94,15 @@ export class CoronaEffect {
   readonly view = new Container();
   private readonly streams = new Container();
   private readonly shock = new Graphics();
+  /**
+   * A warm rim over the edge of the sun while the streams whirl: without it the
+   * sun's dim ray zone (between its disc and the streams) read as a dark ring.
+   */
+  private readonly rim = new Graphics()
+    .circle(0, 0, SUN_RADIUS * 0.95)
+    .stroke({ color: 0xffe2a0, width: SUN_RADIUS * 0.45, alpha: 1 })
+    .circle(0, 0, SUN_RADIUS * 1.15)
+    .stroke({ color: 0xffc860, width: SUN_RADIUS * 0.35, alpha: 0.5 });
   private readonly flash = new Sprite({ texture: glowTexture(), anchor: 0.5, tint: 0xfff6dc });
   private readonly halo = new Sprite({ texture: glowTexture(), anchor: 0.5, tint: 0xffb347 });
   private readonly seeds: Stream[] = [];
@@ -104,7 +113,7 @@ export class CoronaEffect {
     this.view.position.set(WORLD_CENTER.x, WORLD_CENTER.y);
     this.view.blendMode = "add";
     this.view.visible = false;
-    this.view.addChild(this.halo, this.streams, this.shock, this.flash);
+    this.view.addChild(this.halo, this.rim, this.streams, this.shock, this.flash);
     const look = streamLook();
     for (let i = 0; i < STREAMS; i++) {
       const points = Array.from({ length: SEGMENTS + 1 }, () => new Point());
@@ -179,9 +188,11 @@ export class CoronaEffect {
     // Streams: arcs whirling round the sun, then stretching out and unwinding.
     const fadeIn = clamp01((t - SWIRL_FROM) / 300);
     const alpha = fadeIn * (1 - c * c);
+    this.rim.alpha = alpha * 0.55;
     this.streams.visible = alpha > 0.01;
     if (!this.streams.visible) return;
-    const inner = SUN_RADIUS * 1.05;
+    // From under the edge of the sun's disc (0.78 R), so they pour out of it.
+    const inner = SUN_RADIUS * 0.72;
     const px = 1 / Math.max(0.05, zoom);
     const whirlOut = SUN_RADIUS * (1.25 + 1.5 * easeOut(swirl));
     const outer = whirlOut + (this.extent * 0.95 - whirlOut) * easeOut(c);
