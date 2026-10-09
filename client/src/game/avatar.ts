@@ -16,6 +16,8 @@ const BUBBLE_MAX_WIDTH = 220;
 /** Trail: positions kept while moving, and how often one is recorded. */
 const TRAIL_POINTS = 14;
 const TRAIL_EVERY_MS = 45;
+/** A streak (gather) keeps this many points, one per GATHER_TRAIL_STEP_MS of flight (see Game). */
+const STREAK_POINTS = 40;
 /** Bodies never shrink below this share of their size when the camera zooms out. */
 const MIN_SCREEN_SCALE = 0.55;
 const ROLE_COLOR = 0xffd166;
@@ -69,6 +71,8 @@ export class Avatar {
   private handIcon: Sprite | null = null;
   /** Being pulled to the sun (orbit gather): a longer, brighter trail. */
   private streak = false;
+  /** Orbit mode hides names (unless the viewer turned them on); reactions and bubbles stay. */
+  private nameShown = true;
   private readonly label: Text;
   private readonly roleTag: Text;
   private bubble: Container | null = null;
@@ -151,7 +155,7 @@ export class Avatar {
     this.body.visible = !host;
     this.trail.visible = !host;
     this.ring.visible = role === "speaker";
-    this.roleTag.visible = role !== "guest";
+    this.roleTag.visible = role !== "guest" && this.nameShown;
     this.roleTag.text = ROLE_LABELS[role].toUpperCase();
     this.label.style.fontSize = host ? 16 : 13;
     this.label.style.fill = host || this.isSelf ? 0xffe9a8 : 0xe8ecff;
@@ -197,6 +201,23 @@ export class Avatar {
       const pop = Math.min(1, t * 6);
       r.sprite.width = r.sprite.height = REACTION_SIZE * (0.6 + 0.4 * pop);
     }
+  }
+
+  /**
+   * While streaking, the trail comes from here: points along the real path
+   * between frames, so it stays a smooth curve however low the frame rate.
+   */
+  addTrailPoint(x: number, y: number): void {
+    this.trailPoints.push({ x, y });
+    while (this.trailPoints.length > STREAK_POINTS) this.trailPoints.shift();
+  }
+
+  /** Show or hide the name (and role) above the player. */
+  setNameVisible(shown: boolean): void {
+    if (shown === this.nameShown) return;
+    this.nameShown = shown;
+    this.label.visible = shown;
+    this.roleTag.visible = shown && this.role !== "guest";
   }
 
   /** A bright light trail while flying in to the sun (see Game.startOrbit). */
@@ -281,6 +302,7 @@ export class Avatar {
 
   /** Where the bubble starts above the tag's anchor. */
   private headroom(): number {
+    if (!this.nameShown) return -4;
     return -this.label.height - (this.roleTag.visible ? this.roleTag.height : 0) - 4;
   }
 
@@ -342,7 +364,7 @@ export class Avatar {
 
   private renderTagExtras(now: number): void {
     if (this.reactions.length > 0) this.renderReactions(now);
-    if (this.handIcon?.visible) this.handIcon.position.set(-this.label.width / 2 - 3, -1);
+    if (this.handIcon?.visible) this.handIcon.position.set(this.nameShown ? -this.label.width / 2 - 3 : 9, -1);
   }
 
   /** The host's name and bubble float above the sun. */
@@ -374,11 +396,11 @@ export class Avatar {
 
   private renderTrail(now: number, brightness: number, scale: number): void {
     const pts = this.trailPoints;
-    const every = this.streak ? 0 : TRAIL_EVERY_MS;
-    const keep = this.streak ? TRAIL_POINTS * 2 : TRAIL_POINTS;
-    if (this.moving && now - this.lastTrailAt >= every) {
+    if (this.streak) {
+      // Fed by addTrailPoint.
+    } else if (this.moving && now - this.lastTrailAt >= TRAIL_EVERY_MS) {
       pts.push({ x: this.x, y: this.y });
-      while (pts.length > keep) pts.shift();
+      while (pts.length > TRAIL_POINTS) pts.shift();
       this.lastTrailAt = now;
     } else if (!this.moving && pts.length > 0 && now - this.lastTrailAt >= TRAIL_EVERY_MS) {
       pts.shift(); // let the trail shrink away once stopped

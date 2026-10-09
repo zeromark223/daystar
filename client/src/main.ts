@@ -113,7 +113,15 @@ async function main(): Promise<void> {
     else chat?.addSystem("The host let everyone go. You can move again.");
   };
   const tutorial = new Tutorial();
-  new SettingsPanel({ replayTutorial: () => tutorial.replay(selfRole) });
+  /** Settings that apply to the game, which is created after the lobby. */
+  let orbitNames = false;
+  new SettingsPanel({
+    replayTutorial: () => tutorial.replay(selfRole),
+    orbitNames: (shown) => {
+      orbitNames = shown;
+      game?.setOrbitNames(shown);
+    },
+  });
 
   /** A poll started or ended (or was already open when we joined). */
   const showPoll = (poll: Poll, announce: boolean) => {
@@ -399,6 +407,7 @@ async function main(): Promise<void> {
       voiceLevel: (id) => (id === selfId ? mic.level : player.level(id)),
       pick: (id, x, y) => people.openMenu(id, x, y),
     });
+    game.setOrbitNames(orbitNames);
     chat = new ChatPanel((text) => conn?.send({ t: "chat", text }));
     // Which answer planet we are on, for the poll card.
     setInterval(() => polls.setMine(game!.pollAnswer), 200);

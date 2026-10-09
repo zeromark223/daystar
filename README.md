@@ -123,8 +123,11 @@ tools/          load test
   seat is at any time is one shared function (`shared/src/orbit.ts`), so every
   screen shows the same sky and the server sends no positions while it lasts:
   moves are ignored and snapshots carry only voice and events (plus the seats of
-  newcomers and new speakers). Players fly in leaving trails of light and the sun
-  flares as they arrive. Nobody steers until the host releases them, and then
+  newcomers and new speakers). Players spiral in towards the sun, whirl around it in
+  a ring of light while the camera pulls back over the sun, then the sun flares and
+  they fly out to their seats (trails are traced along the true path between
+  frames, so they stay curved at any frame rate). Names are hidden in orbit unless
+  the viewer turns them on in ⚙ Settings. Nobody steers until the host releases them, and then
   everyone stays where its orbit had them (clients compute the same spots, so
   nothing is sent). Polls are off meanwhile; the orbit stays if the host leaves.
 - **Tutorial:** a short guided tour the first time someone joins as a guest, becomes a

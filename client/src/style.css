@@ -1052,3 +1052,48 @@ button.secondary {
     text-align: center;
   }
 }
+
+.settings label.setting {
+  cursor: pointer;
+}
+
+/* A small switch for on/off settings. */
+.settings input[role="switch"] {
+  appearance: none;
+  flex: none;
+  position: relative;
+  width: 42px;
+  height: 24px;
+  margin: 0;
+  border-radius: 999px;
+  background: rgba(142, 162, 255, 0.2);
+  border: 1px solid var(--panel-border);
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.settings input[role="switch"]::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--ink);
+  transition: transform 0.2s;
+}
+
+.settings input[role="switch"]:checked {
+  background: var(--accent);
+}
+
+.settings input[role="switch"]:checked::after {
+  transform: translateX(18px);
+  background: var(--accent-ink);
+}
+
+.settings input[role="switch"]:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}

@@ -1,8 +1,11 @@
 export interface SettingsActions {
   replayTutorial(): void;
+  orbitNames(shown: boolean): void;
 }
 
-/** The ⚙ button and its small panel. For now it holds the tutorial replay. */
+const ORBIT_NAMES_KEY = "daystar:orbit-names";
+
+/** The ⚙ button and its panel: replay the tutorial, names in orbit (remembered in this browser). */
 export class SettingsPanel {
   private readonly button = document.getElementById("settings-button") as HTMLButtonElement;
   private readonly panel = document.getElementById("settings")!;
@@ -12,6 +15,21 @@ export class SettingsPanel {
     document.getElementById("replay-tutorial")!.addEventListener("click", () => {
       this.setOpen(false);
       actions.replayTutorial();
+    });
+    const names = document.getElementById("orbit-names") as HTMLInputElement;
+    try {
+      names.checked = localStorage.getItem(ORBIT_NAMES_KEY) === "1";
+    } catch {
+      // Storage blocked: names stay hidden by default.
+    }
+    actions.orbitNames(names.checked);
+    names.addEventListener("change", () => {
+      actions.orbitNames(names.checked);
+      try {
+        localStorage.setItem(ORBIT_NAMES_KEY, names.checked ? "1" : "0");
+      } catch {
+        // Not remembered; it still applies now.
+      }
     });
     window.addEventListener("pointerdown", (e) => {
       const t = e.target as Node;
