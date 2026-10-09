@@ -132,7 +132,8 @@ tools/          load test
   reverse big bang plays at the sun (a flash and a shock wave, 120 streams whirling
   round it, then stretching out like a corona); as the sun flares, with a second
   shock wave, they burst out from beside the sun to their seats, riding the
-  streams, like the fly-in's end. Its cost does not grow with the room (a fixed set of
+  streams with white-hot trails, like the fly-in's end (trails are computed from
+  each path and drawn as pooled rope meshes, at most 500 at once). Its cost does not grow with the room (a fixed set of
   streams, each a rope mesh with one shared texture holding its core and glow, so
   a frame only moves points). Each browser gets one at random (remembered); `?gather=flight|corona`
   or ⚙ Settings picks one, and every gather logs its frame rate

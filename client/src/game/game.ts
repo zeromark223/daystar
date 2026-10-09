@@ -17,7 +17,16 @@ import { KeyboardInput } from "./input.ts";
 import { Minimap } from "./minimap.ts";
 import { PollZones } from "./poll-zones.ts";
 import { PlayoutClock, Track } from "./timeline.ts";
-import { CORONA_BURST_AT, CORONA_MS_TOTAL, CORONA_OUT_MS, CORONA_OUT_STAGGER_MS, CoronaEffect } from "./corona.ts";
+import {
+  BURST_TRAIL_POINTS,
+  BurstTrails,
+  CORONA_BURST_AT,
+  CORONA_MS_TOTAL,
+  CORONA_OUT_MS,
+  CORONA_OUT_STAGGER_MS,
+  CoronaEffect,
+  MAX_BURST_TRAILS,
+} from "./corona.ts";
 import type { Poll } from "../../../shared/src/poll.ts";
 import { FIRST_RING, orbitPosition, RING_GAP, SEAT_SPACING, STAGE_SLOTS } from "../../../shared/src/orbit.ts";
 import { SUN_RADIUS, WORLD_CENTER } from "../../../shared/src/constants.ts";
@@ -72,6 +81,9 @@ const RESEAT_MS = 1_200;
 /** While the gather plays the camera eases to the sun (this fast, per ms) and zooms out to see it all. */
 const CAMERA_EASE_PER_MS = 1 / 600;
 
+/** Corona burst: each player's white-hot trail covers this much of its path, this wide on screen. */
+const BURST_TRAIL_MS = 220;
+const BURST_TRAIL_PX = 11;
 /** A gathering player's trail gets a point every this many ms of its path, whatever the frame rate. */
 const GATHER_TRAIL_STEP_MS = 12;
 
@@ -120,6 +132,7 @@ export class Game {
   private orbitNames = false;
   private gatherStyle: GatherStyle = "flight";
   private readonly corona = new CoronaEffect();
+  private readonly burstTrails = new BurstTrails();
   /** Corona gather: when it started (local time); players fade in by ring after it. */
   private coronaAt = -1;
   /** Frame times of the gather playing now, for GatherStats. */
@@ -154,7 +167,14 @@ export class Game {
     stage.appendChild(app.canvas);
 
     const game = new Game(app, callbacks);
-    game.world.addChild(game.scene.backdrop, game.pollZones.view, game.trails, game.bodies, game.corona.view);
+    game.world.addChild(
+      game.scene.backdrop,
+      game.pollZones.view,
+      game.trails,
+      game.burstTrails.view,
+      game.bodies,
+      game.corona.view,
+    );
     app.stage.addChild(game.scene.sky, game.world, game.overlay, game.minimap.view);
     game.setupPointer();
     game.setupZoom();
@@ -250,6 +270,10 @@ export class Game {
     this.clock.reset();
     this.orbit = null;
     this.flights.clear();
+    this.corona.stop();
+    this.coronaAt = -1;
+    this.burstTrails.begin();
+    this.burstTrails.end();
   }
 
   get orbiting(): boolean {
@@ -374,6 +398,8 @@ export class Game {
     this.overviewTarget = 0;
     this.corona.stop();
     this.coronaAt = -1;
+    this.burstTrails.begin();
+    this.burstTrails.end();
     for (const a of this.avatars.values()) {
       a.setNameVisible(true);
       a.setReveal(1);
@@ -389,13 +415,28 @@ export class Game {
     // Corona: hidden until the burst, then shooting out from beside the sun.
     const sinceCorona = this.coronaAt >= 0 ? now - this.coronaAt : Infinity;
     const extent = this.coronaAt >= 0 ? this.orbitExtent() : 1;
+    const burning: { path: { x: number; y: number }[]; alpha: number; d: number }[] = [];
+    const zoom = this.world.scale.x;
+    const viewX = (this.app.screen.width / 2 - this.world.x) / zoom;
+    const viewY = (this.app.screen.height / 2 - this.world.y) / zoom;
     for (const [id, slot] of orbit.slots) {
       const a = this.avatars.get(id);
       if (!a) continue;
       const seat = orbitPosition(slot, seconds);
       let { x, y } = seat;
       if (sinceCorona < CORONA_BURST_AT + CORONA_OUT_STAGGER_MS + CORONA_OUT_MS) {
-        ({ x, y } = this.coronaPosition(id, seat, sinceCorona, extent, a));
+        const p = this.coronaPath(id, seat, sinceCorona, extent);
+        ({ x, y } = p);
+        // Visible as soon as it leaves the sun.
+        a.setReveal(Math.min(1, p.k * 6));
+        if (p.k > 0 && p.k < 1) {
+          // Its trail: the same path a little earlier, head first.
+          const path = [];
+          for (let i = 0; i <= BURST_TRAIL_POINTS; i++) {
+            path.push(this.coronaPath(id, seat, sinceCorona - (i / BURST_TRAIL_POINTS) * BURST_TRAIL_MS, extent));
+          }
+          burning.push({ path, alpha: Math.sqrt(1 - p.k), d: (x - viewX) ** 2 + (y - viewY) ** 2 });
+        }
       } else {
         a.setReveal(1);
       }
@@ -425,6 +466,11 @@ export class Game {
       a.inView = true;
       a.setNameVisible(this.orbitNames);
     }
+    // White-hot trails for the burst, the nearest to the middle if there are too many.
+    if (burning.length > MAX_BURST_TRAILS) burning.sort((p, q) => p.d - q.d);
+    this.burstTrails.begin();
+    for (const b of burning) this.burstTrails.add(b.path, BURST_TRAIL_PX / zoom, b.alpha);
+    this.burstTrails.end();
     const coronaDone =
       this.coronaAt < 0 || sinceCorona >= Math.max(CORONA_MS_TOTAL, CORONA_BURST_AT + CORONA_OUT_STAGGER_MS + CORONA_OUT_MS);
     if (coronaDone) this.coronaAt = -1;
@@ -488,18 +534,15 @@ export class Game {
    * the burst, then out along a spiral, turning the way the streams turn, and
    * slowing into its seat (`seat`, which keeps moving), like the fly-in's end.
    */
-  private coronaPosition(
+  private coronaPath(
     id: number,
     seat: { x: number; y: number },
     t: number,
     extent: number,
-    a: Avatar,
-  ): { x: number; y: number } {
+  ): { x: number; y: number; k: number } {
     const seatR = Math.hypot(seat.x - WORLD_CENTER.x, seat.y - WORLD_CENTER.y);
     const leave = CORONA_BURST_AT + (seatR / extent) * CORONA_OUT_STAGGER_MS;
     const k = Math.min(1, Math.max(0, (t - leave) / CORONA_OUT_MS));
-    // Visible as soon as it leaves the sun.
-    a.setReveal(Math.min(1, k * 6));
     const e = easeOut(k);
     // A steady per-player start just outside the sun, and how far round it travels.
     const h = ((id * 2654435761) >>> 0) / 0x1_0000_0000;
@@ -507,7 +550,7 @@ export class Game {
     const seatAngle = Math.atan2(seat.y - WORLD_CENTER.y, seat.x - WORLD_CENTER.x);
     const angle = seatAngle - (1 - e) * (1 + h * 0.8);
     const r = startR + (seatR - startR) * e;
-    return { x: WORLD_CENTER.x + Math.cos(angle) * r, y: WORLD_CENTER.y + Math.sin(angle) * r };
+    return { x: WORLD_CENTER.x + Math.cos(angle) * r, y: WORLD_CENTER.y + Math.sin(angle) * r, k };
   }
 
   /** Radius that holds every seat in use, for the camera's overview. */

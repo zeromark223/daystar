@@ -201,3 +201,54 @@ export class CoronaEffect {
     }
   }
 }
+
+/** Burning trails behind players bursting out (at most this many at once, the nearest to the middle). */
+export const MAX_BURST_TRAILS = 500;
+/** Points per trail. */
+export const BURST_TRAIL_POINTS = 10;
+
+/**
+ * White-hot trails behind players as they burst out to their seats, like the
+ * fly-in's streaks: rope meshes sharing the stream texture, taken from a pool
+ * each frame. Game gives each one its path (head first), computed, not traced.
+ */
+export class BurstTrails {
+  readonly view = new Container();
+  private readonly ropes: { points: Point[]; geometry: RopeGeometry; mesh: Mesh }[] = [];
+  private used = 0;
+
+  constructor() {
+    this.view.blendMode = "add";
+  }
+
+  begin(): void {
+    this.used = 0;
+  }
+
+  /** `path`: BURST_TRAIL_POINTS + 1 points, head first; `width` in world units. */
+  add(path: { x: number; y: number }[], width: number, alpha: number): void {
+    if (this.used >= MAX_BURST_TRAILS) return;
+    let rope = this.ropes[this.used];
+    if (!rope) {
+      const points = Array.from({ length: BURST_TRAIL_POINTS + 1 }, () => new Point());
+      const geometry = new RopeGeometry({ points, width: 1 });
+      const mesh = new Mesh({ geometry, texture: streamLook() });
+      mesh.tint = 0xfff4dc;
+      mesh.blendMode = "add";
+      this.view.addChild(mesh);
+      rope = { points, geometry, mesh };
+      this.ropes.push(rope);
+    }
+    for (let i = 0; i < rope.points.length; i++) rope.points[i].set(path[i].x, path[i].y);
+    (rope.geometry as unknown as { _width: number })._width = width;
+    rope.geometry.updateVertices();
+    rope.mesh.alpha = alpha;
+    rope.mesh.visible = true;
+    this.used++;
+  }
+
+  /** Hide the ropes nobody used this frame. */
+  end(): void {
+    for (let i = this.used; i < this.ropes.length; i++) this.ropes[i].mesh.visible = false;
+  }
+}
