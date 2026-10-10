@@ -924,6 +924,19 @@ button.secondary {
   margin-top: 14px;
 }
 
+.qr-dialog .fine-print {
+  margin: 10px 0 0;
+  font-size: 0.82rem;
+  line-height: 1.4;
+  color: var(--ink-soft);
+}
+
+.qr-dialog .dialog-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+}
+
 /* ---------- settings ---------- */
 
 .voice-bar {

@@ -8,6 +8,7 @@ import { MissingPlayers } from "./missing-players.ts";
 import { Connection, createRoom } from "./net.ts";
 import { AudienceBar } from "./ui/audience.ts";
 import { ChatPanel } from "./ui/chat.ts";
+import { HostTransfer, hostLink, takeHostKeyFromUrl } from "./ui/host-transfer.ts";
 import { inviteUrl, setupInviteQr } from "./ui/invite.ts";
 import { runLobby, type LobbyChoice } from "./ui/lobby.ts";
 import { PeoplePanel } from "./ui/people.ts";
@@ -44,6 +45,26 @@ function saveHostKey(room: string, key: string): void {
   }
 }
 
+/** Set on a device that handed the host to another (Settings → Host transfer). */
+const handedOverName = (room: string) => `daystar:host-moved:${room}`;
+
+function loadHandedOver(room: string): boolean {
+  try {
+    return localStorage.getItem(handedOverName(room)) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function saveHandedOver(room: string, moved: boolean): void {
+  try {
+    if (moved) localStorage.setItem(handedOverName(room), "1");
+    else localStorage.removeItem(handedOverName(room));
+  } catch {
+    // Remembered for this tab only.
+  }
+}
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const RECONNECT_ATTEMPTS = 5;
 
@@ -59,8 +80,20 @@ const TOUCH_HINT_MS = 10_000;
 
 async function main(): Promise<void> {
   let roomId = roomFromUrl();
+  // Opened from a host transfer link: this device is to be the host.
+  const handed = roomId ? takeHostKeyFromUrl() : null;
+  if (roomId && handed) {
+    saveHostKey(roomId, handed);
+    saveHandedOver(roomId, false);
+  }
   /** Kept in memory too, in case storage is blocked. */
-  let hostKey = roomId ? loadHostKey(roomId) : "";
+  let hostKey = handed ?? (roomId ? loadHostKey(roomId) : "");
+  /**
+   * This device handed the host to another: it joins as a guest (also after a
+   * reconnect or reload) until it takes the host back, instead of grabbing it
+   * back the moment its connection blips.
+   */
+  let handedOver = roomId && !handed ? loadHandedOver(roomId) : false;
   const hud = document.getElementById("hud")!;
   const count = document.getElementById("hud-count")!;
   const roleChip = document.getElementById("hud-role")!;
@@ -116,6 +149,11 @@ async function main(): Promise<void> {
   /** Settings that apply to the game, which is created after the lobby. */
   let orbitNames = false;
   let gatherStyle: GatherStyle = "corona";
+  const hostTransfer = new HostTransfer({
+    hostLink: () => (roomId && hostKey ? hostLink(roomId, hostKey) : null),
+    takeBack: () => void takeBackHost(),
+  });
+
   new SettingsPanel({
     gatherStyle: (style) => {
       gatherStyle = style;
@@ -203,10 +241,20 @@ async function main(): Promise<void> {
     renderMic();
     // First time in this role: a short tour (after the HUD has laid out).
     setTimeout(() => tutorial.offer(role), 600);
+    hostTransfer.update(role === "host", handedOver);
     if (!announce || before === role) return;
+    if (before === "host" && role !== "host" && hostKey) {
+      // Someone joined with our key: the host moved to another device.
+      handedOver = true;
+      saveHandedOver(roomId!, true);
+      hostTransfer.update(false, true);
+      chat?.addSystem("The host moved to another device. Settings → Take back makes this one the host again.");
+      return;
+    }
     if (role === "speaker") chat?.addSystem("The host invited you to speak. Turn your mic on when you are ready.");
     else if (before === "speaker" && role === "guest") chat?.addSystem("You are a guest again; your mic is off.");
     else if (before === "host") chat?.addSystem("You are hosting from another tab now.");
+    else if (role === "host") chat?.addSystem("You are the host now.");
   };
 
   // ------------------------------------------------------------ messages
@@ -242,6 +290,9 @@ async function main(): Promise<void> {
       case "welcome": {
         // A second welcome means we moved or reconnected: rebuild the room from it.
         const rejoin = joined;
+        // Rejoining under a new id (e.g. taking the host back), our old seat is
+        // still there until its socket closes: not someone else to show (or see leave).
+        const formerSelf = rejoin && selfId !== msg.selfId ? selfId : -1;
         game.resetPlayers();
         missing.reset();
         people.clear();
@@ -250,7 +301,7 @@ async function main(): Promise<void> {
         game.setSnapshotRate(msg.snapshotHz);
         game.setSelf(msg.selfId);
         people.setSelf(msg.selfId);
-        for (const p of msg.players) addPlayer(p);
+        for (const p of msg.players) if (p.id !== formerSelf) addPlayer(p);
         setSelfRole(msg.players.find((p) => p.id === msg.selfId)?.role ?? "guest", rejoin);
         if (msg.poll) showPoll(msg.poll, !rejoin);
         else if (rejoin) polls.hide();
@@ -357,9 +408,28 @@ async function main(): Promise<void> {
   const adopt = (next: Connection) => {
     const old = conn;
     conn = next;
-    next.send({ t: "join", name: identity!.name, appearance: identity!.appearance, hostKey });
+    next.send({ t: "join", name: identity!.name, appearance: identity!.appearance, hostKey: handedOver ? "" : hostKey });
     old?.close();
   };
+
+  /** Host transfer, undone: join again with the key, which makes this device the host. */
+  async function takeBackHost(): Promise<void> {
+    if (switching || !roomId) return;
+    switching = true;
+    handedOver = false;
+    saveHandedOver(roomId, false);
+    hostTransfer.update(false, false);
+    try {
+      adopt(await Connection.open(roomId, handlers));
+    } catch {
+      chat?.addSystem("Could not reach the room; try again.");
+      handedOver = true;
+      saveHandedOver(roomId, true);
+      hostTransfer.update(false, true);
+    } finally {
+      switching = false;
+    }
+  }
 
   /** Cluster: the server is shedding load; move without leaving the room. */
   async function migrate(): Promise<void> {
@@ -395,7 +465,7 @@ async function main(): Promise<void> {
     }
   }
 
-  await runLobby(roomId, hostKey !== "", async (choice) => {
+  await runLobby(roomId, hostKey !== "" && !handedOver, async (choice) => {
     // Still inside the click: the only moment browsers let audio start.
     unlockAudio();
     if (!roomId) {

@@ -39,7 +39,8 @@ export function setupInviteQr(roomId: string): void {
   });
 }
 
-function draw(canvas: HTMLCanvasElement, url: string): void {
+/** Draw `url` as a QR code on `canvas` (also used for the host link). */
+export function draw(canvas: HTMLCanvasElement, url: string): void {
   const qr = qrcode(0, "M");
   qr.addData(url);
   qr.make();

@@ -58,6 +58,20 @@
           </div>
           <button id="replay-tutorial" type="button">Replay tutorial</button>
         </div>
+        <div class="setting" id="host-transfer-setting" hidden>
+          <div>
+            <strong>Host transfer</strong>
+            <p>Be the host on another device, like your phone. This one becomes a guest.</p>
+          </div>
+          <button id="host-transfer" type="button" aria-haspopup="dialog">Transfer</button>
+        </div>
+        <div class="setting" id="take-back-setting" hidden>
+          <div>
+            <strong>Host moved</strong>
+            <p>Another device is the host now.</p>
+          </div>
+          <button id="take-back-host" type="button">Take back</button>
+        </div>
         <label class="setting" for="orbit-names">
           <div>
             <strong>Names in orbit</strong>
@@ -127,6 +141,17 @@
       <p id="qr-link" class="qr-link"></p>
       <p id="qr-note" class="note" hidden>This link points to this computer, so other devices cannot open it.</p>
       <form method="dialog"><button type="submit">Done</button></form>
+    </dialog>
+
+    <dialog id="host-dialog" class="qr-dialog" aria-labelledby="host-title">
+      <h2 id="host-title">Host on another device</h2>
+      <canvas id="host-qr" aria-label="QR code of the host link"></canvas>
+      <p id="host-link" class="qr-link"></p>
+      <p class="fine-print">Scan it with your phone, or open the link there: that device becomes the host and this one a guest. Anyone with this link can host the room.</p>
+      <form method="dialog" class="dialog-actions">
+        <button id="host-copy" type="button" class="secondary">Copy link</button>
+        <button type="submit">Done</button>
+      </form>
     </dialog>
 
     <section id="disconnected" class="lobby" hidden>
