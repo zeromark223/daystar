@@ -1,9 +1,0 @@
-# Dockerfile.loadtest's own ignore list (BuildKit reads <Dockerfile>.dockerignore
-# instead of .dockerignore): unlike the app image it needs tools/.
-*
-!package.json
-!shared/src
-!server/src
-!tools/loadtest.ts
-!tools/voice
-!tools/loadtest-web
