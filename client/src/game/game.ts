@@ -3,6 +3,7 @@ import { appearanceOf } from "../../../shared/src/appearance.ts";
 import { MOVE_SPEED, TICK_RATE } from "../../../shared/src/constants.ts";
 import { facing, type Direction } from "../../../shared/src/direction.ts";
 import {
+  FRESH_VIEW,
   quantize,
   type OrbitState,
   type PlayerInfo,
@@ -77,6 +78,17 @@ interface GatherStats {
  */
 const TRAIL_BUDGET = 400;
 
+/**
+ * Release: each player fades out of its seat at a moment between 0 and
+ * RELEASE_SPREAD_MS that the server's seed gives (the same on every screen), and
+ * fades in where it was before the gather. Opacity only: cheap on any device.
+ */
+const RELEASE_SPREAD_MS = 1_400;
+const RELEASE_FADE_OUT_MS = 280;
+const RELEASE_FADE_IN_MS = 350;
+/** If the fresh view never comes (a dropped frame), stop waiting after this. */
+const RELEASE_GIVE_UP_MS = 4_000;
+
 /** A player changing seat mid-orbit (made speaker, ...) glides there in this long. */
 const RESEAT_MS = 1_200;
 /** While the gather plays the camera eases to the sun (this fast, per ms) and zooms out to see it all. */
@@ -123,6 +135,13 @@ export class Game {
       | { gather: false; ms: number }
     )
   >();
+  /**
+   * The release playing: when it started (local time), its seed, where everyone
+   * goes (our fresh view: who is around our spot; null until it arrives) and who
+   * has already left their seat. The orbit lasts until everyone has.
+   */
+  private release: { at: number; seed: number; homes: Map<number, PlayerState> | null; gone: Set<number> } | null =
+    null;
   /** When the sun flares as everyone bursts out to their seats (local time). */
   private flareAt = 0;
   /**
@@ -282,10 +301,12 @@ export class Game {
     this.burstTrails.begin();
     this.burstTrails.end();
     this.overview = this.overviewTarget = 0;
+    this.release = null;
   }
 
+  /** In orbit (we cannot steer): until our own teleport home when released. */
   get orbiting(): boolean {
-    return this.orbit !== null;
+    return this.orbit !== null && !this.release?.gone.has(this.selfId);
   }
 
   /**
@@ -298,6 +319,7 @@ export class Game {
     // The start is modulo 2^32 too; how long ago it was is what counts.
     const start = serverNow - ((state.now - state.start) >>> 0);
     this.orbit = { start, slots: new Map(state.slots.map((s) => [s.id, s.slot])) };
+    this.release = null;
     this.tapTarget = null;
     this.flights.clear();
     this.corona.stop();
@@ -383,37 +405,85 @@ export class Game {
     }
   }
 
-  /** The host let everyone go: each player stays where its orbit had it at `state.now`. */
-  releaseOrbit(state: OrbitState): void {
-    const orbit = this.orbit;
-    if (!orbit) return;
-    const at = this.clock.observe(state.now, performance.now());
-    const seconds = ((state.now - state.start) >>> 0) / 1000;
-    for (const [id, slot] of orbit.slots) {
-      const a = this.avatars.get(id);
-      if (!a) continue;
-      const spot = orbitPosition(slot, seconds);
-      const p = { x: quantize(spot.x), y: quantize(spot.y), dir: spot.dir, moving: false };
-      a.setStreak(false);
-      if (id === this.selfId) {
-        a.x = p.x;
-        a.y = p.y;
-        a.setMotion(p.dir, false);
-        // The server has us exactly here; the next move starts from it.
-        this.lastSent = { ...p };
-        this.lastSentAt = performance.now();
-      } else {
-        a.teleport(at, p);
-        a.inView = true;
-      }
-    }
-    this.orbit = null;
+  /**
+   * The host let everyone go: they go back to where they were before the gather.
+   * The teleports play in the order the server's seed gives; where each lands
+   * comes in our fresh view (applyView), just after this.
+   */
+  releaseOrbit(state: OrbitState & { seed: number }): void {
+    if (!this.orbit || this.release) return;
+    this.clock.observe(state.now, performance.now());
     this.flights.clear();
-    this.overviewTarget = 0;
     this.corona.stop();
     this.coronaAt = -1;
     this.burstTrails.begin();
     this.burstTrails.end();
+    for (const a of this.avatars.values()) {
+      a.setStreak(false);
+      a.setReveal(1);
+    }
+    this.release = { at: performance.now(), seed: state.seed, homes: null, gone: new Set() };
+  }
+
+  /** When seat `slot` teleports away, after the release started: a hash of the seat and the seed. */
+  private releaseDelay(slot: number, seed: number): number {
+    let h = Math.imul(slot + 1, 0x9e3779b1) ^ seed;
+    h = Math.imul(h ^ (h >>> 16), 0x85ebca6b);
+    h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
+    h ^= h >>> 16;
+    return ((h >>> 0) / 0x1_0000_0000) * RELEASE_SPREAD_MS;
+  }
+
+  /**
+   * Release, for one seated player: still in its seat (fading out), or gone home
+   * (fading in there if it is around us, out of view otherwise). Returns true once
+   * it has left its seat.
+   */
+  private releasePlayer(id: number, slot: number, a: Avatar, now: number): boolean {
+    const release = this.release!;
+    const t = now - release.at - this.releaseDelay(slot, release.seed);
+    if (!release.gone.has(id)) {
+      const waited = now - release.at > RELEASE_GIVE_UP_MS;
+      if (t < RELEASE_FADE_OUT_MS || (!release.homes && !waited)) {
+        a.setReveal(1 - Math.min(1, Math.max(0, t) / RELEASE_FADE_OUT_MS));
+        return false;
+      }
+      release.gone.add(id);
+      a.setNameVisible(true);
+      const home = release.homes?.get(id);
+      if (!home) {
+        a.inView = false;
+        a.setReveal(1);
+        return true;
+      }
+      if (id === this.selfId) {
+        a.x = home.x;
+        a.y = home.y;
+        a.setMotion(home.dir, false);
+        a.clearTrail();
+        // The server has us exactly here; the next move starts from it.
+        this.lastSent = { x: home.x, y: home.y, dir: home.dir, moving: false };
+        this.lastSentAt = now;
+        this.overviewTarget = 0;
+      } else {
+        a.teleport(this.clock.latest, { ...home, moving: false });
+      }
+      a.inView = true;
+    }
+    const home = release.homes?.get(id);
+    if (home) {
+      a.x = home.x;
+      a.y = home.y;
+      a.setReveal(Math.min(1, Math.max(0, (t - RELEASE_FADE_OUT_MS) / RELEASE_FADE_IN_MS)));
+    }
+    return true;
+  }
+
+  /** Everyone has gone home: back to the normal room. */
+  private finishRelease(): void {
+    this.orbit = null;
+    this.release = null;
+    this.overviewTarget = 0;
     for (const a of this.avatars.values()) {
       a.setNameVisible(true);
       a.setReveal(1);
@@ -433,9 +503,12 @@ export class Game {
     const zoom = this.world.scale.x;
     const viewX = (this.app.screen.width / 2 - this.world.x) / zoom;
     const viewY = (this.app.screen.height / 2 - this.world.y) / zoom;
+    let seated = 0;
     for (const [id, slot] of orbit.slots) {
       const a = this.avatars.get(id);
       if (!a) continue;
+      if (this.release && this.releasePlayer(id, slot, a, now)) continue;
+      seated++;
       const seat = orbitPosition(slot, seconds);
       let { x, y } = seat;
       if (sinceCorona < CORONA_BURST_AT + CORONA_OUT_STAGGER_MS + CORONA_OUT_MS) {
@@ -489,6 +562,9 @@ export class Game {
       this.coronaAt < 0 || sinceCorona >= Math.max(CORONA_MS_TOTAL, CORONA_BURST_AT + CORONA_OUT_STAGGER_MS + CORONA_OUT_MS);
     if (coronaDone) this.coronaAt = -1;
     if (this.gatherFrames && this.flights.size === 0 && coronaDone) this.endGatherStats();
+    if (this.release && seated === 0 && now - this.release.at > RELEASE_SPREAD_MS + RELEASE_FADE_OUT_MS + RELEASE_FADE_IN_MS) {
+      this.finishRelease();
+    }
   }
 
   /**
@@ -606,6 +682,13 @@ export class Game {
    * has gone (we were not told while it was out of view).
    */
   applyView(from: number, to: number, players: PlayerState[]): void {
+    if (from === FRESH_VIEW) {
+      const homes = new Map(players.map((p) => [p.id, p]));
+      // During a release the teleports place everyone when their turn comes.
+      if (this.release) this.release.homes = homes;
+      else this.applyFreshView(homes);
+      return;
+    }
     const listed = new Set(players.map((p) => p.id));
     for (const a of this.avatars.values()) {
       if (a.id === this.selfId || a.role !== "guest" || listed.has(a.id)) continue;
@@ -613,6 +696,20 @@ export class Game {
     }
     // A view carries no time; it follows the newest snapshot.
     for (const p of players) this.place(p, this.clock.latest);
+  }
+
+  /** A whole new view: those listed are where it says; other guests are out of view. */
+  private applyFreshView(homes: Map<number, PlayerState>): void {
+    for (const a of this.avatars.values()) {
+      if (a.id === this.selfId || a.role !== "guest" || homes.has(a.id)) continue;
+      a.inView = false;
+    }
+    for (const p of homes.values()) {
+      if (p.id === this.selfId) continue;
+      this.avatars.get(p.id)?.teleport(this.clock.latest, p);
+      const a = this.avatars.get(p.id);
+      if (a) a.inView = true;
+    }
   }
 
   /**
@@ -625,7 +722,7 @@ export class Game {
     if (!self || a === self || a.role !== "guest") return 1;
     // In orbit everyone's place is known (their seat), so everyone shows, as
     // the host sees it; the area-of-interest fog would hide the far side of the rings.
-    if (this.orbit?.slots.has(a.id)) return 1;
+    if (this.orbit?.slots.has(a.id) && !this.release?.gone.has(a.id)) return 1;
     if (!a.inView) return 0;
     return fogAt(Math.hypot(a.x - self.x, a.y - self.y));
   }
@@ -655,7 +752,7 @@ export class Game {
         if (picked) this.callbacks.pick(picked.id, e.global.x, e.global.y);
         return;
       }
-      if (this.orbit) return; // gathered: nobody steers
+      if (this.orbiting) return; // gathered: nobody steers
       this.tapTarget = {
         x: (e.global.x - this.world.x) / this.world.scale.x,
         y: (e.global.y - this.world.y) / this.world.scale.x,
@@ -665,7 +762,7 @@ export class Game {
 
   /** Mouse wheel and +/- keys zoom around the player. */
   private zoomBy(factor: number): void {
-    if (this.orbit) this.orbitZoom = Math.min(8, Math.max(0.5, this.orbitZoom * factor));
+    if (this.orbiting) this.orbitZoom = Math.min(8, Math.max(0.5, this.orbitZoom * factor));
     else this.zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, this.zoom * factor));
   }
 
@@ -740,7 +837,7 @@ export class Game {
   private updateSelf(dt: number, now: number): void {
     const self = this.self;
     if (!self || self.role === "host") return;
-    if (this.orbit?.slots.has(self.id)) return; // gathered: the orbit moves us
+    if (this.orbiting && this.orbit?.slots.has(self.id)) return; // gathered: the orbit moves us
 
     let { x: vx, y: vy } = this.keyboard.vector();
     /** Share of full speed: the thumbstick walks slower near its center. */

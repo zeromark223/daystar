@@ -110,7 +110,14 @@ const Schemas: Record<number, Struct> = {
   [Op.set_hand]: HandMeshStruct,
   [Op.poll]: { room: Type.String, poll: Type.Object8, poll_Struct: PollStruct },
   // Times as Doubles: full Unix ms between servers.
-  [Op.orbit]: { room: Type.String, active: Type.UInt8, time: Type.Double, slots: Type.Object16, slots_Struct: SlotStruct },
+  [Op.orbit]: {
+    room: Type.String,
+    active: Type.UInt8,
+    time: Type.Double,
+    seed: Type.UInt32,
+    slots: Type.Object16,
+    slots_Struct: SlotStruct,
+  },
   [Op.slots]: { room: Type.String, list: Type.Object16, list_Struct: SlotStruct },
 };
 
@@ -152,7 +159,9 @@ export function encodeMesh(msg: MeshMessage): Uint8Array<ArrayBuffer> {
       return encode(Schemas[Op.poll], { room: msg.room, poll: [pollToWire(msg.poll)] }, Op.poll);
     case "orbit": {
       const o = msg.orbit;
-      const body = o.active ? { active: 1, time: o.start, slots: o.slots } : { active: 0, time: o.at, slots: [] };
+      const body = o.active
+        ? { active: 1, time: o.start, seed: 0, slots: o.slots }
+        : { active: 0, time: o.at, seed: o.seed, slots: [] };
       return encode(Schemas[Op.orbit], { room: msg.room, ...body }, Op.orbit);
     }
     case "slots":
@@ -218,9 +227,9 @@ export function decodeMesh(bytes: Uint8Array): MeshMessage | null {
         return m.poll.length === 1 ? { t: "poll", room: m.room, poll: pollFromWire(m.poll[0]) } : null;
       }
       case Op.orbit: {
-        const m = decode<{ room: string; active: number; time: number; slots: SlotChange[] }>(schema, bytes, 1);
+        const m = decode<{ room: string; active: number; time: number; seed: number; slots: SlotChange[] }>(schema, bytes, 1);
         const orbit: OrbitSync =
-          m.active === 1 ? { active: true, start: m.time, slots: m.slots } : { active: false, at: m.time };
+          m.active === 1 ? { active: true, start: m.time, slots: m.slots } : { active: false, at: m.time, seed: m.seed };
         return { t: "orbit", room: m.room, orbit };
       }
       case Op.slots:

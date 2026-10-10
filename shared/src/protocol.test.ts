@@ -70,8 +70,8 @@ test("server messages round-trip", () => {
     { t: "poll", poll },
     { t: "poll", poll: { ...poll, open: false, counts: [12, 30, 0] } },
     { t: "players", players: [player], missing: [4, 5] },
-    { t: "orbit", active: true, ...orbit },
-    { t: "orbit", active: false, start: 1, now: 2, slots: [] },
+    { t: "orbit", active: true, seed: 0, ...orbit },
+    { t: "orbit", active: false, seed: 4_000_000_123, start: 1, now: 2, slots: [] },
   ];
   for (const m of messages) assert.deepEqual(decodeServerMessage(encodeServerMessage(m)), m);
 });

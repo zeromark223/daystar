@@ -153,9 +153,11 @@ export type ServerMessage =
   | { t: "players"; players: PlayerInfo[]; missing: number[] }
   /**
    * The host gathered everyone (`active`, with every seat) or let them go: then
-   * `now` is the moment of release, where everyone stays.
+   * `now` is the moment of release, everyone goes back to where they were before
+   * the gather (each client gets a FRESH_VIEW of who is around its spot), and
+   * `seed` orders the teleports the same way on every screen.
    */
-  | ({ t: "orbit"; active: boolean } & OrbitState);
+  | ({ t: "orbit"; active: boolean; seed: number } & OrbitState);
 
 // ------------------------------------------------------------------ positions
 
@@ -249,6 +251,9 @@ const Op = {
   // server -> client
   orbit: 26,
 } as const;
+
+/** `view.from` for a whole new view (after a release): anyone not listed is out of view. */
+export const FRESH_VIEW = 0xffff;
 
 /** At most this many ids per "who" (and players per answer). */
 export const MAX_WHO_IDS = 255;
@@ -374,7 +379,7 @@ const Schemas: Record<number, Struct> = {
   [Op.players]: { players: Type.Object8, players_Struct: PlayerInfoStruct, missing: Type.Array8, missing_Type: Type.UInt16 },
   [Op.gather]: {},
   [Op.release]: {},
-  [Op.orbit]: { active: Type.UInt8, ...OrbitStruct },
+  [Op.orbit]: { active: Type.UInt8, seed: Type.UInt32, ...OrbitStruct },
 };
 
 // ------------------------------------------------------------------ wire <-> message
@@ -635,8 +640,8 @@ export function decodeServerMessage(bytes: Uint8Array): ServerMessage | null {
         return { t: "players", players: m.players.map(infoFromWire), missing: m.missing };
       }
       case Op.orbit: {
-        const m = decode<OrbitState & { active: number }>(schema, bytes, 1);
-        return { t: "orbit", start: m.start, now: m.now, slots: m.slots, active: m.active === 1 };
+        const m = decode<OrbitState & { active: number; seed: number }>(schema, bytes, 1);
+        return { t: "orbit", start: m.start, now: m.now, slots: m.slots, active: m.active === 1, seed: m.seed };
       }
       default:
         return null;

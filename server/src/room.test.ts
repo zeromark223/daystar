@@ -3,12 +3,14 @@ import { test } from "node:test";
 import {
   decodeServerMessage,
   encodeClientMessage,
+  FRESH_VIEW,
   quantize,
   type ClientMessage,
   type ServerMessage,
 } from "../../shared/src/protocol.ts";
 import { POLL_COUNT_MS, pollZones } from "../../shared/src/poll.ts";
-import { orbitPosition, STAGE_SLOTS } from "../../shared/src/orbit.ts";
+import { STAGE_SLOTS } from "../../shared/src/orbit.ts";
+import { cellOf, inView } from "../../shared/src/aoi.ts";
 import { Room, type PeerEvents } from "./room.ts";
 
 
@@ -47,6 +49,9 @@ class FakeSocket {
 
 const byNumber = (a: number, b: number) => a - b;
 
+/** Newcomers appear together (in each other's view) unless a test wants the emptiest spot. */
+const together = () => ({ x: quantize(6200 + Math.random() * 200), y: quantize(5000 + Math.random() * 200) });
+
 /** RoomSync members a test does not watch. */
 const quietSync = {
   joined() {},
@@ -83,7 +88,7 @@ function fakeTopic() {
 }
 
 function setup(topic?: ReturnType<typeof fakeTopic>) {
-  const room = new Room("test", { onEmpty: () => {}, publish: topic?.publish ?? null });
+  const room = new Room("test", { onEmpty: () => {}, publish: topic?.publish ?? null, spawn: together });
   const tick = () => (room as unknown as { tick(): void }).tick();
   const sockets = ["Ann", "Ben", "Cat"].map((name) => {
     const s = new FakeSocket();
@@ -202,6 +207,7 @@ test("joins and leaves in one tick share a frame; a join and leave within it can
 function syncedRoom() {
   const sent = { joined: [] as number[], left: [] as number[], moves: [] as number[][], chat: [] as string[] };
   const room = new Room("sync", {
+    spawn: together,
     onEmpty: () => {},
     sync: {
       ...quietSync,
@@ -353,7 +359,7 @@ test("a migrating player joins where it was, without a second join announcement"
 const HOST_KEY = "secret-key";
 
 function hostedRoom(opts: { sync?: ConstructorParameters<typeof Room>[1]["sync"] } = {}) {
-  const room = new Room("hosted", { onEmpty: () => {}, isHostKey: (k) => k === HOST_KEY, sync: opts.sync });
+  const room = new Room("hosted", { onEmpty: () => {}, isHostKey: (k) => k === HOST_KEY, sync: opts.sync, spawn: together });
   /** Run a tick `later` ms from now (idle-room voice waits VOICE_FLUSH_MS). */
   const tick = (later = 0) => (room as unknown as { tick(now: number): void }).tick(Date.now() + later);
   const join = (name: string, hostKey = "", id?: number) => {
@@ -595,7 +601,7 @@ class CountingSocket {
 /** A room with `n` players on a fake topic; `a` (the host) and `b` (decoded) land in groups 0 and 1. */
 function bigRoom(n: number) {
   const topic = fakeTopic();
-  const room = new Room("big", { onEmpty: () => {}, publish: topic.publish, isHostKey: (k) => k === HOST_KEY });
+  const room = new Room("big", { onEmpty: () => {}, publish: topic.publish, isHostKey: (k) => k === HOST_KEY, spawn: together });
   const tick = (later = 0) => (room as unknown as { tick(now: number): void }).tick(Date.now() + later);
   const watch = (name: string, hostKey = "") => {
     const s = new FakeSocket();
@@ -690,6 +696,7 @@ test("a fixed 40 Hz x 2 groups schedule: 20 Hz per player, half per tick, mesh a
   const meshMoves: number[][] = [];
   const noop = () => {};
   const room = new Room("ab", {
+    spawn: together,
     onEmpty: noop,
     schedule: { tickHz: 40, groups: 2 },
     sync: {
@@ -1009,24 +1016,52 @@ test("in orbit: newcomers get a seat, new speakers move to the stage, the host l
   assert.ok(again?.t === "welcome" && again.orbit !== null);
 });
 
-test("release: everyone stays where the orbit had them, and can walk on from there", () => {
+test("release: everyone goes back to where they were, with a fresh view and a shared seed", () => {
   const { tick, join, everyone } = hostedRoom();
   const host = join("Hana", HOST_KEY);
   const a = join("Ann");
-  everyone(host.s, a.s);
+  const b = join("Ben");
+  everyone(host.s, a.s, b.s);
+  const home = { x: a.self.x, y: a.self.y };
   host.s.deliver({ t: "gather" });
-  const start = host.s.take().find((m) => m.t === "orbit");
-  assert.ok(start?.t === "orbit");
-  const seat = start.slots.find((s) => s.id === a.self.id)!.slot;
-  a.s.take();
+  everyone(host.s, a.s, b.s);
+  // Someone arrives during the orbit: its home is where it arrived, not its seat.
+  const late = join("Cat");
+  late.s.take();
   host.s.deliver({ t: "release" });
-  const end = a.s.take().find((m) => m.t === "orbit");
-  assert.ok(end?.t === "orbit" && !end.active);
-  const at = orbitPosition(seat, ((end.now - start.start + 2 ** 32) % 2 ** 32) / 1000);
-  // From exactly that spot a step is accepted (no correction) and seen by others.
-  a.s.deliver({ t: "move", x: quantize(at.x) + 2, y: quantize(at.y), dir: "east", moving: true });
+
+  const got = a.s.take();
+  assert.deepEqual(got.map((m) => m.t), ["orbit", "view"]);
+  const [end, view] = got;
+  assert.ok(end.t === "orbit" && !end.active && Number.isInteger(end.seed));
+  const seed = end.t === "orbit" ? end.seed : -1;
+  assert.ok(view.t === "view" && view.from === FRESH_VIEW);
+  const me = view.t === "view" ? view.players.find((p) => p.id === a.self.id) : undefined;
+  assert.deepEqual(me && [me.x, me.y], [home.x, home.y]);
+  // Every client gets the same seed.
+  const lateEnd = late.s.take().find((m) => m.t === "orbit");
+  assert.equal(lateEnd?.t === "orbit" && lateEnd.seed, seed);
+
+  // From home a step is accepted (no correction) and seen by others nearby.
+  a.s.deliver({ t: "move", x: home.x + 2, y: home.y, dir: "east", moving: true });
   tick(30);
   assert.deepEqual(a.s.take().filter((m) => m.t === "correction"), []);
-  const seen = snapshotsOf(host.s.take()).flatMap((m) => m.players).find((p) => p.id === a.self.id);
-  assert.deepEqual(seen && [seen.x, seen.y], [quantize(at.x) + 2, quantize(at.y)]);
+  const seen = snapshotsOf(b.s.take()).flatMap((m) => m.players).find((p) => p.id === a.self.id);
+  assert.deepEqual(seen && [seen.x, seen.y], [home.x + 2, home.y]);
+});
+
+
+test("newcomers appear where the room is emptiest", () => {
+  const room = new Room("spread", { onEmpty: () => {} });
+  // A crowd of players (of another server) all in one spot.
+  for (let i = 0; i < 40; i++) room.remoteJoined(2, { ...remoteInfo, id: 100 + i, x: 6200 + (i % 8) * 20, y: 5000 + (i >> 3) * 20 });
+  for (let n = 0; n < 5; n++) {
+    const s = new FakeSocket();
+    s.events = room.accept(s);
+    s.deliver({ t: "join", name: `New ${n}`, appearance: 0, hostKey: "" });
+    const w = s.take().find((m) => m.t === "welcome");
+    const me = w?.t === "welcome" ? w.players.find((p) => p.id === w.selfId)! : null!;
+    // Nowhere near the crowd.
+    assert.equal(inView(6260, 5040, cellOf(me.x, me.y)), false, `spawned at ${me.x},${me.y}`);
+  }
 });

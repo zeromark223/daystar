@@ -35,6 +35,7 @@ import {
   snapshotEntry,
   snapshotTail,
   quantize,
+  FRESH_VIEW,
   type ChatMessage,
   type OrbitState,
   type SlotChange,
@@ -50,6 +51,10 @@ const CHAT_BURST = 5;
 const CHAT_WINDOW_MS = 5000;
 /** A player asked to migrate is not asked again for this long (and stays if it never moves). */
 const MIGRATE_RETRY_MS = 30_000;
+/** Newcomers: spots tried for the emptiest one, between these distances from the sun (the bright part). */
+const SPAWN_SAMPLES = 24;
+const SPAWN_MIN_R = 700;
+const SPAWN_MAX_R = 2_800;
 /** A player may ask "who" this often. */
 const WHO_MIN_MS = 250;
 /** Voice frames held for one tick at most (a tick normally carries 2-3 per speaker). */
@@ -97,7 +102,7 @@ interface Pending {
 }
 
 /** Orbit mode between servers: started (with every seat), or released at `at` (Unix ms). */
-export type OrbitSync = { active: true; start: number; slots: SlotChange[] } | { active: false; at: number };
+export type OrbitSync = { active: true; start: number; slots: SlotChange[] } | { active: false; at: number; seed: number };
 
 /** Events the runtime adapter forwards to the room for one peer. */
 export interface PeerEvents {
@@ -189,6 +194,8 @@ export interface RoomOptions {
   keepChatHistory?: boolean;
   /** Whether a key presented on join is this room's host key. Without it nobody can be host. */
   isHostKey?(key: string): boolean;
+  /** Where newcomers appear instead of the emptiest spot (tests that want players together). */
+  spawn?(): { x: number; y: number };
   /**
    * A fixed schedule instead of the automatic one (A/B tests): the room ticks
    * `tickHz` times a second and serves `groups` groups in turn, so each player
@@ -241,7 +248,12 @@ export class Room {
    */
   private readonly pollMovers = new Set<number>();
   /** Orbit mode: when it started (Unix ms) and everyone's seat. Nobody moves meanwhile. */
-  private orbit: { start: number; slots: Map<number, number> } | null = null;
+  private orbit: {
+    start: number;
+    slots: Map<number, number>;
+    /** Where each player was before the gather (or arrived meanwhile): the release sends them back. */
+    homes: Map<number, { x: number; y: number; dir: Direction }>;
+  } | null = null;
   private ticker: ReturnType<typeof setInterval> | null = null;
   /** Local players asked to migrate, and when they may be asked again. */
   private readonly migrating = new Map<number, number>();
@@ -458,7 +470,7 @@ export class Room {
   /** The host (on another server) gathered everyone or let them go. */
   remoteOrbit(orbit: OrbitSync): void {
     if (orbit.active) this.startOrbit(orbit.start, new Map(orbit.slots.map((s) => [s.id, s.slot])));
-    else if (this.orbit) this.releaseOrbit(orbit.at);
+    else if (this.orbit) this.releaseOrbit(orbit.at, orbit.seed);
   }
 
   /** Seats another server gave its players. */
@@ -666,8 +678,35 @@ export class Room {
   }
 
   /** Somewhere near a player of the room (never the host, who sits in the sun). */
+  /**
+   * Newcomers go where the room is emptiest, to spread players over the map
+   * (fewer players in each other's view, smaller snapshots): of SPAWN_SAMPLES
+   * random spots in the bright part of the world, the one with the fewest
+   * players in view.
+   */
   private spawnFor(id: number): { x: number; y: number } {
-    return spawnPoint([...this.players.values()].filter((p) => p.id !== id && p.role !== "host"));
+    if (this.opts.spawn) return this.opts.spawn();
+    let best: { x: number; y: number } | null = null;
+    let fewest = Infinity;
+    for (let i = 0; i < SPAWN_SAMPLES; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      // Uniform over the ring's area.
+      const r = Math.sqrt(SPAWN_MIN_R ** 2 + Math.random() * (SPAWN_MAX_R ** 2 - SPAWN_MIN_R ** 2));
+      const x = quantize(WORLD_CENTER.x + Math.cos(angle) * r);
+      const y = quantize(WORLD_CENTER.y + Math.sin(angle) * r);
+      if (!canBeAt(x, y)) continue;
+      let around = 0;
+      for (const cell of cellsInView(cellOf(x, y))) {
+        for (const q of this.grid.get(cell) ?? []) if (q.id !== id && inView(q.x, q.y, cellOf(x, y))) around++;
+        if (around >= fewest) break;
+      }
+      if (around < fewest) {
+        fewest = around;
+        best = { x, y };
+        if (around === 0) break;
+      }
+    }
+    return best ?? spawnPoint([...this.players.values()].filter((p) => p.id !== id && p.role !== "host"));
   }
 
   /** Only one host at a time: whoever presented the key last wins (e.g. a second tab). */
@@ -775,43 +814,75 @@ export class Room {
   private handleRelease(requester: Player): void {
     if (requester.role !== "host" || !this.orbit) return;
     const at = Date.now();
-    this.releaseOrbit(at);
-    this.opts.sync?.orbit({ active: false, at });
+    // Orders the teleports on every screen (clients hash each seat with it).
+    const seed = (Math.random() * 0x1_0000_0000) >>> 0;
+    this.releaseOrbit(at, seed);
+    this.opts.sync?.orbit({ active: false, at, seed });
   }
 
   private startOrbit(start: number, slots: Map<number, number>): void {
-    this.orbit = { start, slots };
+    const homes = new Map<number, { x: number; y: number; dir: Direction }>();
+    for (const id of slots.keys()) {
+      const p = this.players.get(id);
+      if (p) homes.set(id, { x: p.x, y: p.y, dir: p.dir });
+    }
+    this.orbit = { start, slots, homes };
     for (const g of this.pending) g.slots.clear();
-    this.broadcast({ t: "orbit", active: true, ...this.orbitWire()! });
+    this.broadcast({ t: "orbit", active: true, seed: 0, ...this.orbitWire()! });
   }
 
   /**
-   * Everyone stays where their orbit had them at `at`. Clients compute the same
-   * spots, so nobody is told; we only refile players for the area of interest.
+   * Everyone goes back to where they were before the gather (newcomers to where
+   * they arrived), so the room is as spread out as before rather than crowded
+   * round the sun. Each of our players gets a fresh view of who is around its
+   * spot (by area of interest, not the whole room); clients play the teleports in
+   * the order `seed` gives. Moves of our players reach peers with the next tick.
    */
-  private releaseOrbit(at: number): void {
+  private releaseOrbit(at: number, seed: number): void {
     const orbit = this.orbit!;
     for (const [id, slot] of orbit.slots) {
       const p = this.players.get(id);
       if (!p) continue;
-      const spot = orbitPosition(slot, (at - orbit.start) / 1000);
-      p.x = quantize(spot.x);
-      p.y = quantize(spot.y);
-      p.dir = spot.dir;
+      const home = orbit.homes.get(id) ?? orbitPosition(slot, (at - orbit.start) / 1000);
+      p.x = quantize(home.x);
+      p.y = quantize(home.y);
+      p.dir = home.dir;
       p.moving = false;
       p.lastMoveAt = p.movedAt = at;
       this.file(p);
-      if (p.owner === null) this.moveViewer(p, false);
+      if (p.owner === null) {
+        this.moveViewer(p, false);
+        if (this.opts.sync) this.tickChanged.add(p);
+      }
     }
     this.orbit = null;
     for (const g of this.pending) g.slots.clear();
-    this.broadcast({ t: "orbit", active: false, start: orbit.start % 0x1_0000_0000, now: at % 0x1_0000_0000, slots: [] });
+    this.broadcast({
+      t: "orbit",
+      active: false,
+      seed,
+      start: orbit.start % 0x1_0000_0000,
+      now: at % 0x1_0000_0000,
+      slots: [],
+    });
+    for (const p of this.players.values()) if (p.owner === null) this.sendFreshView(p);
+  }
+
+  /** Everyone in view of `p`'s cell (itself included), and the host and speakers wherever they are. */
+  private sendFreshView(p: Player): void {
+    const players: PlayerState[] = [];
+    for (const q of this.players.values()) {
+      if (q === p || q.role !== "guest" || inView(q.x, q.y, p.cell)) players.push(toState(q));
+    }
+    send(p.peer!, { t: "view", from: FRESH_VIEW, to: p.cell, players });
   }
 
   /** Give a local player a seat (`slot`, or the best free one for its role) and tell everyone. */
   private seat(p: Player, slot?: number): void {
     const orbit = this.orbit!;
     orbit.slots.delete(p.id);
+    // A newcomer's home is where it arrived; a reseated player keeps its own.
+    if (!orbit.homes.has(p.id)) orbit.homes.set(p.id, { x: p.x, y: p.y, dir: p.dir });
     const seat = slot ?? freeSlot(p.role === "speaker", orbit.slots.values());
     orbit.slots.set(p.id, seat);
     const spot = orbitPosition(seat, (Date.now() - orbit.start) / 1000);
