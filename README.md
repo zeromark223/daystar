@@ -86,7 +86,9 @@ tools/          load test
   byte on the wire. Bodies are painted in code (`client/src/game/bodies.ts`) and
   animated with transforms only; most wear a face that blinks, looks where it goes and
   opens its mouth with the speaker's voice.
-- Newcomers appear near someone already in the room, or on a ring around the sun.
+- Newcomers appear where the room is emptiest (of 24 random spots in the bright
+  part of the map, the one with the fewest players in view), which spreads the
+  room out and keeps snapshots small.
 - Sky, nebulae, sun, glows and trails are generated at startup (canvas gradients and
   PixiJS graphics); the minimap and wheel / `+` `-` zoom help finding people.
 - On touch screens, dragging anywhere brings up a thumbstick under the finger (slower
@@ -148,9 +150,14 @@ tools/          load test
   players (301 players in orbit ran at 28 fps with all of them, the fly-in at
   35); now all 301 have one and everything runs at 60 fps, with a budget of 400
   left for very big rooms
-  (desktop Chrome). Nobody steers until the host releases them, and then
-  everyone stays where its orbit had them (clients compute the same spots, so
-  nothing is sent). Polls are off meanwhile; the orbit stays if the host leaves.
+  (desktop Chrome). Nobody steers until the host releases them. Then everyone goes
+  back to where it was before the gather (newcomers to where they arrived), so the
+  room is as spread out as before instead of crowding the host's part of the map;
+  each client gets a fresh view of who is around its own spot (area of interest,
+  not the whole room). On screen players fade out of their seats one by one and
+  appear at home, like a teleport, in an order a seed from the server gives, so
+  every screen plays the same sequence (opacity only, cheap everywhere). Polls are
+  off meanwhile; the orbit stays if the host leaves.
 - **Tutorial:** a short guided tour the first time someone joins as a guest, becomes a
   speaker or hosts, with a spotlight on each control. Skip or finish it and the
   browser remembers (local storage); ⚙ Settings → Replay tutorial shows it again.
