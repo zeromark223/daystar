@@ -155,6 +155,8 @@ export class Game {
    */
   private release: {
     at: number;
+    /** The newest server time we had when it came: samples after it are from home on. */
+    serverAt: number;
     seed: number;
     homes: Map<number, PlayerState> | null;
     /** Left their seat (vanished) / appeared at home. */
@@ -449,7 +451,7 @@ export class Game {
       a.setStreak(false);
       a.setReveal(1);
     }
-    this.release = { at: performance.now(), seed: state.seed, homes: null, gone: new Set(), arrived: new Set() };
+    this.release = { at: performance.now(), serverAt: this.clock.latest, seed: state.seed, homes: null, gone: new Set(), arrived: new Set() };
     this.gatherFrames = [];
     this.statsLabel = "release";
   }
@@ -474,7 +476,7 @@ export class Game {
    * there if it is around us, out of view otherwise). Returns true once it has
    * left its seat.
    */
-  private releasePlayer(id: number, slot: number, a: Avatar, now: number): boolean {
+  private releasePlayer(id: number, slot: number, a: Avatar, now: number, renderTime: number): boolean {
     const release = this.release!;
     const since = now - release.at;
     const color = appearanceOf(a.appearance).color;
@@ -511,17 +513,21 @@ export class Game {
         // The server has us exactly here; the next move starts from it.
         this.lastSent = { x: home.x, y: home.y, dir: home.dir, moving: false };
         this.lastSentAt = now;
+      } else if (a.lastSampleAt > release.serverAt) {
+        // It may have walked on since the server sent it home: appear where it is now.
+        a.clearTrail();
+        a.interpolate(renderTime);
       } else {
         a.teleport(this.clock.latest, { ...home, moving: false });
       }
       a.inView = true;
       // ...and a flash where it appears.
-      if (this.visible(home.x, home.y)) this.teleports.spawn(home.x, home.y, color, false, now);
+      if (this.visible(a.x, a.y)) this.teleports.spawn(a.x, a.y, color, false, now);
     }
     const home = release.homes?.get(id);
     if (home) {
-      a.x = home.x;
-      a.y = home.y;
+      // Once home it is free: we walk on our own, others follow what the server says.
+      if (id !== this.selfId) a.interpolate(renderTime);
       const arrivedAt = ARRIVE_AT_MS + this.seatHash(slot, release.seed ^ ARRIVAL_SALT) * ARRIVE_SPREAD_MS;
       a.setReveal(Math.min(1, Math.max(0, (since - arrivedAt) / RELEASE_FADE_IN_MS)));
     }
@@ -541,7 +547,7 @@ export class Game {
   }
 
   /** Orbit mode: put everyone with a seat where its orbit (or its flight to it) has it now. */
-  private placeInOrbit(now: number): void {
+  private placeInOrbit(now: number, renderTime: number): void {
     const orbit = this.orbit!;
     const serverNow = this.clock.serverNow(now);
     if (Number.isNaN(serverNow)) return;
@@ -557,7 +563,7 @@ export class Game {
     for (const [id, slot] of orbit.slots) {
       const a = this.avatars.get(id);
       if (!a) continue;
-      if (this.release && this.releasePlayer(id, slot, a, now)) continue;
+      if (this.release && this.releasePlayer(id, slot, a, now, renderTime)) continue;
       seated++;
       const seat = orbitPosition(slot, seconds);
       let { x, y } = seat;
@@ -857,7 +863,7 @@ export class Game {
     for (const avatar of this.avatars.values()) {
       if (avatar.id !== this.selfId && !this.orbit?.slots.has(avatar.id)) avatar.interpolate(renderTime);
     }
-    if (this.orbit) this.placeInOrbit(now);
+    if (this.orbit) this.placeInOrbit(now, renderTime);
     this.corona.update(now, this.world.scale.x);
     this.teleports.update(now, this.world.scale.x);
     this.updateCamera();

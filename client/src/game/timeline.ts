@@ -121,6 +121,11 @@ export class Track {
     return this.samples.length === 0;
   }
 
+  /** The newest position. */
+  get last(): Sample | undefined {
+    return this.samples.at(-1);
+  }
+
   clear(): void {
     this.samples.length = 0;
     this.vx = this.vy = 0;

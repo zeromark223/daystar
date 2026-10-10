@@ -1,6 +1,6 @@
 import { Container, Graphics, Mesh, Point, RopeGeometry, Sprite, Text } from "pixi.js";
 import { appearanceOf, type AppearanceId, type BodyKind } from "../../../shared/src/appearance.ts";
-import { SUN_RADIUS, WORLD_CENTER } from "../../../shared/src/constants.ts";
+import { MOVE_SPEED, SUN_RADIUS, WORLD_CENTER } from "../../../shared/src/constants.ts";
 import type { Direction } from "../../../shared/src/direction.ts";
 import type { PlayerInfo } from "../../../shared/src/protocol.ts";
 import { ROLE_LABELS, type Role } from "../../../shared/src/roles.ts";
@@ -16,6 +16,10 @@ const BUBBLE_MAX_WIDTH = 220;
 /** Trail: positions kept while moving, and how often one is recorded. */
 const TRAIL_POINTS = 14;
 const TRAIL_EVERY_MS = 45;
+/** Extra distance a new position may be beyond walking range before it counts as a jump. */
+const JUMP_SLACK = 80;
+/** After a silence, a new position farther than this from the last one is a reappearance. */
+const STEP_SLACK = 45;
 /**
  * The trail is a rope mesh of this many points, resampled each frame from the
  * recorded points, so its taper (in the texture) always spans the whole trail.
@@ -286,9 +290,30 @@ export class Avatar {
     this.pushSample(t, s);
   }
 
-  /** A position the server had at server time `t`. */
+  /**
+   * A position the server had at server time `t`. If we missed what happened in
+   * between (the player left our area of interest and came back elsewhere), it
+   * appears there instead of sliding across with a long trail: when it is
+   * farther than it could have walked, or when we heard nothing for a while and
+   * it is more than a step away (a player standing still and setting off is
+   * within a step, and still starts smoothly).
+   */
   pushSample(t: number, s: { x: number; y: number; dir: Direction; moving: boolean }): void {
+    const last = this.track.last;
+    if (last) {
+      const dist = Math.hypot(s.x - last.x, s.y - last.y);
+      const gap = Math.max(0, t - last.t);
+      if (dist > (MOVE_SPEED * gap) / 1000 + JUMP_SLACK || (gap > Track.idleGapMs && dist > STEP_SLACK)) {
+        this.teleport(t, s);
+        return;
+      }
+    }
     this.track.push({ t, x: s.x, y: s.y, dir: s.dir, moving: s.moving });
+  }
+
+  /** Server time of the newest position we have (-Infinity for none). */
+  get lastSampleAt(): number {
+    return this.track.last?.t ?? -Infinity;
   }
 
   /** Place a remote player where it was at server time `t` (see PlayoutClock). */
