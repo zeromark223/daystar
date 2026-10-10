@@ -80,15 +80,27 @@ interface GatherStats {
 const TRAIL_BUDGET = 400;
 
 /**
- * Release: each player fades out of its seat at a moment between 0 and
- * RELEASE_SPREAD_MS that the server's seed gives (the same on every screen), and
- * fades in where it was before the gather. Opacity only: cheap on any device.
+ * Release, in two acts on the same clock for every screen. First everyone
+ * vanishes from its seat, one by one in an order the server's seed gives (within
+ * RELEASE_SPREAD_MS, fading out over RELEASE_FADE_OUT_MS with a flash); the rings
+ * stand empty for a moment while the camera goes home; then everyone appears
+ * where it was before the gather, in another order from the same seed (within
+ * ARRIVE_SPREAD_MS, fading in with a flash). Opacity and pooled sprites only.
  */
 const RELEASE_SPREAD_MS = 1_400;
 const RELEASE_FADE_OUT_MS = 280;
+const RELEASE_PAUSE_MS = 400;
+/** When the arrivals start, after the release began. */
+const ARRIVE_AT_MS = RELEASE_SPREAD_MS + RELEASE_FADE_OUT_MS + RELEASE_PAUSE_MS;
+const ARRIVE_SPREAD_MS = 1_200;
 const RELEASE_FADE_IN_MS = 350;
+const RELEASE_END_MS = ARRIVE_AT_MS + ARRIVE_SPREAD_MS + RELEASE_FADE_IN_MS;
+/** The camera starts for home this long before the arrivals. */
+const CAMERA_HOME_LEAD_MS = 600;
 /** If the fresh view never comes (a dropped frame), stop waiting after this. */
 const RELEASE_GIVE_UP_MS = 4_000;
+/** Mixed into the seed for the arrival order, so it differs from the departures'. */
+const ARRIVAL_SALT = 0x5bd1e995;
 
 /** A player changing seat mid-orbit (made speaker, ...) glides there in this long. */
 const RESEAT_MS = 1_200;
@@ -141,8 +153,14 @@ export class Game {
    * goes (our fresh view: who is around our spot; null until it arrives) and who
    * has already left their seat. The orbit lasts until everyone has.
    */
-  private release: { at: number; seed: number; homes: Map<number, PlayerState> | null; gone: Set<number> } | null =
-    null;
+  private release: {
+    at: number;
+    seed: number;
+    homes: Map<number, PlayerState> | null;
+    /** Left their seat (vanished) / appeared at home. */
+    gone: Set<number>;
+    arrived: Set<number>;
+  } | null = null;
   /** When the sun flares as everyone bursts out to their seats (local time). */
   private flareAt = 0;
   /**
@@ -314,7 +332,7 @@ export class Game {
 
   /** In orbit (we cannot steer): until our own teleport home when released. */
   get orbiting(): boolean {
-    return this.orbit !== null && !this.release?.gone.has(this.selfId);
+    return this.orbit !== null && !this.release?.arrived.has(this.selfId);
   }
 
   /**
@@ -431,7 +449,7 @@ export class Game {
       a.setStreak(false);
       a.setReveal(1);
     }
-    this.release = { at: performance.now(), seed: state.seed, homes: null, gone: new Set() };
+    this.release = { at: performance.now(), seed: state.seed, homes: null, gone: new Set(), arrived: new Set() };
     this.gatherFrames = [];
     this.statsLabel = "release";
   }
@@ -441,61 +459,71 @@ export class Game {
     return x >= v.x0 && x <= v.x1 && y >= v.y0 && y <= v.y1;
   }
 
-  /** When seat `slot` teleports away, after the release started: a hash of the seat and the seed. */
-  private releaseDelay(slot: number, seed: number): number {
+  /** 0..1 from seat `slot` and `seed`: the same on every screen. */
+  private seatHash(slot: number, seed: number): number {
     let h = Math.imul(slot + 1, 0x9e3779b1) ^ seed;
     h = Math.imul(h ^ (h >>> 16), 0x85ebca6b);
     h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
     h ^= h >>> 16;
-    return ((h >>> 0) / 0x1_0000_0000) * RELEASE_SPREAD_MS;
+    return (h >>> 0) / 0x1_0000_0000;
   }
 
   /**
-   * Release, for one seated player: still in its seat (fading out), or gone home
-   * (fading in there if it is around us, out of view otherwise). Returns true once
-   * it has left its seat.
+   * Release, for one seated player: in its seat (fading out when its turn
+   * comes), gone (nowhere, while the rings empty), or arrived home (fading in
+   * there if it is around us, out of view otherwise). Returns true once it has
+   * left its seat.
    */
   private releasePlayer(id: number, slot: number, a: Avatar, now: number): boolean {
     const release = this.release!;
-    const t = now - release.at - this.releaseDelay(slot, release.seed);
+    const since = now - release.at;
+    const color = appearanceOf(a.appearance).color;
     if (!release.gone.has(id)) {
-      const waited = now - release.at > RELEASE_GIVE_UP_MS;
-      if (t < RELEASE_FADE_OUT_MS || (!release.homes && !waited)) {
+      const t = since - this.seatHash(slot, release.seed) * RELEASE_SPREAD_MS;
+      if (t < RELEASE_FADE_OUT_MS) {
         a.setReveal(1 - Math.min(1, Math.max(0, t) / RELEASE_FADE_OUT_MS));
         return false;
       }
+      // Vanished, with a flash where it was.
       release.gone.add(id);
-      a.setNameVisible(true);
-      const color = appearanceOf(a.appearance).color;
-      // A flash where it vanishes from its seat...
       if (this.visible(a.x, a.y)) this.teleports.spawn(a.x, a.y, color, true, now);
+      a.setReveal(0);
+      a.setNameVisible(true);
+      a.clearTrail();
+    }
+    if (!release.arrived.has(id)) {
+      const due = ARRIVE_AT_MS + this.seatHash(slot, release.seed ^ ARRIVAL_SALT) * ARRIVE_SPREAD_MS;
+      // Our own spot first, so the camera can go there while the rings are empty.
       const home = release.homes?.get(id);
+      if (id === this.selfId && home && a.x !== home.x) {
+        a.x = home.x;
+        a.y = home.y;
+      }
+      if (since < due || (!release.homes && since < RELEASE_GIVE_UP_MS)) return true;
+      release.arrived.add(id);
       if (!home) {
         a.inView = false;
         a.setReveal(1);
         return true;
       }
       if (id === this.selfId) {
-        a.x = home.x;
-        a.y = home.y;
         a.setMotion(home.dir, false);
-        a.clearTrail();
         // The server has us exactly here; the next move starts from it.
         this.lastSent = { x: home.x, y: home.y, dir: home.dir, moving: false };
         this.lastSentAt = now;
-        this.overviewTarget = 0;
       } else {
         a.teleport(this.clock.latest, { ...home, moving: false });
       }
       a.inView = true;
-      // ...and one where it appears.
+      // ...and a flash where it appears.
       if (this.visible(home.x, home.y)) this.teleports.spawn(home.x, home.y, color, false, now);
     }
     const home = release.homes?.get(id);
     if (home) {
       a.x = home.x;
       a.y = home.y;
-      a.setReveal(Math.min(1, Math.max(0, (t - RELEASE_FADE_OUT_MS) / RELEASE_FADE_IN_MS)));
+      const arrivedAt = ARRIVE_AT_MS + this.seatHash(slot, release.seed ^ ARRIVAL_SALT) * ARRIVE_SPREAD_MS;
+      a.setReveal(Math.min(1, Math.max(0, (since - arrivedAt) / RELEASE_FADE_IN_MS)));
     }
     return true;
   }
@@ -585,8 +613,13 @@ export class Game {
     if (coronaDone) this.coronaAt = -1;
     // (A release's frames are reported when it finishes.)
     if (this.gatherFrames && !this.release && this.flights.size === 0 && coronaDone) this.endGatherStats();
-    if (this.release && seated === 0 && now - this.release.at > RELEASE_SPREAD_MS + RELEASE_FADE_OUT_MS + RELEASE_FADE_IN_MS) {
-      this.finishRelease();
+    if (this.release) {
+      const since = now - this.release.at;
+      // While the rings stand empty the camera heads home, to watch everyone arrive.
+      if (since > ARRIVE_AT_MS - CAMERA_HOME_LEAD_MS) this.overviewTarget = 0;
+      if (seated === 0 && since > RELEASE_END_MS && this.release.arrived.size >= this.release.gone.size) {
+        this.finishRelease();
+      }
     }
   }
 
@@ -745,7 +778,7 @@ export class Game {
     if (!self || a === self || a.role !== "guest") return 1;
     // In orbit everyone's place is known (their seat), so everyone shows, as
     // the host sees it; the area-of-interest fog would hide the far side of the rings.
-    if (this.orbit?.slots.has(a.id) && !this.release?.gone.has(a.id)) return 1;
+    if (this.orbit?.slots.has(a.id) && !this.release?.arrived.has(a.id)) return 1;
     if (!a.inView) return 0;
     return fogAt(Math.hypot(a.x - self.x, a.y - self.y));
   }

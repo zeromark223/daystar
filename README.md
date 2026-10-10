@@ -154,11 +154,13 @@ tools/          load test
   back to where it was before the gather (newcomers to where they arrived), so the
   room is as spread out as before instead of crowding the host's part of the map;
   each client gets a fresh view of who is around its own spot (area of interest,
-  not the whole room). On screen players fade out of their seats one by one and
-  appear at home, like a teleport, in an order a seed from the server gives, so
-  every screen plays the same sequence, with a flash and an opening ring where each
-  vanishes and where it appears (a pool of sprites, at most 200 at once and only
-  on screen: a 301-player release runs at 60 fps in desktop Chrome). Polls are
+  not the whole room). On screen the release plays in two acts, timed the same on
+  every client: players vanish from their seats one by one (a flash and an opening
+  ring each), in an order a seed from the server gives, until the rings stand
+  empty; the camera goes home; then everyone appears where it was, one by one in
+  another order from the same seed, with a flash where each lands. You can steer
+  again when you appear. Pooled sprites, at most 200 at once and only on screen:
+  a 301-player release runs at 60 fps in desktop Chrome. Polls are
   off meanwhile; the orbit stays if the host leaves.
 - **Tutorial:** a short guided tour the first time someone joins as a guest, becomes a
   speaker or hosts, with a spotlight on each control. Skip or finish it and the
