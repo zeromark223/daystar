@@ -583,7 +583,8 @@ export class Game {
     const coronaDone =
       this.coronaAt < 0 || sinceCorona >= Math.max(CORONA_MS_TOTAL, CORONA_BURST_AT + CORONA_OUT_STAGGER_MS + CORONA_OUT_MS);
     if (coronaDone) this.coronaAt = -1;
-    if (this.gatherFrames && this.flights.size === 0 && coronaDone) this.endGatherStats();
+    // (A release's frames are reported when it finishes.)
+    if (this.gatherFrames && !this.release && this.flights.size === 0 && coronaDone) this.endGatherStats();
     if (this.release && seated === 0 && now - this.release.at > RELEASE_SPREAD_MS + RELEASE_FADE_OUT_MS + RELEASE_FADE_IN_MS) {
       this.finishRelease();
     }
