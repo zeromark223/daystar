@@ -267,6 +267,55 @@ button:disabled {
   overflow: hidden;
 }
 
+.chat-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 6px 8px 0;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.chat-tabs button {
+  background: transparent;
+  color: var(--ink-soft);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 4px 10px 6px;
+  font-size: 0.82rem;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.chat-tabs button:hover {
+  color: var(--ink);
+  filter: none;
+}
+
+.chat-tabs button[aria-selected="true"] {
+  color: var(--ink);
+  border-bottom-color: var(--accent);
+}
+
+.chat-tabs .unread {
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+}
+
+/* The tab picks what the log shows; every line stays in it. */
+.chat-log[data-tab="chat"] .system,
+.chat-log[data-tab="system"] li:not(.system) {
+  display: none;
+}
+
 .chat-log {
   list-style: none;
   margin: 0;
@@ -338,6 +387,10 @@ button:disabled {
 
   .chat-log {
     height: 20vh;
+  }
+
+  .chat-tabs button {
+    padding: 4px 6px 6px;
   }
 
   .room-chip #hud-room {

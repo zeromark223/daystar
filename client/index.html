@@ -89,7 +89,16 @@
       <p id="orbit-banner" class="orbit-banner" role="status" hidden>Gathered around the sun · the host will let you go</p>
       <div id="audience" class="audience" role="toolbar" aria-label="Reactions" hidden></div>
       <aside class="chat" aria-label="Chat">
-        <ol id="chat-log" class="chat-log" aria-live="polite"></ol>
+        <div class="chat-tabs" role="tablist" aria-label="Show">
+          <button type="button" role="tab" id="chat-tab-all" data-tab="all" aria-selected="true" aria-controls="chat-log">All</button>
+          <button type="button" role="tab" id="chat-tab-chat" data-tab="chat" aria-selected="false" aria-controls="chat-log">
+            Chat<span class="unread" hidden></span>
+          </button>
+          <button type="button" role="tab" id="chat-tab-system" data-tab="system" aria-selected="false" aria-controls="chat-log">
+            System<span class="unread" hidden></span>
+          </button>
+        </div>
+        <ol id="chat-log" class="chat-log" role="tabpanel" data-tab="all" aria-live="polite"></ol>
         <form id="chat-form" class="chat-form">
           <input id="chat-input" maxlength="280" autocomplete="off" placeholder="Press Enter to chat" />
         </form>
