@@ -460,6 +460,37 @@ By default every bot walks non-stop (worst case). `--moving 0.2` makes each bot 
 a snapshot, which is the lag other players see; it stays meaningful with idle bots,
 unlike snapshot gaps (a room where nobody moves gets no snapshots at all).
 
+### Web UI
+
+The same load test can run as a small web app: pick a scenario in the browser, start
+it, watch the rows and charts live, stop it, download its CSV.
+
+```bash
+LOADTEST_TOKEN=pick-a-secret bun run loadtest:web    # http://localhost:3100
+```
+
+Built-in templates cover the usual runs (smoke test, step ramp, continuous ramp,
+finding the ceiling, small rooms, voice rooms, filling your own room, a quiet
+audience soak). They are read-only; **Clone to edit** copies one into *My
+templates*, kept in the browser's `localStorage` along with the Target and the
+token. The form is generated from the command-line options, and the command it
+amounts to is shown under it, so a run from the UI can be repeated in a terminal.
+
+One run at a time; the bots run where the UI server runs, the browser only drives
+them. The server keeps the last 20 runs in memory.
+
+| Variable | |
+| --- | --- |
+| `LOADTEST_TOKEN` | the UI asks for it (without one, a random token is made and printed at start) |
+| `LOADTEST_PORT` | default 3100 |
+| `LOADTEST_TARGET` | server the UI suggests as Target |
+| `HEALTH_TOKEN` | the target's `/api/health` token, for the server columns (never sent to the browser) |
+
+To run it on Coolify, build from `Dockerfile.loadtest` (it has its own
+`Dockerfile.loadtest.dockerignore`), expose port 3100 and set the variables above
+as secrets. Bots are cheap but not free: give it its own server, or at least other
+cores than the game server it tests.
+
 ## Deploy (Coolify)
 
 Build from the `Dockerfile` (Bun). The container listens on `PORT` (default 3000) and

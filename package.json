@@ -17,6 +17,7 @@
     "typecheck": "tsc -p client && tsc -p server",
     "test": "bun test",
     "loadtest": "bun tools/loadtest.ts",
+    "loadtest:web": "bun tools/loadtest-web/server.ts",
     "cluster": "CLUSTER_SERVERS=4 bun server/src/supervisor.ts"
   },
   "devDependencies": {

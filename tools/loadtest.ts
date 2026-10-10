@@ -11,7 +11,8 @@
  * `bun run loadtest …` works too on Linux and macOS; on Windows Bun's script shell
  * can drop flags, so call the file directly there.
  *
- * Run with --help for the options (USAGE below).
+ * Run with --help for the options (OPTION_SPECS below). The web UI drives the same
+ * runs: bun tools/loadtest-web/server.ts
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
@@ -625,47 +626,79 @@ interface HealthReport {
   samples: StatsSample[];
 }
 
-const USAGE = `Usage: bun tools/loadtest.ts [options]   (or: bun run loadtest [options], not on Windows)
+/** One command-line option: the CLI's parser and help, and the web UI's form, all come from these. */
+export interface OptionSpec {
+  name: string;
+  type: "string" | "boolean";
+  /** Default as typed on the command line (strings), or false for flags. */
+  default?: string | boolean;
+  /** Placeholder for the value in the help, e.g. "<n>". */
+  arg?: string;
+  help: string;
+  /** Only for the command line (the web UI leaves it out). */
+  cliOnly?: boolean;
+  /** Short group name for the web UI's form. */
+  group: "Load" | "Bots" | "Rooms" | "Server" | "Output";
+}
 
-  --steps <n,n,...>    total bot counts to ramp through         (default 50,100,200)
-  --max <n>            instead of steps: add bots without pause (at --ramp) up to n,
-                       then hold --hold seconds; a row every --report-every seconds
-  --report-every <s>   seconds per row with --max                (default 5)
-  --log <file>         also write the rows as CSV                (default
-                       loadtest-logs/<time>-<host>.csv)
-  --no-log             do not write a CSV file
-  --room-size <n>      bots per room; 0 = everyone in one room   (default 0)
-  --hold <s>           seconds at each step; 2nd half measured   (default 20)
-  --ramp <n>           new connections per second                (default 100)
-  --workers <n>        bot processes                             (default 6)
-  --chat-every <s>     seconds between chat messages per bot; 0 = no chat (default 30)
-  --measure-share <s>  share of bots that time moves, snapshot gaps and voice; the
-                       rest only count frames, which keeps bots cheap (default 0.1)
-  --speakers <n>       talkers per room: a host plus n-1 speakers holding a
-                       conversation (real Opus frames); rooms are created with
-                       POST /api/rooms and printed as invite links (default 0)
-  --moving <0..1>      share of time each bot spends walking; the rest it stands
-                       still and sends nothing (default 1 = everyone always walking)
-  --target <url>       test a running server instead of spawning one,
-                       e.g. https://meet.example.com
-  --health-token <s>   token for the server's /api/health, if it sets HEALTH_TOKEN
-                       (default: HEALTH_TOKEN from the environment or .env)
-  --cluster <n>        spawn a local cluster (agent + n servers) instead of one server
-  --capacity <n>       players per server for --cluster          (default 2000)
-  --port <n>           port for the spawned server or agent      (default 3300)
-  --room-prefix <s>    rooms are <prefix>-all or <prefix>-0, -1, ... (default load;
-                       not used with --speakers)
-  --room <id|link>     put every bot in this existing room, e.g. the one you host
-                       (its id, or its invite link); not with --room-size or --speakers
-  --keep-going         continue ramping after a failed step (--max always goes on)
-  --last               reuse the options of the previous run; options given with it
-                       override them, e.g. --last --hold 60
-  -h, --help           show this help`;
+export const OPTION_SPECS: OptionSpec[] = [
+  { name: "steps", type: "string", default: "50,100,200", arg: "<n,n,...>", group: "Load", help: "total bot counts to ramp through" },
+  { name: "max", type: "string", arg: "<n>", group: "Load", help: "instead of steps: add bots without pause (at --ramp) up to n, then hold --hold seconds; a row every --report-every seconds" },
+  { name: "hold", type: "string", default: "20", arg: "<s>", group: "Load", help: "seconds at each step; 2nd half measured" },
+  { name: "ramp", type: "string", default: "100", arg: "<n>", group: "Load", help: "new connections per second" },
+  { name: "report-every", type: "string", default: "5", arg: "<s>", group: "Load", help: "seconds per row with --max" },
+  { name: "keep-going", type: "boolean", default: false, group: "Load", help: "continue ramping after a failed step (--max always goes on)" },
+  { name: "moving", type: "string", default: "1", arg: "<0..1>", group: "Bots", help: "share of time each bot spends walking; the rest it stands still and sends nothing (1 = everyone always walking)" },
+  { name: "chat-every", type: "string", default: "30", arg: "<s>", group: "Bots", help: "seconds between chat messages per bot; 0 = no chat" },
+  { name: "measure-share", type: "string", default: "0.1", arg: "<s>", group: "Bots", help: "share of bots that time moves, snapshot gaps and voice; the rest only count frames, which keeps bots cheap" },
+  { name: "workers", type: "string", default: "6", arg: "<n>", group: "Bots", help: "bot processes" },
+  { name: "room-size", type: "string", default: "0", arg: "<n>", group: "Rooms", help: "bots per room; 0 = everyone in one room" },
+  { name: "speakers", type: "string", default: "0", arg: "<n>", group: "Rooms", help: "talkers per room: a host plus n-1 speakers holding a conversation (real Opus frames); rooms are created with POST /api/rooms and printed as invite links" },
+  { name: "room-prefix", type: "string", default: "load", arg: "<s>", group: "Rooms", help: "rooms are <prefix>-all or <prefix>-0, -1, ... (not used with --speakers)" },
+  { name: "room", type: "string", arg: "<id|link>", group: "Rooms", help: "put every bot in this existing room, e.g. the one you host (its id, or its invite link); not with --room-size or --speakers" },
+  { name: "target", type: "string", arg: "<url>", group: "Server", help: "test a running server instead of spawning one, e.g. https://meet.example.com" },
+  { name: "health-token", type: "string", arg: "<s>", group: "Server", help: "token for the server's /api/health, if it sets HEALTH_TOKEN (default: HEALTH_TOKEN from the environment or .env)" },
+  { name: "cluster", type: "string", default: "0", arg: "<n>", group: "Server", help: "spawn a local cluster (agent + n servers) instead of one server" },
+  { name: "capacity", type: "string", default: "2000", arg: "<n>", group: "Server", help: "players per server for --cluster" },
+  { name: "port", type: "string", default: "3300", arg: "<n>", group: "Server", help: "port for the spawned server or agent" },
+  { name: "log", type: "string", arg: "<file>", group: "Output", cliOnly: true, help: "also write the rows as CSV (default loadtest-logs/<time>-<host>.csv)" },
+  { name: "no-log", type: "boolean", default: false, group: "Output", help: "do not write a CSV file" },
+  { name: "last", type: "boolean", default: false, group: "Output", cliOnly: true, help: "reuse the options of the previous run; options given with it override them, e.g. --last --hold 60" },
+];
+
+/** Word-wrapped help, generated from OPTION_SPECS. */
+function usage(): string {
+  const lines = [
+    "Usage: bun tools/loadtest.ts [options]   (or: bun run loadtest [options], not on Windows)",
+    "       bun tools/loadtest-web/server.ts  (the same runs from a web UI; see README.md)",
+    "",
+  ];
+  const wrap = (text: string, width: number) => {
+    const out: string[] = [];
+    let line = "";
+    for (const word of text.split(" ")) {
+      if (line && line.length + 1 + word.length > width) {
+        out.push(line);
+        line = word;
+      } else line = line ? `${line} ${word}` : word;
+    }
+    return [...out, line];
+  };
+  for (const o of [...OPTION_SPECS, { name: "help", arg: "", help: "show this help" } as OptionSpec]) {
+    const head = `  ${o.name === "help" ? "-h, --help" : `--${o.name}`}${o.arg ? ` ${o.arg}` : ""}`;
+    const help = o.default !== undefined && o.default !== false ? `${o.help} (default ${o.default})` : o.help;
+    wrap(help, 58).forEach((text, i) => lines.push(`${(i === 0 ? head : "").padEnd(23)}${text}`));
+  }
+  return lines.join("\n");
+}
+
+/** Bad options: the CLI prints it with the help, the web UI shows the message. */
+export class UsageError extends Error {}
 
 /** Options of the last successful parse, for --last. Git-ignored. */
 const LAST_FILE = resolve(ROOT, ".loadtest-last.json");
 
-interface Options {
+export interface Options {
   steps: number[];
   /** --max: ramp without pause up to this many bots; null for steps. */
   max: number | null;
@@ -692,11 +725,12 @@ interface Options {
   healthToken: string;
   /** Remote server, or null to spawn a local one. */
   target: { ws: string; http: string } | null;
+  /** The options as given, once each (for the log). */
+  argv: string[];
 }
 
 function fail(message: string): never {
-  console.error(`loadtest: ${message}\n\n${USAGE}`);
-  process.exit(2);
+  throw new UsageError(message);
 }
 
 /** Command line for display, with the health token masked. */
@@ -706,10 +740,14 @@ function describe(argv: string[]): string {
     .join(" ");
 }
 
-function parseOptions(): Options {
-  let argv = process.argv.slice(2);
+/**
+ * Options from a command line. `cli`: the real command line (--last, --help, and
+ * the saved options for --last); the web UI passes its own argv without it.
+ */
+export function parseOptions(input: string[], cli = false): Options {
+  let argv = input;
   const hadOptions = argv.length > 0;
-  if (argv.includes("--last")) {
+  if (cli && argv.includes("--last")) {
     let saved: unknown;
     try {
       // Tolerate a UTF-8 BOM (files copied through some Windows editors).
@@ -725,40 +763,33 @@ function parseOptions(): Options {
     argv = [...saved, ...argv.filter((a) => a !== "--last")];
   }
 
-  let values;
+  /** Parsed values: options with a default are always there. */
+  type Values = Record<
+    "steps" | "report-every" | "room-size" | "hold" | "ramp" | "workers" | "chat-every" | "speakers" | "measure-share" | "moving" |
+      "health-token" | "port" | "cluster" | "capacity" | "room-prefix",
+    string
+  > &
+    Partial<Record<"max" | "log" | "target" | "room", string>> &
+    Record<"no-log" | "keep-going" | "help", boolean>;
+  let values: Values;
   let tokens;
   try {
-    ({ values, tokens } = parseArgs({
+    let parsed;
+    ({ values: parsed, tokens } = parseArgs({
       args: argv,
       tokens: true,
       strict: true,
       allowPositionals: false,
       options: {
-        steps: { type: "string", default: "50,100,200" },
-        max: { type: "string" },
-        "report-every": { type: "string", default: "5" },
-        log: { type: "string" },
-        "no-log": { type: "boolean", default: false },
-        "room-size": { type: "string", default: "0" },
-        hold: { type: "string", default: "20" },
-        ramp: { type: "string", default: "100" },
-        workers: { type: "string", default: "6" },
-        "chat-every": { type: "string", default: "30" },
-        speakers: { type: "string", default: "0" },
-        "measure-share": { type: "string", default: "0.1" },
-        moving: { type: "string", default: "1" },
-        target: { type: "string" },
+        ...Object.fromEntries(
+          OPTION_SPECS.map((o) => [o.name, o.default === undefined ? { type: o.type } : { type: o.type, default: o.default }]),
+        ),
         // Bun loads .env, so HEALTH_TOKEN there works without putting it on the command line.
         "health-token": { type: "string", default: process.env.HEALTH_TOKEN ?? "" },
-        port: { type: "string", default: "3300" },
-        cluster: { type: "string", default: "0" },
-        capacity: { type: "string", default: "2000" },
-        "room-prefix": { type: "string", default: "load" },
-        room: { type: "string" },
-        "keep-going": { type: "boolean", default: false },
         help: { type: "boolean", short: "h", default: false },
-      },
+      } as Record<string, { type: "string" | "boolean"; default?: string | boolean; short?: string }>,
     }));
+    values = parsed as unknown as Values;
   } catch (err) {
     const message = (err as Error).message;
     // Windows: "bun run loadtest --opt value" can reach us as just "value".
@@ -767,16 +798,18 @@ function parseOptions(): Options {
       : "";
     fail(message + hint);
   }
-  if (values.help) {
-    console.log(USAGE);
+  if (cli && values.help) {
+    console.log(usage());
     process.exit(0);
   }
   // Canonical form: each given option once, with its final value.
   const given = new Map<string, string | undefined>();
   for (const t of tokens) if (t.kind === "option") given.set(t.name, t.value);
-  const reusedLast = process.argv.includes("--last");
   argv = [...given].flatMap(([name, value]) => (value === undefined ? [`--${name}`] : [`--${name}`, value]));
-  console.log(`${reusedLast ? "Re-running" : "Running"}: bun tools/loadtest.ts ${describe(argv) || "(defaults)"}`);
+  if (cli) {
+    const reusedLast = input.includes("--last");
+    console.log(`${reusedLast ? "Re-running" : "Running"}: bun tools/loadtest.ts ${describe(argv) || "(defaults)"}`);
+  }
 
   const int = (name: string, raw: string, min: number): number => {
     const n = Number(raw);
@@ -820,7 +853,8 @@ function parseOptions(): Options {
     reportEvery: int("report-every", values["report-every"], 1),
     log: values["no-log"] ? null : (values.log ?? defaultLogPath(values.target)),
     healthToken: values["health-token"],
-    target: values.target === undefined ? null : parseTarget(values.target),
+    target: values.target === undefined || values.target === "" ? null : parseTarget(values.target),
+    argv,
   };
   if (options.speakers > MAX_SPEAKERS + 1) fail(`--speakers is at most ${MAX_SPEAKERS + 1} (the host plus ${MAX_SPEAKERS})`);
   const perRoom = options.roomSize > 0 ? options.roomSize : Infinity;
@@ -830,7 +864,7 @@ function parseOptions(): Options {
   if (options.hold / 2 > 290) fail("--hold must be at most 580 seconds");
 
   // A bare run (no options) keeps the saved ones instead of erasing them.
-  if (hadOptions) writeFileSync(LAST_FILE, JSON.stringify({ argv, savedAt: new Date().toISOString() }, null, 2) + "\n");
+  if (cli && hadOptions) writeFileSync(LAST_FILE, JSON.stringify({ argv, savedAt: new Date().toISOString() }, null, 2) + "\n");
   return options;
 }
 
@@ -901,7 +935,44 @@ class HealthClient {
   }
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((r) => {
+    if (signal?.aborted) return r();
+    const timer = setTimeout(done, ms);
+    function done() {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      r();
+    }
+    signal?.addEventListener("abort", done);
+  });
+
+/** One row of results, keyed by the CSV column names. */
+export type Row = Record<string, string | number>;
+
+/** Where a run's output goes: the terminal, or the web UI. */
+export interface Reporter {
+  log(text: string): void;
+  warn(text: string): void;
+  /** A row: the terminal's table line, and its values by CSV column. */
+  row(line: string, values: Row): void;
+  /** The table's heading (the terminal prints it once). */
+  header(line: string): void;
+}
+
+const consoleReporter: Reporter = {
+  log: (text) => console.log(text),
+  warn: (text) => console.warn(text),
+  row: (line) => console.log(line),
+  header: (line) => console.log(line),
+};
+
+export interface RunResult {
+  summary: string;
+  /** CSV log written, or null. */
+  log: string | null;
+  stopped: boolean;
+}
 
 /** Send a command line to a worker's stdin. */
 function tell(worker: ChildProcess, msg: object): void {
@@ -911,8 +982,25 @@ function tell(worker: ChildProcess, msg: object): void {
 /** The load test runs on Bun; the spawned server and the bot workers use the same binary. */
 const BUN = process.execPath;
 
-async function runOrchestrator(): Promise<void> {
-  const opts = parseOptions();
+/** Run a load test; `signal` stops it early (bots and spawned server are cleaned up either way). */
+export async function runOrchestrator(opts: Options, out: Reporter = consoleReporter, signal?: AbortSignal): Promise<RunResult> {
+  const workers: ChildProcess[] = [];
+  let server: ChildProcess | null = null;
+  try {
+    return await orchestrate(opts, out, signal ?? new AbortController().signal, workers, (s) => (server = s));
+  } finally {
+    for (const w of workers) w.kill();
+    (server as ChildProcess | null)?.kill();
+  }
+}
+
+async function orchestrate(
+  opts: Options,
+  out: Reporter,
+  signal: AbortSignal,
+  workers: ChildProcess[],
+  spawned: (server: ChildProcess) => void,
+): Promise<RunResult> {
   const { steps, roomSize, hold, ramp, chatEveryMs, roomPrefix, speakers } = opts;
   const maxBots = opts.max ?? steps.at(-1)!;
   const workerCount = opts.workers;
@@ -944,10 +1032,11 @@ async function runOrchestrator(): Promise<void> {
       },
       stdio: ["ignore", "ignore", "pipe"],
     });
+    spawned(server);
     createInterface({ input: server.stderr! }).on("line", (line) => {
       const gc = line.match(/=> (Eden|Full)Collection.*\bp=([\d.]+)ms/);
       if (gc) gcEvents.push({ t: Date.now(), pauseMs: Number(gc[2]), full: gc[1] === "Full" });
-      else if (!/(\[GC<|GC END!|Requesting GC)/.test(line)) process.stderr.write(line + "\n");
+      else if (!/(\[GC<|GC END!|Requesting GC)/.test(line)) out.warn(line);
     });
   }
   const health = new HealthClient(httpUrl, opts.healthToken);
@@ -960,14 +1049,13 @@ async function runOrchestrator(): Promise<void> {
   } catch (err) {
     if (opts.target && !opts.healthToken && (err as Error).message.includes("needs a token")) {
       noServerStats = true;
-      console.warn(`${(err as Error).message}; continuing without server columns`);
+      out.warn(`${(err as Error).message}; continuing without server columns`);
     } else {
-      server?.kill();
-      fail((err as Error).message);
+      throw err;
     }
   }
-  console.log(opts.target ? `Target ${wsUrl} (${runtimeLabel})` : `Spawned ${runtimeLabel} server on port ${opts.port}`);
-  console.log(`Bots walk ${Math.round(opts.movingRatio * 100)}% of the time${chatEveryMs ? "" : ", no chat"}`);
+  out.log(opts.target ? `Target ${wsUrl} (${runtimeLabel})` : `Spawned ${runtimeLabel} server on port ${opts.port}`);
+  out.log(`Bots walk ${Math.round(opts.movingRatio * 100)}% of the time${chatEveryMs ? "" : ", no chat"}`);
 
   // With --speakers the server creates the rooms, and hands out their host keys.
   const roomCount = roomSize > 0 ? Math.ceil(maxBots / roomSize) : 1;
@@ -976,20 +1064,18 @@ async function runOrchestrator(): Promise<void> {
     for (let i = 0; i < roomCount; i++) {
       const res = await fetch(`${httpUrl}/api/rooms`, { method: "POST" }).catch(() => null);
       if (!res?.ok) {
-        server?.kill();
-        fail(`${httpUrl}/api/rooms failed (${res?.status ?? "unreachable"}); --speakers needs a server with roles`);
+        throw new Error(`${httpUrl}/api/rooms failed (${res?.status ?? "unreachable"}); --speakers needs a server with roles`);
       }
       created.push((await res.json()) as { room: string; hostKey: string });
     }
-    console.log(`Each room: a host + ${speakers - 1} speaker(s) talking in turns; the rest listen`);
+    out.log(`Each room: a host + ${speakers - 1} speaker(s) talking in turns; the rest listen`);
     const shown = created.slice(0, 3).map((c) => `${httpUrl}/r/${c.room}`);
-    console.log(`Invite link${created.length > 1 ? "s" : ""}: ${shown.join("  ")}${created.length > 3 ? `  (+${created.length - 3} more)` : ""}`);
+    out.log(`Invite link${created.length > 1 ? "s" : ""}: ${shown.join("  ")}${created.length > 3 ? `  (+${created.length - 3} more)` : ""}`);
   } else {
     const rooms = opts.room ?? (roomSize > 0 ? `${roomPrefix}-0 .. ${roomPrefix}-${roomCount - 1}` : `${roomPrefix}-all`);
-    console.log(`Rooms: /r/${rooms}`);
+    out.log(`Rooms: /r/${rooms}`);
   }
 
-  const workers: ChildProcess[] = [];
   let window: WorkerReport[] = [];
   const connected = new Map<ChildProcess, number>();
   for (let i = 0; i < workerCount; i++) {
@@ -1034,7 +1120,7 @@ async function runOrchestrator(): Promise<void> {
   let total = 0;
   const startedAt = Date.now();
   const timeCol = opts.max !== null;
-  console.log(
+  out.header(
     (timeCol ? "   t s | " : "") +
       "bots | rooms | snap Hz | srv players | srv CPU | load | out Mbps | loop p99 | tick p99 | gc/s | gc max ms | RSS MB | move p50/p99 ms | snap gap p50/p99/max ms | chat p50/p99 ms | voice p50/p99 ms | voice rx | in MB/s | corr | drops | migr | rejoin | verdict",
   );
@@ -1047,12 +1133,12 @@ async function runOrchestrator(): Promise<void> {
   ];
   if (opts.log) {
     mkdirSync(dirname(opts.log), { recursive: true });
-    const argv = process.argv.slice(2).map((a, i, all) => (all[i - 1] === "--health-token" ? "***" : a)).join(" ");
+    const argv = describe(opts.argv);
     writeFileSync(
       opts.log,
       `# bun tools/loadtest.ts ${argv}\n# target ${wsUrl} (${runtimeLabel})\n# started ${new Date(startedAt).toISOString()}\n${CSV_COLUMNS.join(",")}\n`,
     );
-    console.log(`Log: ${opts.log}`);
+    out.log(`Log: ${opts.log}`);
   }
   const csvLine = (values: (string | number)[]) =>
     values.map((v) => (typeof v === "number" ? (Number.isNaN(v) ? "" : String(v)) : `"${v.replace(/"/g, "'")}"`)).join(",");
@@ -1090,7 +1176,7 @@ async function runOrchestrator(): Promise<void> {
         healthProblem = (err as Error).message;
       }
     }
-    if (healthProblem) console.warn(`  (server stats unavailable: ${healthProblem})`);
+    if (healthProblem) out.warn(`  (server stats unavailable: ${healthProblem})`);
 
     const gaps = new Histogram();
     const chat = new Histogram();
@@ -1158,6 +1244,15 @@ async function runOrchestrator(): Promise<void> {
     const rooms = roomSize > 0 ? Math.ceil(target / roomSize) : 1;
     const timeS = Math.round((t1 - startedAt) / 1000);
 
+    const round = (v: number, d: number) => (Number.isNaN(v) ? NaN : Math.round(v * 10 ** d) / 10 ** d);
+    const pct = (h: Histogram, p: number) => (h.total ? h.percentile(p) : NaN);
+    const csvValues: (string | number)[] = [
+      timeS, target, joined, rooms, snapshotHz || NaN, latest?.players ?? NaN, round(cpu, 3), round(load, 2), round(egress, 1),
+      round(loopP99, 1), round(tickP99, 2), round(gcPerSec, 1), round(gcMax, 1), latest?.rssMb ?? NaN, pct(move, 0.5),
+      pct(move, 0.99), pct(gaps, 0.5), pct(gaps, 0.99), pct(gaps, 1), pct(chat, 0.5), pct(chat, 0.99), pct(voice, 0.5),
+      pct(voice, 0.99), round(voiceShare * 100, 1), round(bytesIn / elapsed / 1e6, 1), corrections, drops, migrations, rejoins,
+      verdict,
+    ];
     const row = [
       ...(timeCol ? [String(timeS).padStart(6)] : []),
       String(target).padStart(4),
@@ -1184,7 +1279,7 @@ async function runOrchestrator(): Promise<void> {
       String(rejoins).padStart(6),
       verdict,
     ].join(" | ");
-    console.log(row);
+    out.row(row, Object.fromEntries(CSV_COLUMNS.map((c, i) => [c, csvValues[i]])));
     if (perServer?.length) {
       const parts = perServer
         .sort((a, b) => a.server - b.server)
@@ -1193,22 +1288,9 @@ async function runOrchestrator(): Promise<void> {
             ? `s${s.server} ${s.players}p ${(s.latest.cpu * 100).toFixed(0)}% cpu loop ${s.latest.loopP99Ms}ms`
             : `s${s.server} down`,
         );
-      console.log(`       ${parts.join(" | ")}`);
+      out.log(`       ${parts.join(" | ")}`);
     }
-    if (opts.log) {
-      const round = (v: number, d: number) => (Number.isNaN(v) ? NaN : Math.round(v * 10 ** d) / 10 ** d);
-      const pct = (h: Histogram, p: number) => (h.total ? h.percentile(p) : NaN);
-      appendFileSync(
-        opts.log,
-        csvLine([
-          timeS, target, joined, rooms, snapshotHz || NaN, latest?.players ?? NaN, round(cpu, 3), round(load, 2), round(egress, 1),
-          round(loopP99, 1), round(tickP99, 2), round(gcPerSec, 1), round(gcMax, 1), latest?.rssMb ?? NaN, pct(move, 0.5),
-          pct(move, 0.99), pct(gaps, 0.5), pct(gaps, 0.99), pct(gaps, 1), pct(chat, 0.5), pct(chat, 0.99), pct(voice, 0.5),
-          pct(voice, 0.99), round(voiceShare * 100, 1), round(bytesIn / elapsed / 1e6, 1), corrections, drops, migrations, rejoins,
-          verdict,
-        ]) + "\n",
-      );
-    }
+    if (opts.log) appendFileSync(opts.log, csvLine(csvValues) + "\n");
     return { ok: problems.length === 0 };
   }
 
@@ -1233,12 +1315,13 @@ async function runOrchestrator(): Promise<void> {
     let rowFrom = Date.now();
     let maxReachedAt: number | null = null;
     window = [];
-    for (;;) {
+    while (!signal.aborted) {
       if (total < max) {
         addBots(Math.min(max - total, Math.max(1, Math.round(ramp / 10))));
         if (total >= max) maxReachedAt = Date.now();
       }
-      await sleep(100);
+      await sleep(100, signal);
+      if (signal.aborted) break;
       const now = Date.now();
       if (now - rowFrom >= opts.reportEvery * 1000) {
         // Joins take a moment: only expect everyone a few seconds after the last one was added.
@@ -1252,11 +1335,12 @@ async function runOrchestrator(): Promise<void> {
   } else {
     for (const target of steps) {
       // Ramp up at a fixed connection rate.
-      while (total < target) {
+      while (total < target && !signal.aborted) {
         addBots(Math.min(target - total, Math.max(1, Math.round(ramp / 10))));
-        await sleep(100);
+        await sleep(100, signal);
       }
-      await sleep((hold / 2) * 1000);
+      await sleep((hold / 2) * 1000, signal);
+      if (signal.aborted) break;
       // Measure the second half of the hold: bot reports plus the server's own samples.
       window = [];
       if (!noServerStats) {
@@ -1267,24 +1351,35 @@ async function runOrchestrator(): Promise<void> {
         }
       }
       const t0 = Date.now();
-      await sleep((hold / 2) * 1000);
+      await sleep((hold / 2) * 1000, signal);
+      if (signal.aborted) break;
       const { ok } = await measureRow(t0, Date.now(), target, true);
       track(target, ok);
       if (!ok && !opts.keepGoing) break;
     }
   }
 
+  const stopped = signal.aborted;
   const summary =
-    firstFail === null
+    (stopped ? "Stopped early. " : "") +
+    (bestOk === 0 && firstFail === null
+      ? "Summary: no rows measured"
+      : firstFail === null
       ? `Summary: every row met the targets, up to ${bestOk} bots`
-      : `Summary: last row meeting every target at ${bestOk} bots; first failing row at ${firstFail} bots`;
-  console.log(summary);
+      : `Summary: last row meeting every target at ${bestOk} bots; first failing row at ${firstFail} bots`);
+  out.log(summary);
   if (opts.log) appendFileSync(opts.log, `# ${summary}\n`);
-
-  for (const w of workers) w.kill();
-  server?.kill();
-  process.exit(0);
+  return { summary, log: opts.log, stopped };
 }
 
 if (process.argv.includes("--worker")) runWorker();
-else runOrchestrator();
+else if (import.meta.main) {
+  try {
+    await runOrchestrator(parseOptions(process.argv.slice(2), true));
+    process.exit(0);
+  } catch (err) {
+    if (err instanceof UsageError) console.error(`loadtest: ${err.message}\n\n${usage()}`);
+    else console.error(`loadtest: ${(err as Error).message}`);
+    process.exit(2);
+  }
+}

@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Daystar Load Test</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='%23ffc860'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="top">
+      <h1>Daystar <span>load test</span></h1>
+      <label class="target">
+        <span>Target</span>
+        <input id="target" placeholder="https://meet.example.com (empty: spawn a local server)" autocomplete="off" spellcheck="false" />
+      </label>
+      <span id="health-note" class="note"></span>
+      <button id="token-button" type="button" class="ghost">Token</button>
+    </header>
+
+    <main class="layout">
+      <aside class="templates">
+        <section>
+          <h2>Templates</h2>
+          <ul id="builtin-list" class="list"></ul>
+        </section>
+        <section>
+          <h2>My templates <span class="hint">(this browser)</span></h2>
+          <ul id="mine-list" class="list"></ul>
+          <p id="mine-empty" class="empty">Clone a template to make your own.</p>
+        </section>
+      </aside>
+
+      <section class="editor">
+        <div class="editor-head">
+          <div class="titles">
+            <input id="name" class="name" aria-label="Template name" autocomplete="off" />
+            <textarea id="description" class="description" rows="2" aria-label="Description"></textarea>
+          </div>
+          <span id="kind" class="badge"></span>
+        </div>
+        <form id="form" class="form" autocomplete="off"></form>
+        <div class="editor-foot">
+          <div class="command">
+            <code id="command"></code>
+            <button id="copy-command" type="button" class="ghost small">Copy</button>
+          </div>
+          <div class="actions">
+            <button id="run" type="button" class="primary">Run</button>
+            <button id="save" type="button">Save</button>
+            <button id="clone" type="button">Clone</button>
+            <button id="revert" type="button" class="ghost">Revert</button>
+            <button id="delete" type="button" class="danger ghost">Delete</button>
+            <span id="message" class="message" role="status"></span>
+          </div>
+        </div>
+      </section>
+
+      <section class="run">
+        <div class="run-head">
+          <select id="history" aria-label="Runs"></select>
+          <span id="status" class="status"></span>
+          <span id="elapsed" class="elapsed"></span>
+          <button id="stop" type="button" class="danger" hidden>Stop</button>
+          <button id="csv" type="button" class="ghost" hidden>CSV</button>
+        </div>
+        <p id="summary" class="summary"></p>
+        <div id="charts" class="charts"></div>
+        <div class="table-wrap">
+          <table id="rows">
+            <thead></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <details class="raw">
+          <summary>Output</summary>
+          <pre id="output"></pre>
+        </details>
+      </section>
+    </main>
+
+    <dialog id="token-dialog">
+      <form method="dialog" id="token-form">
+        <h2>Access token</h2>
+        <p>The server's <code>LOADTEST_TOKEN</code> (printed in its log when it made one up).</p>
+        <input id="token-input" type="password" required autocomplete="off" />
+        <p id="token-error" class="error"></p>
+        <div class="actions"><button class="primary">Connect</button></div>
+      </form>
+    </dialog>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
