@@ -489,6 +489,18 @@ time, chatting ordinary lines every few minutes each. Such a run is also saved t
 someone presses Stop; on Coolify, mount a volume at `/app/loadtest-logs` to keep it
 across redeploys. If the UI server dies, its bots go with it (no orphaned bots).
 
+**AI chat.** `--chat-source ai` has bots chat in conversations written by a local
+LLM through [Ollama](https://ollama.com) (`OLLAMA_URL`, e.g. `http://10.0.0.223:11434`;
+`OLLAMA_MODEL`, default `llama3.1:8b`): small groups of guests talk about the event,
+the talk, the app, where they are from, at the rate `--chat-every` sets for the room.
+`--theme` says what the event is and `--chat-language` which language they use. The
+conversations are made ahead into a buffer, so bots never wait for the model, and saved
+to `loadtest-logs/ai-scenes.jsonl` for later runs; while the model is away, cached
+conversations and then ready-made lines fill in. The *Demo with AI chat* template is
+the demo crowd with it. `llama3.1:8b` was the most dependable on a 12 GB RTX 4070
+(27/30 answers, ~2.6 s each, 5 GB); `gemma4` wrote a little better but needs ~10 GB
+and failed for lack of memory, and `qwen3` could not do structured output there.
+
 | Variable | |
 | --- | --- |
 | `LOADTEST_TOKEN` | the UI asks for it (without one, a random token is made and printed at start) |

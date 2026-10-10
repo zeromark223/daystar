@@ -7,14 +7,15 @@ FROM oven/bun:1.4.2-alpine
 RUN apk add --no-cache tini
 WORKDIR /app
 # LOADTEST_TOKEN guards the UI (one is made up and logged if unset); HEALTH_TOKEN
-# is the target's /api/health token. Set both as secrets, not here.
+# is the target's /api/health token. Set both as secrets, not here. OLLAMA_URL
+# (and OLLAMA_MODEL, default llama3.1:8b) turn on AI chat (--chat-source ai).
 ENV NODE_ENV=production \
     LOADTEST_PORT=3100
 COPY package.json ./
 COPY shared/src shared/src
 # For runs without a target, which spawn a server in the container.
 COPY server/src server/src
-COPY tools/loadtest.ts tools/loadtest-crowd.ts tools/
+COPY tools/loadtest*.ts tools/
 COPY tools/voice tools/voice
 COPY tools/loadtest-web tools/loadtest-web
 # Each run's CSV goes here, and active-run.json, the endless run (e.g. a demo

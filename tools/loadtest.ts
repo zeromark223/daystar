@@ -33,6 +33,7 @@ import {
   SNAPSHOT_OPCODE,
 } from "../shared/src/protocol.ts";
 import { roleFromIndex, type Role } from "../shared/src/roles.ts";
+import { DEFAULT_MODEL, Director, SceneSource } from "./loadtest-ai.ts";
 import { chatLine, personName } from "./loadtest-crowd.ts";
 import { readOpusPackets } from "./voice/ogg.ts";
 
@@ -298,7 +299,10 @@ function runWorker(): void {
   /** 0.5, 1, 2, 4 ... up to 30 s, with jitter so a crowd does not come back all at once. */
   const backoffMs = (attempt: number) => Math.min(30_000, 500 * 2 ** attempt) * (0.5 + Math.random());
 
-  async function addBot(room: string, name: string, part: Bot["part"], hostKey: string, voice: number): Promise<void> {
+  /** Bots by the orchestrator's number, for "say". */
+  const byIndex = new Map<number, Bot>();
+
+  async function addBot(index: number, room: string, name: string, part: Bot["part"], hostKey: string, voice: number): Promise<void> {
     const placed = await place("/api/join", { room }, true);
     if (!placed) return;
     const appearance = Math.floor(Math.random() * APPEARANCE_COUNT);
@@ -346,6 +350,7 @@ function runWorker(): void {
     }
     connect(bot, placed.url);
     bots.push(bot);
+    byIndex.set(index, bot);
   }
 
   /** Open a socket for the bot and make it the current one (join, then drop the old socket). */
@@ -611,7 +616,9 @@ function runWorker(): void {
 
   type Command =
     | { cmd: "config"; baseUrl: string; chatEveryMs: number; movingRatio: number; voiceEpoch: number; measureEvery: number }
-    | { cmd: "add"; room: string; name: string; part?: Bot["part"]; hostKey?: string; voice?: number };
+    | { cmd: "add"; index: number; room: string; name: string; part?: Bot["part"]; hostKey?: string; voice?: number }
+    /** --chat-source ai: the director's line for this bot. */
+    | { cmd: "say"; index: number; text: string };
   const commands = createInterface({ input: process.stdin });
   // The orchestrator went away (killed, crashed): take the bots with us, never
   // leave them connected with nobody to stop them.
@@ -624,8 +631,15 @@ function runWorker(): void {
       movingRatio = msg.movingRatio;
       voiceEpoch = msg.voiceEpoch;
       measureEvery = msg.measureEvery;
+    } else if (msg.cmd === "say") {
+      const bot = byIndex.get(msg.index);
+      if (!bot?.joined || bot.ws.readyState !== WebSocket.OPEN) return;
+      const frame = encodeClientMessage({ t: "chat", text: msg.text });
+      bot.chatSentAt = Date.now();
+      bot.ws.send(frame);
+      counters.bytesOut += frame.byteLength;
     } else {
-      void addBot(msg.room, msg.name, msg.part ?? "guest", msg.hostKey ?? "", msg.voice ?? 0);
+      void addBot(msg.index, msg.room, msg.name, msg.part ?? "guest", msg.hostKey ?? "", msg.voice ?? 0);
     }
   });
 }
@@ -679,6 +693,9 @@ export const OPTION_SPECS: OptionSpec[] = [
   { name: "keep-going", type: "boolean", default: false, group: "Load", help: "continue ramping after a failed step (--max always goes on)" },
   { name: "moving", type: "string", default: "1", arg: "<0..1>", group: "Bots", help: "share of time each bot spends walking; the rest it stands still and sends nothing (1 = everyone always walking)" },
   { name: "names", type: "string", default: "guest", arg: "<guest|people>", group: "Bots", help: "what guests are called: Guest 0, Guest 1 ... or people's first names (for demos)" },
+  { name: "chat-source", type: "string", default: "static", arg: "<static|ai>", group: "Bots", help: "what bots chat: ready-made lines, or conversations a local LLM writes (Ollama at OLLAMA_URL, model OLLAMA_MODEL, default llama3.1:8b), played among guests" },
+  { name: "theme", type: "string", default: "a community meetup with short talks on stage", arg: "<text>", group: "Bots", help: "with --chat-source ai: what the event is, for the conversations" },
+  { name: "chat-language", type: "string", default: "English", arg: "<language>", group: "Bots", help: "with --chat-source ai: the language bots chat in" },
   { name: "chat-every", type: "string", default: "30", arg: "<s>", group: "Bots", help: "seconds between chat messages per bot; 0 = no chat" },
   { name: "measure-share", type: "string", default: "0.1", arg: "<s>", group: "Bots", help: "share of bots that time moves, snapshot gaps and voice; the rest only count frames, which keeps bots cheap" },
   { name: "workers", type: "string", default: "6", arg: "<n>", group: "Bots", help: "bot processes" },
@@ -754,6 +771,8 @@ export interface Options {
   keepGoing: boolean;
   /** Guests' names: "Guest 12", or a person's first name. */
   names: "guest" | "people";
+  /** --chat-source ai: the model and what to tell it; null for static lines. */
+  ai: { url: string; model: string; theme: string; language: string } | null;
   healthToken: string;
   /** Remote server, or null to spawn a local one. */
   target: { ws: string; http: string } | null;
@@ -797,7 +816,7 @@ export function parseOptions(input: string[], cli = false): Options {
 
   /** Parsed values: options with a default are always there. */
   type Values = Record<
-    "steps" | "report-every" | "room-size" | "hold" | "names" | "ramp" | "workers" | "chat-every" | "speakers" | "measure-share" | "moving" |
+    "steps" | "report-every" | "room-size" | "hold" | "names" | "chat-source" | "theme" | "chat-language" | "ramp" | "workers" | "chat-every" | "speakers" | "measure-share" | "moving" |
       "health-token" | "port" | "cluster" | "capacity" | "room-prefix",
     string
   > &
@@ -887,6 +906,17 @@ export function parseOptions(input: string[], cli = false): Options {
     roomPrefix: values["room-prefix"],
     room,
     keepGoing: values["keep-going"],
+    ai:
+      values["chat-source"] === "ai"
+        ? {
+            url: process.env.OLLAMA_URL || fail("--chat-source ai needs OLLAMA_URL (e.g. http://10.0.0.223:11434) in the environment"),
+            model: process.env.OLLAMA_MODEL || DEFAULT_MODEL,
+            theme: values.theme.slice(0, 200),
+            language: values["chat-language"].slice(0, 40),
+          }
+        : values["chat-source"] === "static"
+          ? null
+          : fail(`--chat-source is static or ai, got "${values["chat-source"]}"`),
     names: values.names === "people" ? "people" : values.names === "guest" ? "guest" : fail(`--names is guest or people, got "${values.names}"`),
     max: values.max === undefined ? null : int("max", values.max, 1),
     reportEvery: int("report-every", values["report-every"], 1),
@@ -1027,10 +1057,12 @@ const BUN = process.execPath;
 /** Run a load test; `signal` stops it early (bots and spawned server are cleaned up either way). */
 export async function runOrchestrator(opts: Options, out: Reporter = consoleReporter, signal?: AbortSignal): Promise<RunResult> {
   const workers: ChildProcess[] = [];
+  const cleanups: (() => void)[] = [];
   let server: ChildProcess | null = null;
   try {
-    return await orchestrate(opts, out, signal ?? new AbortController().signal, workers, (s) => (server = s));
+    return await orchestrate(opts, out, signal ?? new AbortController().signal, workers, (s) => (server = s), (fn) => cleanups.push(fn));
   } finally {
+    for (const fn of cleanups) fn();
     for (const w of workers) w.kill();
     (server as ChildProcess | null)?.kill();
   }
@@ -1042,6 +1074,7 @@ async function orchestrate(
   signal: AbortSignal,
   workers: ChildProcess[],
   spawned: (server: ChildProcess) => void,
+  onCleanup: (fn: () => void) => void,
 ): Promise<RunResult> {
   const { steps, roomSize, hold, ramp, chatEveryMs, roomPrefix, speakers } = opts;
   const maxBots = opts.max ?? steps.at(-1)!;
@@ -1133,7 +1166,8 @@ async function orchestrate(
   }
   const voiceEpoch = Date.now();
   for (const w of workers) {
-    tell(w, { cmd: "config", baseUrl: httpUrl, chatEveryMs, movingRatio: opts.movingRatio, voiceEpoch, measureEvery: opts.measureEvery });
+    // With AI chat the director says who talks when; bots do not chat on their own.
+    tell(w, { cmd: "config", baseUrl: httpUrl, chatEveryMs: opts.ai ? 0 : chatEveryMs, movingRatio: opts.movingRatio, voiceEpoch, measureEvery: opts.measureEvery });
   }
 
   const roomIndex = (i: number) => (roomSize > 0 ? Math.floor(i / roomSize) : 0);
@@ -1146,12 +1180,16 @@ async function orchestrate(
   const assign = (i: number) => {
     const r = roomIndex(i);
     const seat = roomSize > 0 ? i % roomSize : i;
-    if (seat >= speakers) return { worker: workers[i % workerCount], cmd: { cmd: "add", room: roomFor(i), name: opts.names === "people" ? personName(i) : `Guest ${i}` } };
+    if (seat >= speakers) {
+      const name = opts.names === "people" ? personName(i) : `Guest ${i}`;
+      return { worker: workers[i % workerCount], cmd: { cmd: "add", index: i, room: roomFor(i), name } };
+    }
     const part = seat === 0 ? "host" : "speaker";
     return {
       worker: workers[r % workerCount],
       cmd: {
         cmd: "add",
+        index: i,
         room: roomFor(i),
         name: part === "host" ? "Host" : `Speaker ${seat}`,
         part,
@@ -1333,13 +1371,41 @@ async function orchestrate(
         );
       out.log(`       ${parts.join(" | ")}`);
     }
+    if (director) {
+      const ai = director.stats();
+      out.log(
+        `       AI chat: ${ai.ready} scenes ready, ${ai.made} made (avg ${(ai.avgMs / 1000).toFixed(1)} s), ${ai.failed} failed, ${ai.reused} reused, ${ai.fallback} static lines`,
+      );
+    }
     if (opts.log) appendFileSync(opts.log, csvLine(csvValues) + "\n");
     return { ok: problems.length === 0 };
+  }
+
+  // AI chat: scenes made in the background, played among each room's guests.
+  let director: Director | null = null;
+  const botWorker: ChildProcess[] = [];
+  if (opts.ai && chatEveryMs > 0) {
+    const aiStop = new AbortController();
+    const source = new SceneSource({
+      ...opts.ai,
+      cacheFile: resolve(ROOT, "loadtest-logs", "ai-scenes.jsonl"),
+      log: out.log,
+      warn: out.warn,
+      signal: AbortSignal.any([signal, aiStop.signal]),
+    });
+    director = new Director(source, chatEveryMs, (index, text) => tell(botWorker[index], { cmd: "say", index, text }));
+    onCleanup(() => {
+      aiStop.abort();
+      director?.stop();
+    });
+    out.log(`AI chat: ${opts.ai.model} at ${opts.ai.url}, ${opts.ai.language}, about "${opts.ai.theme}"`);
   }
 
   const addBots = (count: number) => {
     for (let i = 0; i < count; i++, total++) {
       const { worker, cmd } = assign(total);
+      botWorker[total] = worker;
+      if (director && !("part" in cmd)) director.addGuest(cmd.room, total, cmd.name);
       tell(worker, cmd);
       members.set(cmd.room, (members.get(cmd.room) ?? 0) + 1);
     }

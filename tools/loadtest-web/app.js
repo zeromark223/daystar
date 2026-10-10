@@ -544,7 +544,10 @@ async function start() {
     return;
   }
   $("target").value = load("target", meta.target);
-  $("health-note").textContent = meta.healthToken ? "" : "no HEALTH_TOKEN on the server: remote server stats may be missing";
+  const notes = [];
+  if (!meta.healthToken) notes.push("no HEALTH_TOKEN: remote server stats may be missing");
+  notes.push(meta.ai ? `AI chat: ${meta.ai.model}` : "AI chat off (no OLLAMA_URL)");
+  $("health-note").textContent = notes.join(" · ");
   currentRun = meta.current;
   draft = null;
   select(selected.kind, selected.id);

@@ -16,11 +16,14 @@
  *   LOADTEST_TOKEN   the UI asks for it; without one a random token is made and printed
  *   LOADTEST_TARGET  server the UI suggests when a scenario names none
  *   HEALTH_TOKEN     the target's /api/health token (never sent to the browser)
+ *   OLLAMA_URL       Ollama for --chat-source ai, e.g. http://10.0.0.223:11434
+ *   OLLAMA_MODEL     its model (default llama3.1:8b)
  */
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import { OPTION_SPECS, parseOptions, runOrchestrator, UsageError, type Row } from "../loadtest.ts";
+import { DEFAULT_MODEL } from "../loadtest-ai.ts";
 import { TEMPLATES } from "./templates.ts";
 
 const PORT = Number(process.env.LOADTEST_PORT) || 3100;
@@ -184,6 +187,7 @@ async function api(req: Request, url: URL): Promise<Response> {
       templates: TEMPLATES,
       target: process.env.LOADTEST_TARGET ?? "",
       healthToken: Boolean(process.env.HEALTH_TOKEN),
+      ai: process.env.OLLAMA_URL ? { url: process.env.OLLAMA_URL, model: process.env.OLLAMA_MODEL || DEFAULT_MODEL } : null,
       current: current()?.id ?? null,
     });
   }

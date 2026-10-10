@@ -20,6 +20,24 @@ export const TEMPLATES: Template[] = [
     options: { room: "", max: "300", ramp: "10", hold: "0", moving: "0.35", "chat-every": "400", names: "people", "report-every": "30" },
   },
   {
+    id: "demo-with-ai",
+    name: "Demo with AI chat (until stopped)",
+    description:
+      "The demo crowd, but chatting in real conversations a local LLM writes (OLLAMA_URL on the server): small groups talk about the event, the talk, where they are from. Falls back to ready-made lines if the model is away. Set Room (or a room link as Target).",
+    // Conversations read better a little livelier than single lines: ~1 line/s across 300 guests.
+    options: {
+      room: "",
+      max: "300",
+      ramp: "10",
+      hold: "0",
+      moving: "0.35",
+      "chat-source": "ai",
+      "chat-every": "300",
+      names: "people",
+      "report-every": "30",
+    },
+  },
+  {
     id: "smoke",
     name: "Smoke test",
     description: "A handful of bots for a minute: is the server up, do joins, moves and chat work?",

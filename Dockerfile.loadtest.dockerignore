@@ -4,7 +4,6 @@
 !package.json
 !shared/src
 !server/src
-!tools/loadtest.ts
-!tools/loadtest-crowd.ts
+!tools/loadtest*.ts
 !tools/voice
 !tools/loadtest-web
