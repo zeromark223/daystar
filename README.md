@@ -486,10 +486,9 @@ them. The server keeps the last 20 runs in memory.
 | `LOADTEST_TARGET` | server the UI suggests as Target |
 | `HEALTH_TOKEN` | the target's `/api/health` token, for the server columns (never sent to the browser) |
 
-To run it on Coolify, use `tools/loadtest-web/Dockerfile` with the repo root as the
-base directory (the image needs `shared/` and `server/` too; it has its own
-`Dockerfile.dockerignore` next to it), expose port 3100 and set the variables above
-as secrets. The root `Dockerfile` stays the game server's. Bots are cheap but not free: give it its own server, or at least other
+To run it on Coolify, build from `Dockerfile.loadtest` (it has its own
+`Dockerfile.loadtest.dockerignore`; `Dockerfile` is the game server's), expose port
+3100 and set the variables above as secrets. Bots are cheap but not free: give it its own server, or at least other
 cores than the game server it tests.
 
 ## Deploy (Coolify)

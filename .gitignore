@@ -12,3 +12,7 @@ client/public/assets/
 .env
 server-rs/target
 loadtest-logs
+
+# coolify-deploy settings, one per image (coolify.config.json, loadtest.coolify.config.json, ...)
+coolify.config.json
+*.coolify.config.json

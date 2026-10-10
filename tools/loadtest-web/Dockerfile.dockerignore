@@ -1,9 +1,0 @@
-# This Dockerfile's own ignore list: BuildKit reads <Dockerfile>.dockerignore next
-# to it instead of the root .dockerignore (the app image's, which drops tools/).
-*
-!package.json
-!shared/src
-!server/src
-!tools/loadtest.ts
-!tools/voice
-!tools/loadtest-web

@@ -9,4 +9,5 @@ server-rs/target
 .loadtest-last.json
 ref
 coolify.config.json
+*.coolify.config.json
 *.zip

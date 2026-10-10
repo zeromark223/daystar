@@ -1,6 +1,5 @@
 # The load test with its web UI (tools/loadtest-web): the bots run in this
-# container, the browser drives them. Build from the repo root (it needs shared/
-# and server/ too): docker build -f tools/loadtest-web/Dockerfile . Point it at a server with LOADTEST_TARGET
+# container, the browser drives them: docker build -f Dockerfile.loadtest . Point it at a server with LOADTEST_TARGET
 # (or the Target field in the UI); with no target it spawns a server in here.
 FROM oven/bun:1.4.2-alpine
 # tini as PID 1: forwards signals and reaps the bot and server processes a run spawns.
