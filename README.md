@@ -142,10 +142,12 @@ tools/          load test
   `?gather=corona|flight` picks the effect, and every gather logs its frame rate
   (`[gather] corona, 301 players: 60 fps avg, p95 17 ms`, also in
   `window.daystarGatherStats`). Names are hidden in orbit unless the viewer turns
-  them on in ⚙ Settings. Trails, rebuilt every frame, are drawn only for the 60
-  moving players nearest the middle of the screen. Corona won an A/B comparison
-  with 301 players: 60 fps against the fly-in's 35, and 301 players in orbit went
-  from 28 to 60 fps with the trail budget
+  them on in ⚙ Settings. Player trails are rope meshes too (resampled to 24
+  points each frame so the taper in their texture spans the whole trail): drawn
+  as Graphics rebuilt every frame they had to be limited to the 60 nearest
+  players (301 players in orbit ran at 28 fps with all of them, the fly-in at
+  35); now all 301 have one and everything runs at 60 fps, with a budget of 400
+  left for very big rooms
   (desktop Chrome). Nobody steers until the host releases them, and then
   everyone stays where its orbit had them (clients compute the same spots, so
   nothing is sent). Polls are off meanwhile; the orbit stays if the host leaves.

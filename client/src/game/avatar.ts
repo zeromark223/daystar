@@ -1,4 +1,4 @@
-import { Container, Graphics, Sprite, Text } from "pixi.js";
+import { Container, Graphics, Mesh, Point, RopeGeometry, Sprite, Text } from "pixi.js";
 import { appearanceOf, type AppearanceId, type BodyKind } from "../../../shared/src/appearance.ts";
 import { SUN_RADIUS, WORLD_CENTER } from "../../../shared/src/constants.ts";
 import type { Direction } from "../../../shared/src/direction.ts";
@@ -8,7 +8,7 @@ import { brightnessAt } from "../../../shared/src/space.ts";
 import { BodyView, SIZES } from "./bodies.ts";
 import { Track } from "./timeline.ts";
 import { REACTIONS } from "../../../shared/src/audience.ts";
-import { emojiTexture, glowTexture } from "./textures.ts";
+import { emojiTexture, glowTexture, trailTexture } from "./textures.ts";
 
 const BUBBLE_MS = 6000;
 const BUBBLE_MAX_WIDTH = 220;
@@ -16,6 +16,13 @@ const BUBBLE_MAX_WIDTH = 220;
 /** Trail: positions kept while moving, and how often one is recorded. */
 const TRAIL_POINTS = 14;
 const TRAIL_EVERY_MS = 45;
+/**
+ * The trail is a rope mesh of this many points, resampled each frame from the
+ * recorded points, so its taper (in the texture) always spans the whole trail.
+ * Moving points is all a frame costs; drawn as Graphics strokes rebuilt every
+ * frame, trails were what slowed big rooms down.
+ */
+const TRAIL_MESH_POINTS = 24;
 /** A trail point this much later than the last one starts a new trail. */
 const TRAIL_GAP_MS = 250;
 /** A streak (gather) keeps this many points, one per GATHER_TRAIL_STEP_MS of flight (see Game). */
@@ -56,7 +63,9 @@ export class Avatar {
   /** Last drawn position and the velocity it implies (world px/s), for faces and tails. */
   private lastDrawn = { x: 0, y: 0, t: 0 };
   private velocity = { vx: 0, vy: 0 };
-  private readonly trail = new Graphics();
+  private readonly trailPath = Array.from({ length: TRAIL_MESH_POINTS }, () => new Point());
+  private readonly trailGeometry = new RopeGeometry({ points: this.trailPath, width: 1 });
+  private readonly trail = new Mesh({ geometry: this.trailGeometry, texture: trailTexture() });
   private readonly trailPoints: { x: number; y: number }[] = [];
   private lastTrailAt = 0;
   /** Only for the local player: a faint marker once it has faded near the edge. */
@@ -78,7 +87,6 @@ export class Avatar {
    * only the nearest few dozen have one (see TRAIL_BUDGET in game.ts).
    */
   trailAllowed = true;
-  private trailDrawn = false;
   /** 0..1: hidden while the corona gather plays, fading in after (not drawn at 0). */
   private reveal = 1;
   /** Orbit mode hides names (unless the viewer turned them on); reactions and bubbles stay. */
@@ -125,6 +133,7 @@ export class Avatar {
       bodies.addChild(this.marker);
     }
     this.trail.blendMode = "add";
+    this.trail.tint = this.color;
     // A comet draws its own tail.
     this.trail.renderable = this.kind !== "comet";
     trails.addChild(this.trail);
@@ -432,30 +441,27 @@ export class Avatar {
       pts.shift(); // let the trail shrink away once stopped
       this.lastTrailAt = now;
     }
-    if (!this.trailAllowed || pts.length < 2 || brightness <= 0) {
-      if (this.trailDrawn) this.trail.clear();
-      this.trailDrawn = false;
+    if (!this.trailAllowed || pts.length < 1 || brightness <= 0) {
+      this.trail.visible = false;
       return;
     }
-    this.trail.clear();
-    this.trailDrawn = true;
+    // Head first: where the player is now, then back through the recorded points.
+    const n = pts.length + 1;
+    const at = (i: number) => (i === 0 ? this : pts[pts.length - i]);
+    for (let j = 0; j < TRAIL_MESH_POINTS; j++) {
+      const f = (j / (TRAIL_MESH_POINTS - 1)) * (n - 1);
+      const i = Math.min(n - 2, Math.floor(f));
+      const t = f - i;
+      const a = at(i);
+      const b = at(i + 1);
+      this.trailPath[j].set(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
+    }
     // Capped so big bodies do not drag a fat band behind them.
     const width = Math.min(SIZES[this.kind].core, 11) * (this.streak ? 1.6 : 1.1) * scale;
-    const alpha = this.streak ? 0.85 : 0.5;
-    for (let i = 1; i < pts.length; i++) {
-      const k = i / pts.length;
-      this.trail
-        .moveTo(pts[i - 1].x, pts[i - 1].y)
-        .lineTo(pts[i].x, pts[i].y)
-        .stroke({ color: this.color, width: width * k, alpha: alpha * k * brightness, cap: "round" });
-    }
-    const head = pts.at(-1)!;
-    this.trail.moveTo(head.x, head.y).lineTo(this.x, this.y).stroke({
-      color: this.color,
-      width,
-      alpha: 0.5 * brightness,
-      cap: "round",
-    });
+    // RopeGeometry keeps its width private; it is the trail's full width at the head.
+    (this.trailGeometry as unknown as { _width: number })._width = width;
+    this.trailGeometry.updateVertices();
+    this.trail.alpha = (this.streak ? 0.85 : 0.5) * brightness;
   }
 
   destroy(): void {

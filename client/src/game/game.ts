@@ -71,10 +71,11 @@ interface GatherStats {
 
 /**
  * At most this many players draw a trail each frame, the ones nearest the middle
- * of the screen. Trails are rebuilt every frame and were what made big gathers
- * slow (301 players in orbit: 28 fps with every trail, 61 without).
+ * of the screen. Trails used to be Graphics rebuilt every frame and needed a
+ * budget of 60 (301 players in orbit: 28 fps with every trail); as rope meshes
+ * all 301 have one at 60 fps, and this only guards very big rooms.
  */
-const TRAIL_BUDGET = 60;
+const TRAIL_BUDGET = 400;
 
 /** A player changing seat mid-orbit (made speaker, ...) glides there in this long. */
 const RESEAT_MS = 1_200;

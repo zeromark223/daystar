@@ -121,3 +121,35 @@ export function emojiTexture(emoji: string): Texture {
   emojis.set(emoji, texture);
   return texture;
 }
+
+let trail: Texture | null = null;
+
+/**
+ * A light trail along a rope mesh, white (tinted per player): x runs from the
+ * head (left, full width and brightness) to the tail (right, thin and faded).
+ */
+export function trailTexture(): Texture {
+  if (trail) return trail;
+  const w = 256;
+  const h = 32;
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d")!;
+  const img = ctx.createImageData(w, h);
+  for (let x = 0; x < w; x++) {
+    const u = x / (w - 1);
+    const half = Math.max(0.02, 1 - u);
+    for (let y = 0; y < h; y++) {
+      const v = Math.abs(y - (h - 1) / 2) / (h / 2);
+      // A soft edge where the trail narrows.
+      const inside = Math.min(1, Math.max(0, (half - v) / 0.15 + 0.5));
+      const i = (y * w + x) * 4;
+      img.data[i] = img.data[i + 1] = img.data[i + 2] = 255;
+      img.data[i + 3] = Math.round(255 * inside * (1 - u));
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  trail = Texture.from(canvas);
+  return trail;
+}
