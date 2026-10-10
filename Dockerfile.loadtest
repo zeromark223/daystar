@@ -1,6 +1,7 @@
 # The load test with its web UI (tools/loadtest-web): the bots run in this
-# container, the browser drives them: docker build -f Dockerfile.loadtest . Point it at a server with LOADTEST_TARGET
-# (or the Target field in the UI); with no target it spawns a server in here.
+# container, the browser drives them. Build: docker build -f Dockerfile.loadtest .
+# Point it at a server with LOADTEST_TARGET (or the Target field in the UI); with
+# no target it spawns a server in here.
 FROM oven/bun:1.4.2-alpine
 # tini as PID 1: forwards signals and reaps the bot and server processes a run spawns.
 RUN apk add --no-cache tini
@@ -13,10 +14,12 @@ COPY package.json ./
 COPY shared/src shared/src
 # For runs without a target, which spawn a server in the container.
 COPY server/src server/src
-COPY tools/loadtest.ts tools/loadtest.ts
+COPY tools/loadtest.ts tools/loadtest-crowd.ts tools/
 COPY tools/voice tools/voice
 COPY tools/loadtest-web tools/loadtest-web
-# Each run's CSV goes here (lost with the container; download it from the UI).
+# Each run's CSV goes here, and active-run.json, the endless run (e.g. a demo
+# crowd) to start again after a restart. Mount a volume here to keep them across
+# redeploys too.
 RUN mkdir loadtest-logs && chown bun:bun loadtest-logs
 USER bun
 EXPOSE 3100

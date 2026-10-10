@@ -419,6 +419,16 @@ h2 {
   font-size: 12px;
 }
 
+.run-note {
+  margin: 0;
+  font-size: 13px;
+  color: var(--accent);
+}
+
+.run-note:empty {
+  display: none;
+}
+
 .summary {
   margin: 0;
   font-weight: 500;

@@ -33,6 +33,7 @@ import {
   SNAPSHOT_OPCODE,
 } from "../shared/src/protocol.ts";
 import { roleFromIndex, type Role } from "../shared/src/roles.ts";
+import { chatLine, personName } from "./loadtest-crowd.ts";
 import { readOpusPackets } from "./voice/ogg.ts";
 
 const ROOT = resolve(import.meta.dirname, "..");
@@ -126,6 +127,11 @@ interface Bot {
   heading: number;
   nextTurn: number;
   nextChat: number;
+  /** Its last chat line, and when it sent it (0 once echoed), for the chat round trip. */
+  lastLine: string;
+  chatSentAt: number;
+  /** Failed reconnects in a row (backoff); reset once the server welcomes it. */
+  retries: number;
   lastSnapshot: number;
   joined: boolean;
   /** Walking or standing, and until when (see --moving). */
@@ -260,9 +266,13 @@ function runWorker(): void {
   let counters = newCounters();
   const conversations = new Map<string, Conversation>();
 
-  /** Like the web client: ask the agent (or server) where to connect; retries a few times. */
-  async function place(path: string, body: object): Promise<{ url: string; ticket: string | null } | null> {
-    for (let attempt = 0; attempt < 3; attempt++) {
+  /**
+   * Like the web client: ask the agent (or server) where to connect. Retries a few
+   * times, or (`forever`, for joins) until it works, backing off up to 30 s: bots
+   * come back by themselves after the server restarts or the network drops.
+   */
+  async function place(path: string, body: object, forever = false): Promise<{ url: string; ticket: string | null } | null> {
+    for (let attempt = 0; forever || attempt < 3; attempt++) {
       try {
         const res = await fetch(`${baseUrl}${path}`, {
           method: "POST",
@@ -279,14 +289,17 @@ function runWorker(): void {
       } catch {
         // retried below
       }
-      await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+      if (attempt >= 2) counters.errors++;
+      await new Promise((r) => setTimeout(r, backoffMs(attempt)));
     }
-    counters.errors++;
     return null;
   }
 
+  /** 0.5, 1, 2, 4 ... up to 30 s, with jitter so a crowd does not come back all at once. */
+  const backoffMs = (attempt: number) => Math.min(30_000, 500 * 2 ** attempt) * (0.5 + Math.random());
+
   async function addBot(room: string, name: string, part: Bot["part"], hostKey: string, voice: number): Promise<void> {
-    const placed = await place("/api/join", { room });
+    const placed = await place("/api/join", { room }, true);
     if (!placed) return;
     const appearance = Math.floor(Math.random() * APPEARANCE_COUNT);
     const bot: Bot = {
@@ -308,6 +321,9 @@ function runWorker(): void {
       heading: Math.floor(Math.random() * DIRS.length),
       nextTurn: 0,
       nextChat: chatEveryMs > 0 && part === "guest" ? Date.now() + Math.random() * chatEveryMs : Infinity,
+      lastLine: "",
+      chatSentAt: 0,
+      retries: 0,
       lastSnapshot: 0,
       joined: false,
       switching: false,
@@ -377,6 +393,7 @@ function runWorker(): void {
         bot.role = w.role;
         bot.snapshotHz = w.snapshotHz;
         bot.joined = true;
+        bot.retries = 0;
         if (bot.part !== "guest") promoteSpeakers(bot.room);
         return;
       }
@@ -388,8 +405,9 @@ function runWorker(): void {
       } else if (msg?.t === "role" && msg.id === bot.id) {
         bot.role = msg.role;
         if (bot.part !== "guest") promoteSpeakers(bot.room);
-      } else if (msg?.t === "chat" && msg.message.playerId === bot.id) {
-        chat.add(Date.now() - Number(msg.message.text.split(" ")[1]));
+      } else if (msg?.t === "chat" && msg.message.playerId === bot.id && bot.chatSentAt) {
+        chat.add(Date.now() - bot.chatSentAt);
+        bot.chatSentAt = 0;
       } else if (msg?.t === "correction") {
         bot.x = msg.x;
         bot.y = msg.y;
@@ -419,11 +437,16 @@ function runWorker(): void {
     connect(bot, placed.url);
   }
 
-  /** The socket dropped: rejoin the room through the agent, as the client does. */
+  /**
+   * The socket dropped (or never opened): rejoin the room through the agent, as the
+   * client does, after a pause that grows while the server stays unreachable.
+   */
   async function rejoin(bot: Bot): Promise<void> {
     if (bot.switching) return;
     bot.switching = true;
-    const placed = await place("/api/join", { room: bot.room });
+    await new Promise((r) => setTimeout(r, bot.retries === 0 ? Math.random() * 1000 : backoffMs(bot.retries)));
+    bot.retries++;
+    const placed = await place("/api/join", { room: bot.room }, true);
     bot.switching = false;
     if (!placed) return;
     bot.ticket = placed.ticket;
@@ -525,7 +548,9 @@ function runWorker(): void {
       const bot = bots[i];
       if (!bot.joined || bot.ws.readyState !== WebSocket.OPEN) continue;
       if (now >= bot.nextChat) {
-        const chatFrame = encodeClientMessage({ t: "chat", text: `ping ${now}` });
+        bot.lastLine = chatLine(bot.lastLine);
+        const chatFrame = encodeClientMessage({ t: "chat", text: bot.lastLine });
+        bot.chatSentAt = now;
         bot.ws.send(chatFrame);
         counters.bytesOut += chatFrame.byteLength;
         bot.nextChat = now + chatEveryMs * (0.5 + Math.random());
@@ -587,7 +612,11 @@ function runWorker(): void {
   type Command =
     | { cmd: "config"; baseUrl: string; chatEveryMs: number; movingRatio: number; voiceEpoch: number; measureEvery: number }
     | { cmd: "add"; room: string; name: string; part?: Bot["part"]; hostKey?: string; voice?: number };
-  createInterface({ input: process.stdin }).on("line", (line) => {
+  const commands = createInterface({ input: process.stdin });
+  // The orchestrator went away (killed, crashed): take the bots with us, never
+  // leave them connected with nobody to stop them.
+  commands.on("close", () => process.exit(0));
+  commands.on("line", (line) => {
     const msg = JSON.parse(line) as Command;
     if (msg.cmd === "config") {
       baseUrl = msg.baseUrl;
@@ -644,11 +673,12 @@ export interface OptionSpec {
 export const OPTION_SPECS: OptionSpec[] = [
   { name: "steps", type: "string", default: "50,100,200", arg: "<n,n,...>", group: "Load", help: "total bot counts to ramp through" },
   { name: "max", type: "string", arg: "<n>", group: "Load", help: "instead of steps: add bots without pause (at --ramp) up to n, then hold --hold seconds; a row every --report-every seconds" },
-  { name: "hold", type: "string", default: "20", arg: "<s>", group: "Load", help: "seconds at each step; 2nd half measured" },
+  { name: "hold", type: "string", default: "20", arg: "<s>", group: "Load", help: "seconds at each step, 2nd half measured (at most 580); with --max, seconds to stay at the maximum, 0 = until stopped" },
   { name: "ramp", type: "string", default: "100", arg: "<n>", group: "Load", help: "new connections per second" },
   { name: "report-every", type: "string", default: "5", arg: "<s>", group: "Load", help: "seconds per row with --max" },
   { name: "keep-going", type: "boolean", default: false, group: "Load", help: "continue ramping after a failed step (--max always goes on)" },
   { name: "moving", type: "string", default: "1", arg: "<0..1>", group: "Bots", help: "share of time each bot spends walking; the rest it stands still and sends nothing (1 = everyone always walking)" },
+  { name: "names", type: "string", default: "guest", arg: "<guest|people>", group: "Bots", help: "what guests are called: Guest 0, Guest 1 ... or people's first names (for demos)" },
   { name: "chat-every", type: "string", default: "30", arg: "<s>", group: "Bots", help: "seconds between chat messages per bot; 0 = no chat" },
   { name: "measure-share", type: "string", default: "0.1", arg: "<s>", group: "Bots", help: "share of bots that time moves, snapshot gaps and voice; the rest only count frames, which keeps bots cheap" },
   { name: "workers", type: "string", default: "6", arg: "<n>", group: "Bots", help: "bot processes" },
@@ -722,6 +752,8 @@ export interface Options {
   /** --room: every bot joins this room. */
   room: string | null;
   keepGoing: boolean;
+  /** Guests' names: "Guest 12", or a person's first name. */
+  names: "guest" | "people";
   healthToken: string;
   /** Remote server, or null to spawn a local one. */
   target: { ws: string; http: string } | null;
@@ -765,7 +797,7 @@ export function parseOptions(input: string[], cli = false): Options {
 
   /** Parsed values: options with a default are always there. */
   type Values = Record<
-    "steps" | "report-every" | "room-size" | "hold" | "ramp" | "workers" | "chat-every" | "speakers" | "measure-share" | "moving" |
+    "steps" | "report-every" | "room-size" | "hold" | "names" | "ramp" | "workers" | "chat-every" | "speakers" | "measure-share" | "moving" |
       "health-token" | "port" | "cluster" | "capacity" | "room-prefix",
     string
   > &
@@ -842,7 +874,7 @@ export function parseOptions(input: string[], cli = false): Options {
   const options: Options = {
     steps,
     roomSize: int("room-size", values["room-size"], 0),
-    hold: int("hold", values.hold, 2),
+    hold: int("hold", values.hold, 0),
     ramp: int("ramp", values.ramp, 1),
     workers: int("workers", values.workers, 1),
     chatEveryMs: int("chat-every", values["chat-every"], 0) * 1000,
@@ -855,6 +887,7 @@ export function parseOptions(input: string[], cli = false): Options {
     roomPrefix: values["room-prefix"],
     room,
     keepGoing: values["keep-going"],
+    names: values.names === "people" ? "people" : values.names === "guest" ? "guest" : fail(`--names is guest or people, got "${values.names}"`),
     max: values.max === undefined ? null : int("max", values.max, 1),
     reportEvery: int("report-every", values["report-every"], 1),
     log: values["no-log"] ? null : (values.log ?? defaultLogPath(values.target)),
@@ -867,7 +900,10 @@ export function parseOptions(input: string[], cli = false): Options {
   const firstCount = options.max ?? options.steps[0];
   if (options.speakers > Math.min(perRoom, firstCount)) fail("--speakers must fit in a room and in the first step");
   // The server keeps 5 minutes of samples; a longer window would be cut short.
-  if (options.hold / 2 > 290) fail("--hold must be at most 580 seconds");
+  if (options.max === null) {
+    if (options.hold < 2) fail("--hold must be at least 2 seconds with steps (0, until stopped, needs --max)");
+    if (options.hold / 2 > 290) fail("--hold must be at most 580 seconds with steps");
+  }
 
   // A bare run (no options) keeps the saved ones instead of erasing them.
   if (cli && hadOptions) writeFileSync(LAST_FILE, JSON.stringify({ argv, savedAt: new Date().toISOString() }, null, 2) + "\n");
@@ -1062,6 +1098,7 @@ async function orchestrate(
   }
   out.log(opts.target ? `Target ${wsUrl} (${runtimeLabel})` : `Spawned ${runtimeLabel} server on port ${opts.port}`);
   out.log(`Bots walk ${Math.round(opts.movingRatio * 100)}% of the time${chatEveryMs ? "" : ", no chat"}`);
+  if (opts.max !== null && hold === 0) out.log(`Keeps ${opts.max} bots in until stopped; dropped bots reconnect by themselves`);
 
   // With --speakers the server creates the rooms, and hands out their host keys.
   const roomCount = roomSize > 0 ? Math.ceil(maxBots / roomSize) : 1;
@@ -1109,7 +1146,7 @@ async function orchestrate(
   const assign = (i: number) => {
     const r = roomIndex(i);
     const seat = roomSize > 0 ? i % roomSize : i;
-    if (seat >= speakers) return { worker: workers[i % workerCount], cmd: { cmd: "add", room: roomFor(i), name: `Guest ${i}` } };
+    if (seat >= speakers) return { worker: workers[i % workerCount], cmd: { cmd: "add", room: roomFor(i), name: opts.names === "people" ? personName(i) : `Guest ${i}` } };
     const part = seat === 0 ? "host" : "speaker";
     return {
       worker: workers[r % workerCount],
@@ -1336,7 +1373,8 @@ async function orchestrate(
         track(total, ok);
         rowFrom = now;
       }
-      if (maxReachedAt !== null && now - maxReachedAt >= hold * 1000) break;
+      // --hold 0: stay until stopped (bots that drop come back by themselves).
+      if (hold > 0 && maxReachedAt !== null && now - maxReachedAt >= hold * 1000) break;
     }
   } else {
     for (const target of steps) {

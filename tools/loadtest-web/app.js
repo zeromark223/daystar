@@ -27,7 +27,7 @@ const COLUMNS = [
 
 /** Small charts over the run's rows. */
 const CHARTS = [
-  { key: "bots", label: "Bots", unit: "" },
+  { key: "joined", label: "Bots in", unit: "" },
   { key: "srv_cpu", label: "Server CPU", unit: "%", scale: 100 },
   { key: "out_mbps", label: "Out", unit: " Mbps" },
   { key: "move_p99_ms", label: "Move p99", unit: " ms" },
@@ -393,7 +393,15 @@ function show(run) {
 const isLive = (run) => run.status === "running" || run.status === "stopping";
 
 function absorb(run) {
-  Object.assign(shown, { status: run.status, summary: run.summary, endedAt: run.endedAt, hasCsv: run.hasCsv, next: run.next });
+  Object.assign(shown, {
+    status: run.status,
+    summary: run.summary,
+    endedAt: run.endedAt,
+    hasCsv: run.hasCsv,
+    next: run.next,
+    endless: run.endless,
+    resumedFrom: run.resumedFrom,
+  });
   for (const e of run.events) {
     if (e.type === "row") shown.rows.push(e.values);
     else if (e.type === "header") shown.header = e.text;
@@ -429,8 +437,16 @@ function renderRun() {
   $("stop").disabled = run.status === "stopping";
   $("csv").hidden = !run.hasCsv;
   $("summary").textContent = run.summary;
-  const secs = Math.round(((run.endedAt ?? Date.now()) - run.startedAt) / 1000);
-  $("elapsed").textContent = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
+  const live = isLive(run);
+  const notes = [];
+  if (run.endless && live) notes.push("Keeps its bots in until you stop it. Closing this page does not stop it; open the page again to come back to it.");
+  if (run.resumedFrom) notes.push(`Started again after the load test server restarted; first started ${new Date(run.resumedFrom).toLocaleString()}.`);
+  $("run-note").textContent = notes.join(" ");
+  document.title = live ? `● ${run.name} · Daystar Load Test` : "Daystar Load Test";
+  const secs = Math.round(((run.endedAt ?? Date.now()) - (run.resumedFrom ?? run.startedAt)) / 1000);
+  const h = Math.floor(secs / 3600);
+  const mm = String(Math.floor((secs % 3600) / 60)).padStart(h ? 2 : 1, "0");
+  $("elapsed").textContent = `${h ? `${h}:` : ""}${mm}:${String(secs % 60).padStart(2, "0")}`;
   renderCharts(run.rows);
   renderTable(run.rows);
   const pre = $("output");

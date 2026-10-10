@@ -477,7 +477,17 @@ token. The form is generated from the command-line options, and the command it
 amounts to is shown under it, so a run from the UI can be repeated in a terminal.
 
 One run at a time; the bots run where the UI server runs, the browser only drives
-them. The server keeps the last 20 runs in memory.
+them, so closing the page leaves the run going and opening it again picks it up.
+The server keeps the last 20 runs in memory.
+
+**Demo crowd.** `--max N --hold 0` keeps N bots in until stopped, and bots always
+reconnect by themselves when their socket drops or the server restarts (backing off
+up to 30 s, with jitter). The *Demo crowd* template uses it for a room that looks
+alive: 300 bots with first names (`--names people`), a third of them walking at any
+time, chatting ordinary lines every few minutes each. Such a run is also saved to
+`loadtest-logs/active-run.json` and started again when the UI server restarts, until
+someone presses Stop; on Coolify, mount a volume at `/app/loadtest-logs` to keep it
+across redeploys. If the UI server dies, its bots go with it (no orphaned bots).
 
 | Variable | |
 | --- | --- |

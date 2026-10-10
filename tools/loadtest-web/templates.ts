@@ -12,6 +12,14 @@ export interface Template {
 
 export const TEMPLATES: Template[] = [
   {
+    id: "demo",
+    name: "Demo crowd (until stopped)",
+    description:
+      "300 people with names who wander, stand around and chat now and then, kept in until you stop it: dropped bots reconnect, and it starts again if the load test server restarts. Set Room (or a room link as Target).",
+    // About a third walking at any time; one chat line every ~1.3 s across the room.
+    options: { room: "", max: "300", ramp: "10", hold: "0", moving: "0.35", "chat-every": "400", names: "people", "report-every": "30" },
+  },
+  {
     id: "smoke",
     name: "Smoke test",
     description: "A handful of bots for a minute: is the server up, do joins, moves and chat work?",

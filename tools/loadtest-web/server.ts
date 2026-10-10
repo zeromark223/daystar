@@ -1,8 +1,13 @@
 /**
  * The load test with a web UI: pick or edit a scenario in the browser, start it,
  * watch its rows live, stop it, download its CSV. One run at a time; the bots run
- * here (tools/loadtest.ts), the browser only drives them. Scenarios live in the
+ * here (tools/loadtest.ts), the browser only drives them: closing the page leaves
+ * the run going, and opening it again picks the run up. Scenarios live in the
  * browser's storage; this server keeps the last few runs in memory.
+ *
+ * A run that holds its bots until stopped (--max with --hold 0, e.g. a demo
+ * crowd) is also written to loadtest-logs/active-run.json and started again when
+ * this server restarts, until someone stops it.
  *
  *   LOADTEST_TOKEN=… bun tools/loadtest-web/server.ts
  *
@@ -13,8 +18,8 @@
  *   HEALTH_TOKEN     the target's /api/health token (never sent to the browser)
  */
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { basename, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, resolve } from "node:path";
 import { OPTION_SPECS, parseOptions, runOrchestrator, UsageError, type Row } from "../loadtest.ts";
 import { TEMPLATES } from "./templates.ts";
 
@@ -22,6 +27,10 @@ const PORT = Number(process.env.LOADTEST_PORT) || 3100;
 const TOKEN = process.env.LOADTEST_TOKEN || randomBytes(18).toString("base64url");
 const MAX_RUNS = 20;
 const MAX_EVENTS = 5000;
+/** The endless run to start again after a restart (see above). */
+const ACTIVE_FILE = resolve(import.meta.dirname, "../../loadtest-logs/active-run.json");
+/** Set while this server shuts down: its endless run is to come back, not be forgotten. */
+let shuttingDown = false;
 const STATIC: Record<string, string> = {
   "/": "index.html",
   "/app.js": "app.js",
@@ -50,6 +59,10 @@ interface Run {
   endedAt: number | null;
   summary: string;
   log: string | null;
+  /** Holds its bots until stopped. */
+  endless: boolean;
+  /** Started again after a restart of this server: when it first started. */
+  resumedFrom: number | null;
   events: RunEvent[];
   /** Events dropped from the front when a run gets long. */
   dropped: number;
@@ -88,8 +101,9 @@ function toArgv(options: unknown): string[] {
   return argv;
 }
 
-function startRun(name: string, argv: string[]): Run {
+function startRun(name: string, argv: string[], resumedFrom: number | null = null): Run {
   const opts = parseOptions(argv);
+  const endless = opts.max !== null && opts.hold === 0;
   const run: Run = {
     id: nextId++,
     name,
@@ -99,6 +113,8 @@ function startRun(name: string, argv: string[]): Run {
     endedAt: null,
     summary: "",
     log: opts.log,
+    endless,
+    resumedFrom,
     events: [],
     dropped: 0,
     abort: new AbortController(),
@@ -106,6 +122,11 @@ function startRun(name: string, argv: string[]): Run {
   runs.push(run);
   while (runs.length > MAX_RUNS) runs.splice(runs.findIndex((r) => r !== current()), 1);
   const event = (type: "log" | "warn" | "header") => (text: string) => push(run, { t: Date.now(), type, text });
+  if (resumedFrom !== null) event("log")(`Resumed after the load test server restarted (first started ${new Date(resumedFrom).toISOString()})`);
+  if (endless) {
+    mkdirSync(dirname(ACTIVE_FILE), { recursive: true });
+    writeFileSync(ACTIVE_FILE, JSON.stringify({ name, argv: opts.argv, startedAt: resumedFrom ?? run.startedAt }) + "\n");
+  }
   runOrchestrator(
     opts,
     { log: event("log"), warn: event("warn"), header: event("header"), row: (text, values) => push(run, { t: Date.now(), type: "row", text, values }) },
@@ -122,6 +143,8 @@ function startRun(name: string, argv: string[]): Run {
     })
     .finally(() => {
       run.endedAt = Date.now();
+      // Over for good (stopped, or failed): do not bring it back on the next start.
+      if (endless && !shuttingDown) rmSync(ACTIVE_FILE, { force: true });
     });
   return run;
 }
@@ -137,6 +160,8 @@ function view(run: Run, since = 0) {
     startedAt: run.startedAt,
     endedAt: run.endedAt,
     summary: run.summary,
+    endless: run.endless,
+    resumedFrom: run.resumedFrom,
     hasCsv: run.log !== null && existsSync(run.log),
     events: run.events.slice(from),
     next: run.dropped + run.events.length,
@@ -228,9 +253,22 @@ const server = Bun.serve({
 console.log(`Load test UI on http://localhost:${server.port}`);
 if (!process.env.LOADTEST_TOKEN) console.log(`No LOADTEST_TOKEN set; this run's token: ${TOKEN}`);
 
+// An endless run that was going when this server last stopped: start it again.
+if (existsSync(ACTIVE_FILE)) {
+  try {
+    const saved = JSON.parse(readFileSync(ACTIVE_FILE, "utf8")) as { name: string; argv: string[]; startedAt: number };
+    const run = startRun(saved.name, saved.argv, saved.startedAt);
+    console.log(`Resumed run #${run.id} "${saved.name}": bun tools/loadtest.ts ${run.argv.join(" ")}`);
+  } catch (err) {
+    console.error(`Could not resume ${ACTIVE_FILE}: ${(err as Error).message}`);
+    rmSync(ACTIVE_FILE, { force: true });
+  }
+}
+
 // Stopping the container: stop the run so its bots and any spawned server go too.
 for (const sig of ["SIGTERM", "SIGINT"] as const) {
   process.on(sig, async () => {
+    shuttingDown = true;
     const run = current();
     if (run) {
       run.abort.abort();
