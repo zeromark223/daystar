@@ -18,6 +18,7 @@ import { KeyboardInput } from "./input.ts";
 import { Minimap } from "./minimap.ts";
 import { PollZones } from "./poll-zones.ts";
 import { PlayoutClock, Track } from "./timeline.ts";
+import { TeleportFx } from "./teleport.ts";
 import {
   BURST_TRAIL_POINTS,
   BurstTrails,
@@ -62,7 +63,7 @@ export type GatherStyle = "flight" | "corona";
 
 /** Frame times while a gather plays, for comparing the two styles. */
 interface GatherStats {
-  style: GatherStyle;
+  style: GatherStyle | "release";
   players: number;
   frames: number;
   avgFps: number;
@@ -159,6 +160,11 @@ export class Game {
   private gatherStyle: GatherStyle = "corona";
   private readonly corona = new CoronaEffect();
   private readonly burstTrails = new BurstTrails();
+  private readonly teleports = new TeleportFx();
+  /** What the frames being recorded are for (GatherStats). */
+  private statsLabel: GatherStyle | "release" = "corona";
+  /** The part of the world on screen last frame, with a margin (effects off screen are skipped). */
+  private onScreen = { x0: 0, y0: 0, x1: 0, y1: 0 };
   /** Corona gather: when it started (local time); players fade in by ring after it. */
   private coronaAt = -1;
   /** Frame times of the gather playing now, for GatherStats. */
@@ -199,6 +205,7 @@ export class Game {
       game.trails,
       game.burstTrails.view,
       game.bodies,
+      game.teleports.view,
       game.corona.view,
     );
     app.stage.addChild(game.scene.sky, game.world, game.overlay, game.minimap.view);
@@ -302,6 +309,7 @@ export class Game {
     this.burstTrails.end();
     this.overview = this.overviewTarget = 0;
     this.release = null;
+    this.teleports.clear();
   }
 
   /** In orbit (we cannot steer): until our own teleport home when released. */
@@ -334,6 +342,7 @@ export class Game {
     }
     const now = performance.now();
     this.gatherFrames = [];
+    this.statsLabel = this.gatherStyle;
     if (this.gatherStyle === "corona") {
       // Everyone is in their seat already, hidden; the corona plays and they appear.
       this.coronaAt = now;
@@ -375,7 +384,7 @@ export class Game {
     const sorted = [...frames].sort((a, b) => a - b);
     const total = frames.reduce((a, b) => a + b, 0);
     const stats: GatherStats = {
-      style: this.gatherStyle,
+      style: this.statsLabel,
       players: this.avatars.size,
       frames: frames.length,
       avgFps: Math.round((1000 * frames.length) / total),
@@ -423,6 +432,13 @@ export class Game {
       a.setReveal(1);
     }
     this.release = { at: performance.now(), seed: state.seed, homes: null, gone: new Set() };
+    this.gatherFrames = [];
+    this.statsLabel = "release";
+  }
+
+  private visible(x: number, y: number): boolean {
+    const v = this.onScreen;
+    return x >= v.x0 && x <= v.x1 && y >= v.y0 && y <= v.y1;
   }
 
   /** When seat `slot` teleports away, after the release started: a hash of the seat and the seed. */
@@ -450,6 +466,9 @@ export class Game {
       }
       release.gone.add(id);
       a.setNameVisible(true);
+      const color = appearanceOf(a.appearance).color;
+      // A flash where it vanishes from its seat...
+      if (this.visible(a.x, a.y)) this.teleports.spawn(a.x, a.y, color, true, now);
       const home = release.homes?.get(id);
       if (!home) {
         a.inView = false;
@@ -469,6 +488,8 @@ export class Game {
         a.teleport(this.clock.latest, { ...home, moving: false });
       }
       a.inView = true;
+      // ...and one where it appears.
+      if (this.visible(home.x, home.y)) this.teleports.spawn(home.x, home.y, color, false, now);
     }
     const home = release.homes?.get(id);
     if (home) {
@@ -483,6 +504,7 @@ export class Game {
   private finishRelease(): void {
     this.orbit = null;
     this.release = null;
+    this.endGatherStats();
     this.overviewTarget = 0;
     for (const a of this.avatars.values()) {
       a.setNameVisible(true);
@@ -787,6 +809,15 @@ export class Game {
   private update(deltaMs: number): void {
     const now = performance.now();
     this.gatherFrames?.push(deltaMs);
+    {
+      const zoom = this.world.scale.x;
+      const margin = 200 / zoom;
+      const { width, height } = this.app.screen;
+      this.onScreen.x0 = -this.world.x / zoom - margin;
+      this.onScreen.y0 = -this.world.y / zoom - margin;
+      this.onScreen.x1 = (width - this.world.x) / zoom + margin;
+      this.onScreen.y1 = (height - this.world.y) / zoom + margin;
+    }
     this.updateSelf(Math.min(deltaMs, 100) / 1000, now);
     const renderTime = this.clock.renderTime(now);
     for (const avatar of this.avatars.values()) {
@@ -794,6 +825,7 @@ export class Game {
     }
     if (this.orbit) this.placeInOrbit(now);
     this.corona.update(now, this.world.scale.x);
+    this.teleports.update(now, this.world.scale.x);
     this.updateCamera();
     const { width, height } = this.app.screen;
     let hostLevel = 0;
