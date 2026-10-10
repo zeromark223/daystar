@@ -656,7 +656,7 @@ export const OPTION_SPECS: OptionSpec[] = [
   { name: "speakers", type: "string", default: "0", arg: "<n>", group: "Rooms", help: "talkers per room: a host plus n-1 speakers holding a conversation (real Opus frames); rooms are created with POST /api/rooms and printed as invite links" },
   { name: "room-prefix", type: "string", default: "load", arg: "<s>", group: "Rooms", help: "rooms are <prefix>-all or <prefix>-0, -1, ... (not used with --speakers)" },
   { name: "room", type: "string", arg: "<id|link>", group: "Rooms", help: "put every bot in this existing room, e.g. the one you host (its id, or its invite link); not with --room-size or --speakers" },
-  { name: "target", type: "string", arg: "<url>", group: "Server", help: "test a running server instead of spawning one, e.g. https://meet.example.com" },
+  { name: "target", type: "string", arg: "<url>", group: "Server", help: "test a running server instead of spawning one, e.g. https://meet.example.com; a room's invite link also puts every bot in that room (like --room)" },
   { name: "health-token", type: "string", arg: "<s>", group: "Server", help: "token for the server's /api/health, if it sets HEALTH_TOKEN (default: HEALTH_TOKEN from the environment or .env)" },
   { name: "cluster", type: "string", default: "0", arg: "<n>", group: "Server", help: "spawn a local cluster (agent + n servers) instead of one server" },
   { name: "capacity", type: "string", default: "2000", arg: "<n>", group: "Server", help: "players per server for --cluster" },
@@ -825,10 +825,16 @@ export function parseOptions(input: string[], cli = false): Options {
   if (steps.some((n, i) => i > 0 && n <= steps[i - 1])) fail("--steps must be increasing");
   if (!ROOM_ID_PATTERN.test(`${values["room-prefix"]}-all`)) fail("--room-prefix may only use a-z, 0-9 and -");
   if (values.target !== undefined && Number(values.cluster) > 0) fail("--cluster spawns a local cluster; it cannot be combined with --target");
-  // An invite link works too: take the id after /r/.
-  const room = values.room === undefined ? null : (values.room.match(/\/r\/([^/?#]+)/)?.[1] ?? values.room);
+  // An invite link works too: take the id after /r/. A target that is a room's
+  // invite link means that room (its path used to be ignored, and the bots went
+  // to <prefix>-all instead of the room you had open).
+  const roomOf = (raw: string) => raw.match(/\/r\/([^/?#]+)/)?.[1];
+  const linked = values.target ? roomOf(values.target) : undefined;
+  const named = values.room === undefined || values.room === "" ? undefined : (roomOf(values.room) ?? values.room);
+  if (named && linked && named !== linked) fail(`--target links room "${linked}" but --room says "${named}"; give one`);
+  const room = named ?? linked ?? null;
   if (room !== null) {
-    if (!ROOM_ID_PATTERN.test(room)) fail(`--room: "${values.room}" is not a room id or invite link`);
+    if (!ROOM_ID_PATTERN.test(room)) fail(`--room: "${values.room ?? values.target}" is not a room id or invite link`);
     if (Number(values["room-size"]) > 0) fail("--room puts every bot in one room; it cannot be combined with --room-size");
     if (Number(values.speakers) > 0) fail("--room joins an existing room as guests; it cannot be combined with --speakers");
   }
@@ -880,7 +886,7 @@ function defaultLogPath(target: string | undefined): string {
   return resolve(ROOT, "loadtest-logs", `${stamp}-${host}.csv`);
 }
 
-/** Accepts http(s):// or ws(s):// URLs; any path (e.g. a room link) is ignored. */
+/** Accepts http(s):// or ws(s):// URLs; the path (e.g. a room link, see --room) is not part of it. */
 function parseTarget(raw: string): { ws: string; http: string } {
   let url: URL;
   try {
