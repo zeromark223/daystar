@@ -22,6 +22,7 @@ const COLUMNS = [
   ["chat_p99_ms", "chat p99"],
   ["voice_p99_ms", "voice p99"],
   ["voice_rx_pct", "voice rx %"],
+  ["people_voice_fps", "people voice/s"],
   ["drops", "drops"],
   ["close_codes", "close codes"],
   ["verdict", "verdict"],

@@ -96,6 +96,11 @@ interface WorkerReport {
   voiceSent: [string, number][];
   /** Voice frames received by this worker's bots. */
   voiceRx: number;
+  /** Ids of this worker's talkers that are in (host and speakers), for everyone to know whose voice they can time. */
+  talkers: number[];
+  /** Voice frames of other speakers (people, e.g. you hosting) received by measured bots, and how many measured bots are in. */
+  otherVoice: number;
+  measuredIn: number;
   /** Frame spoken (end of its 20 ms) -> received by a bot, through the server. */
   voice: [number, number][];
   /** Lowest snapshot rate the server announced to this worker's bots (Hz), 0 if none yet. */
@@ -267,10 +272,13 @@ function runWorker(): void {
     migrations: 0,
     rejoins: 0,
     voiceRx: 0,
+    otherVoice: 0,
   });
   let counters = newCounters();
   let closeCodes = new Map<number, number>();
   const conversations = new Map<string, Conversation>();
+  /** Every worker's talkers (the orchestrator passes them round). */
+  let ourTalkers = new Set<number>();
 
   /**
    * Like the web client: ask the agent (or server) where to connect. Retries a few
@@ -383,7 +391,8 @@ function runWorker(): void {
         counters.voiceRx += data.getUint8(3 + data.getUint16(1, true) * SNAPSHOT_ENTRY + VOICE_COUNT_AFTER_PLAYERS);
         if (!bot.measured) return;
         const now = performance.now();
-        if (bot.lastSnapshot) gaps.add(now - bot.lastSnapshot);
+        // In orbit snapshots only carry voice, batched by design: not a measure of lateness.
+        if (bot.lastSnapshot && !bot.orbiting) gaps.add(now - bot.lastSnapshot);
         bot.lastSnapshot = now;
         if (voiceEpoch) readVoice(data);
         const own = bot.pending.length ? findInSnapshot(data, bot.id) : null;
@@ -485,8 +494,15 @@ function runWorker(): void {
     const now = Date.now();
     const current = Math.floor((now - voiceEpoch) / VOICE_FRAME_MS);
     for (let i = 0; i < count; i++) {
+      const id = data.getUint16(o, true);
       const seq = data.getUint16(o + 2, true);
       o += 6 + data.getUint16(o + 4, true);
+      // Only the load test's own talkers number frames from voiceEpoch; a person's
+      // client numbers them from its own clock, so their delay cannot be read here.
+      if (!ourTalkers.has(id)) {
+        counters.otherVoice++;
+        continue;
+      }
       // Unwrap the 16-bit seq to the latest frame index with those low bits.
       const k = current - (((current & 0xffff) - seq + 0x10000) & 0xffff);
       voiceLatency.add(now - (voiceEpoch + (k + 1) * VOICE_FRAME_MS));
@@ -621,6 +637,8 @@ function runWorker(): void {
       voiceSent: [...voiceSent],
       closeCodes: [...closeCodes],
       voice: voiceLatency.entries(),
+      talkers: bots.filter((b) => b.part !== "guest" && b.joined).map((b) => b.id),
+      measuredIn: bots.filter((b) => b.measured && b.joined).length,
       snapshotHz: bots.reduce((min, b) => (b.joined && b.snapshotHz && (!min || b.snapshotHz < min) ? b.snapshotHz : min), 0),
     };
     // Workers talk to the orchestrator in JSON lines over stdio .
@@ -638,7 +656,8 @@ function runWorker(): void {
     | { cmd: "config"; baseUrl: string; chatEveryMs: number; movingRatio: number; voiceEpoch: number; measureEvery: number }
     | { cmd: "add"; index: number; room: string; name: string; part?: Bot["part"]; hostKey?: string; voice?: number }
     /** --chat-source ai: the director's line for this bot. */
-    | { cmd: "say"; index: number; text: string };
+    | { cmd: "say"; index: number; text: string }
+    | { cmd: "talkers"; ids: number[] };
   const commands = createInterface({ input: process.stdin });
   // The orchestrator went away (killed, crashed): take the bots with us, never
   // leave them connected with nobody to stop them.
@@ -651,6 +670,8 @@ function runWorker(): void {
       movingRatio = msg.movingRatio;
       voiceEpoch = msg.voiceEpoch;
       measureEvery = msg.measureEvery;
+    } else if (msg.cmd === "talkers") {
+      ourTalkers = new Set(msg.ids);
     } else if (msg.cmd === "say") {
       const bot = byIndex.get(msg.index);
       if (!bot?.joined || bot.ws.readyState !== WebSocket.OPEN) return;
@@ -1175,6 +1196,9 @@ async function orchestrate(
 
   let window: WorkerReport[] = [];
   const connected = new Map<ChildProcess, number>();
+  /** Talker ids per worker, and the last list sent round. */
+  const talkersOf = new Map<ChildProcess, number[]>();
+  let talkerKey = "";
   for (let i = 0; i < workerCount; i++) {
     const w = spawn(BUN, [import.meta.filename, "--worker"], { stdio: ["pipe", "pipe", "inherit"] });
     createInterface({ input: w.stdout! }).on("line", (line) => {
@@ -1182,6 +1206,12 @@ async function orchestrate(
       const r = JSON.parse(line) as WorkerReport;
       window.push(r);
       connected.set(w, r.connected);
+      talkersOf.set(w, r.talkers);
+      const ids = [...talkersOf.values()].flat().sort((a, b) => a - b).join(",");
+      if (ids !== talkerKey) {
+        talkerKey = ids;
+        for (const x of workers) tell(x, { cmd: "talkers", ids: ids ? ids.split(",").map(Number) : [] });
+      }
     });
     workers.push(w);
   }
@@ -1224,14 +1254,14 @@ async function orchestrate(
   const timeCol = opts.max !== null;
   out.header(
     (timeCol ? "   t s | " : "") +
-      "bots | rooms | snap Hz | srv players | srv CPU | load | out Mbps | loop p99 | tick p99 | gc/s | gc max ms | RSS MB | heap MB | move p50/p99 ms | snap gap p50/p99/max ms | chat p50/p99 ms | voice p50/p99 ms | voice rx | in MB/s | corr | drops | migr | rejoin | verdict",
+      "bots | rooms | snap Hz | srv players | srv CPU | load | out Mbps | loop p99 | tick p99 | gc/s | gc max ms | RSS MB | heap MB | move p50/p99 ms | snap gap p50/p99/max ms | chat p50/p99 ms | voice p50/p99 ms | voice rx | people voice/s | in MB/s | corr | drops | migr | rejoin | verdict",
   );
 
   // CSV log: what was run, then one line per row.
   const CSV_COLUMNS = [
     "time_s", "bots", "joined", "rooms", "snap_hz", "srv_players", "srv_cpu", "load", "out_mbps", "loop_p99_ms", "tick_p99_ms",
     "gc_per_s", "gc_max_ms", "rss_mb", "heap_mb", "move_p50_ms", "move_p99_ms", "gap_p50_ms", "gap_p99_ms", "gap_max_ms", "chat_p50_ms",
-    "chat_p99_ms", "voice_p50_ms", "voice_p99_ms", "voice_rx_pct", "in_mb_s", "corrections", "drops", "close_codes", "migrations", "rejoins", "verdict",
+    "chat_p99_ms", "voice_p50_ms", "voice_p99_ms", "voice_rx_pct", "people_voice_fps", "in_mb_s", "corrections", "drops", "close_codes", "migrations", "rejoins", "verdict",
   ];
   if (opts.log) {
     mkdirSync(dirname(opts.log), { recursive: true });
@@ -1285,6 +1315,8 @@ async function orchestrate(
     const move = new Histogram();
     const voice = new Histogram();
     let voiceRx = 0;
+    let otherVoice = 0;
+    let measuredIn = 0;
     let voiceExpected = 0;
     let snapshotHz = 0;
     let bytesIn = 0;
@@ -1302,6 +1334,8 @@ async function orchestrate(
       move.merge(r.move);
       voice.merge(r.voice);
       voiceRx += r.voiceRx;
+      otherVoice += r.otherVoice;
+      measuredIn += r.measuredIn;
       if (r.snapshotHz && (!snapshotHz || r.snapshotHz < snapshotHz)) snapshotHz = r.snapshotHz;
       for (const [room, n] of r.voiceSent) voiceExpected += n * (members.get(room) ?? 0);
       bytesIn += r.bytesIn;
@@ -1340,6 +1374,10 @@ async function orchestrate(
     const voiceP99 = voice.percentile(0.99);
     // While bots are still joining, how much voice they should have had is unknown.
     const voiceShare = full && voiceExpected > 0 ? voiceRx / voiceExpected : NaN;
+    // People's voice (not the bots'): frames each listener got per second. One
+    // speaker heard in full is 50 (a frame per 20 ms); reports come once a second,
+    // so measuredIn summed over them counts bot-seconds.
+    const otherFps = otherVoice > 0 && measuredIn > 0 ? otherVoice / measuredIn : NaN;
     if (voice.total > 0 && voiceP99 > 300) problems.push("voice slow");
     if (full && voiceShare < 0.97) problems.push("voice lost");
     // e.g. "1006x3 1001x1": dropped connections vs. the server (or a proxy) closing them.
@@ -1357,7 +1395,7 @@ async function orchestrate(
       timeS, target, joined, rooms, snapshotHz || NaN, latest?.players ?? NaN, round(cpu, 3), round(load, 2), round(egress, 1),
       round(loopP99, 1), round(tickP99, 2), round(gcPerSec, 1), round(gcMax, 1), latest?.rssMb ?? NaN, latest?.heapMb ?? NaN, pct(move, 0.5),
       pct(move, 0.99), pct(gaps, 0.5), pct(gaps, 0.99), pct(gaps, 1), pct(chat, 0.5), pct(chat, 0.99), pct(voice, 0.5),
-      pct(voice, 0.99), round(voiceShare * 100, 1), round(bytesIn / elapsed / 1e6, 1), corrections, drops, codes, migrations, rejoins,
+      pct(voice, 0.99), round(voiceShare * 100, 1), round(otherFps, 1), round(bytesIn / elapsed / 1e6, 1), corrections, drops, codes, migrations, rejoins,
       verdict,
     ];
     const row = [
@@ -1380,6 +1418,7 @@ async function orchestrate(
       (chat.total ? `${chat.percentile(0.5)}/${chatP99}` : "-").padStart(15),
       (voice.total ? `${voice.percentile(0.5)}/${voiceP99}` : "-").padStart(16),
       show(voiceShare, () => `${Math.min(100, voiceShare * 100).toFixed(1)}%`).padStart(8),
+      show(otherFps, () => otherFps.toFixed(1)).padStart(14),
       (bytesIn / elapsed / 1e6).toFixed(1).padStart(7),
       String(corrections).padStart(4),
       String(drops).padStart(5),
