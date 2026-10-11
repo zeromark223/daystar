@@ -17,11 +17,20 @@ interface Placement {
   ticket: string | null;
 }
 
+/**
+ * How long to wait for the server to place us, and then for the socket to open.
+ * A stalled request or handshake (seen through a proxy) otherwise hangs for
+ * minutes before the browser gives up; this way the lobby, or the reconnect
+ * loop, tries again.
+ */
+const CONNECT_TIMEOUT_MS = 10_000;
+
 async function post(path: string, body: object): Promise<Placement> {
   const res = await fetch(path, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(CONNECT_TIMEOUT_MS),
   }).catch(() => null);
   if (!res?.ok) throw new Error(res?.status === 503 ? "No game server is available right now." : "Could not reach the server.");
   const { wsUrl, ticket } = (await res.json()) as { wsUrl: string; ticket?: string };
@@ -74,8 +83,26 @@ export class Connection {
     const ws = new WebSocket(wsUrl.startsWith("/") ? `${protocol}//${location.host}${wsUrl}` : wsUrl);
     ws.binaryType = "arraybuffer";
     return new Promise((resolve, reject) => {
-      ws.addEventListener("open", () => resolve(new Connection(ws, ticket, handlers)), { once: true });
-      ws.addEventListener("error", () => reject(new Error("Could not reach the server.")), { once: true });
+      const timer = setTimeout(() => {
+        ws.close();
+        reject(new Error("The server took too long to answer."));
+      }, CONNECT_TIMEOUT_MS);
+      ws.addEventListener(
+        "open",
+        () => {
+          clearTimeout(timer);
+          resolve(new Connection(ws, ticket, handlers));
+        },
+        { once: true },
+      );
+      ws.addEventListener(
+        "error",
+        () => {
+          clearTimeout(timer);
+          reject(new Error("Could not reach the server."));
+        },
+        { once: true },
+      );
     });
   }
 

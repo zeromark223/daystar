@@ -85,8 +85,8 @@ interface WorkerReport {
   move: [number, number][];
   corrections: number;
   closes: number;
-  /** Unexpected socket closes by WebSocket close code (1006: dropped without a close frame). */
-  closeCodes: [number, number][];
+  /** Unexpected socket closes by WebSocket close code (1006: dropped without a close frame; "timeout": no welcome in time). */
+  closeCodes: [string, number][];
   errors: number;
   /** Bots that moved to another server when asked (cluster). */
   migrations: number;
@@ -237,6 +237,8 @@ const toWire = (v: number) => Math.round(v * POSITION_SCALE);
 
 /** Average walk burst; idle stretches are sized so walking takes `ratio` of the time. */
 const WALK_MS = 3000;
+/** A bot with no welcome this long after opening its socket closes it and rejoins. */
+const JOIN_TIMEOUT_MS = 15_000;
 function walkMs(): number {
   return WALK_MS * (1 / 3 + (Math.random() * 4) / 3); // 1-5 s
 }
@@ -275,7 +277,7 @@ function runWorker(): void {
     otherVoice: 0,
   });
   let counters = newCounters();
-  let closeCodes = new Map<number, number>();
+  let closeCodes = new Map<string, number>();
   const conversations = new Map<string, Conversation>();
   /** Every worker's talkers (the orchestrator passes them round). */
   let ourTalkers = new Set<number>();
@@ -374,6 +376,14 @@ function runWorker(): void {
     ws.binaryType = "arraybuffer";
     bot.ws = ws;
     bot.pending = [];
+    // Like the client: a handshake (or join) that stalls is given up and retried,
+    // instead of hanging until the network gives up minutes later.
+    let timedOut = false;
+    const joinTimer = setTimeout(() => {
+      if (bot.ws !== ws || bot.joined) return;
+      timedOut = true;
+      ws.close();
+    }, JOIN_TIMEOUT_MS);
     ws.addEventListener("open", () => {
       ws.send(encodeClientMessage({ t: "join", name: bot.name, appearance: bot.appearance, hostKey: bot.hostKey }));
       if (old && old !== ws) old.close();
@@ -414,6 +424,7 @@ function runWorker(): void {
         bot.snapshotHz = w.snapshotHz;
         bot.joined = true;
         bot.retries = 0;
+        clearTimeout(joinTimer);
         if (bot.part !== "guest") promoteSpeakers(bot.room);
         return;
       }
@@ -448,7 +459,8 @@ function runWorker(): void {
       if (bot.ws !== ws) return; // replaced on purpose
       bot.joined = false;
       counters.closes++;
-      closeCodes.set(event.code, (closeCodes.get(event.code) ?? 0) + 1);
+      const code = timedOut ? "timeout" : String(event.code);
+      closeCodes.set(code, (closeCodes.get(code) ?? 0) + 1);
       void rejoin(bot);
     });
     ws.addEventListener("error", () => counters.errors++);
@@ -1321,7 +1333,7 @@ async function orchestrate(
     let snapshotHz = 0;
     let bytesIn = 0;
     let corrections = 0;
-    const closeCodes = new Map<number, number>();
+    const closeCodes = new Map<string, number>();
     let drops = 0;
     let socketErrors = 0;
     let migrations = 0;
