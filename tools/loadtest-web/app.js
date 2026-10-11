@@ -16,12 +16,14 @@ const COLUMNS = [
   ["loop_p99_ms", "loop p99"],
   ["tick_p99_ms", "tick p99"],
   ["rss_mb", "RSS MB"],
+  ["heap_mb", "heap MB"],
   ["move_p99_ms", "move p99"],
   ["gap_p99_ms", "gap p99"],
   ["chat_p99_ms", "chat p99"],
   ["voice_p99_ms", "voice p99"],
   ["voice_rx_pct", "voice rx %"],
   ["drops", "drops"],
+  ["close_codes", "close codes"],
   ["verdict", "verdict"],
 ];
 
@@ -34,6 +36,7 @@ const CHARTS = [
   { key: "gap_p99_ms", label: "Snapshot gap p99", unit: " ms" },
   { key: "loop_p99_ms", label: "Loop p99", unit: " ms" },
   { key: "rss_mb", label: "Server RSS", unit: " MB" },
+  { key: "heap_mb", label: "Server JS heap", unit: " MB" },
 ];
 
 const $ = (id) => document.getElementById(id);

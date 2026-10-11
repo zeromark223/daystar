@@ -423,6 +423,12 @@ bun tools/loadtest.ts --last               # same options again
 bun tools/loadtest.ts --last --hold 60     # same, with one option changed
 ```
 
+`heap MB` is the server's JavaScript heap next to its `RSS MB` (to tell a leak in
+the game's own objects from the runtime holding more memory), and `close codes`
+says how dropped bots were dropped: `1006` is a connection lost without a close frame
+(network, proxy), other codes are the server (or a proxy) closing it. Bots stand
+still while the host has everyone in orbit, as the client does.
+
 A spawned server runs with `BUN_JSC_logGC` so the `gc/s` and `gc max ms` columns are
 filled (they show `-` with `--target`). `tick p99` is the
 time a room tick spends encoding and sending its snapshot (the budget at 20 Hz is 50 ms).

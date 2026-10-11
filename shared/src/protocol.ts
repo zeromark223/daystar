@@ -266,6 +266,7 @@ export const SERVER_OPCODES = {
   playerJoined: Op.player_joined,
   playerLeft: Op.player_left,
   view: Op.view,
+  orbit: Op.orbit,
 } as const;
 
 // ------------------------------------------------------------ snapshots by parts

@@ -85,6 +85,8 @@ interface WorkerReport {
   move: [number, number][];
   corrections: number;
   closes: number;
+  /** Unexpected socket closes by WebSocket close code (1006: dropped without a close frame). */
+  closeCodes: [number, number][];
   errors: number;
   /** Bots that moved to another server when asked (cluster). */
   migrations: number;
@@ -137,6 +139,8 @@ interface Bot {
   joined: boolean;
   /** Walking or standing, and until when (see --moving). */
   walking: boolean;
+  /** The host gathered everyone (orbit): stand still, like the client, until the release. */
+  orbiting: boolean;
   phaseUntil: number;
   /** Recently sent positions (wire units) awaiting their echo in a snapshot. */
   pending: { xw: number; yw: number; t: number }[];
@@ -265,6 +269,7 @@ function runWorker(): void {
     voiceRx: 0,
   });
   let counters = newCounters();
+  let closeCodes = new Map<number, number>();
   const conversations = new Map<string, Conversation>();
 
   /**
@@ -327,6 +332,7 @@ function runWorker(): void {
       nextChat: chatEveryMs > 0 && part === "guest" ? Date.now() + Math.random() * chatEveryMs : Infinity,
       lastLine: "",
       chatSentAt: 0,
+      orbiting: false,
       retries: 0,
       lastSnapshot: 0,
       joined: false,
@@ -402,6 +408,14 @@ function runWorker(): void {
         if (bot.part !== "guest") promoteSpeakers(bot.room);
         return;
       }
+      // Orbit on or off: only its first field (active) matters to a bot, no need to decode the seats.
+      if (op === SERVER_OPCODES.orbit) {
+        bot.orbiting = bytes[1] === 1;
+        // The orbit's long silence is not a late snapshot.
+        bot.lastSnapshot = 0;
+        bot.pending = [];
+        return;
+      }
       // Frequent and of no use to a bot.
       if (op === SERVER_OPCODES.view || op === SERVER_OPCODES.playerJoined || op === SERVER_OPCODES.playerLeft) return;
       const msg = decodeServerMessage(bytes);
@@ -421,10 +435,11 @@ function runWorker(): void {
         void migrate(bot);
       }
     });
-    ws.addEventListener("close", () => {
+    ws.addEventListener("close", (event) => {
       if (bot.ws !== ws) return; // replaced on purpose
       bot.joined = false;
       counters.closes++;
+      closeCodes.set(event.code, (closeCodes.get(event.code) ?? 0) + 1);
       void rejoin(bot);
     });
     ws.addEventListener("error", () => counters.errors++);
@@ -560,6 +575,9 @@ function runWorker(): void {
         counters.bytesOut += chatFrame.byteLength;
         bot.nextChat = now + chatEveryMs * (0.5 + Math.random());
       }
+      // In orbit the client sends no moves (the server would ignore them); the bot's
+      // own position stays its home, where the release puts it back.
+      if (bot.orbiting) continue;
       if (now >= bot.phaseUntil) {
         bot.walking = !bot.walking;
         bot.phaseUntil = now + (bot.walking ? walkMs() : idleMs(movingRatio));
@@ -601,6 +619,7 @@ function runWorker(): void {
       chat: chat.entries(),
       move: move.entries(),
       voiceSent: [...voiceSent],
+      closeCodes: [...closeCodes],
       voice: voiceLatency.entries(),
       snapshotHz: bots.reduce((min, b) => (b.joined && b.snapshotHz && (!min || b.snapshotHz < min) ? b.snapshotHz : min), 0),
     };
@@ -612,6 +631,7 @@ function runWorker(): void {
     voiceLatency = new Histogram();
     voiceSent = new Map();
     counters = newCounters();
+    closeCodes = new Map();
   }, 1000);
 
   type Command =
@@ -655,6 +675,7 @@ interface StatsSample {
   loopP99Ms: number;
   tickP99Ms?: number;
   rssMb: number;
+  heapMb?: number;
   egressMbps?: number;
   /** Overcharge load score (newer servers). */
   load?: number;
@@ -1203,14 +1224,14 @@ async function orchestrate(
   const timeCol = opts.max !== null;
   out.header(
     (timeCol ? "   t s | " : "") +
-      "bots | rooms | snap Hz | srv players | srv CPU | load | out Mbps | loop p99 | tick p99 | gc/s | gc max ms | RSS MB | move p50/p99 ms | snap gap p50/p99/max ms | chat p50/p99 ms | voice p50/p99 ms | voice rx | in MB/s | corr | drops | migr | rejoin | verdict",
+      "bots | rooms | snap Hz | srv players | srv CPU | load | out Mbps | loop p99 | tick p99 | gc/s | gc max ms | RSS MB | heap MB | move p50/p99 ms | snap gap p50/p99/max ms | chat p50/p99 ms | voice p50/p99 ms | voice rx | in MB/s | corr | drops | migr | rejoin | verdict",
   );
 
   // CSV log: what was run, then one line per row.
   const CSV_COLUMNS = [
     "time_s", "bots", "joined", "rooms", "snap_hz", "srv_players", "srv_cpu", "load", "out_mbps", "loop_p99_ms", "tick_p99_ms",
-    "gc_per_s", "gc_max_ms", "rss_mb", "move_p50_ms", "move_p99_ms", "gap_p50_ms", "gap_p99_ms", "gap_max_ms", "chat_p50_ms",
-    "chat_p99_ms", "voice_p50_ms", "voice_p99_ms", "voice_rx_pct", "in_mb_s", "corrections", "drops", "migrations", "rejoins", "verdict",
+    "gc_per_s", "gc_max_ms", "rss_mb", "heap_mb", "move_p50_ms", "move_p99_ms", "gap_p50_ms", "gap_p99_ms", "gap_max_ms", "chat_p50_ms",
+    "chat_p99_ms", "voice_p50_ms", "voice_p99_ms", "voice_rx_pct", "in_mb_s", "corrections", "drops", "close_codes", "migrations", "rejoins", "verdict",
   ];
   if (opts.log) {
     mkdirSync(dirname(opts.log), { recursive: true });
@@ -1268,6 +1289,7 @@ async function orchestrate(
     let snapshotHz = 0;
     let bytesIn = 0;
     let corrections = 0;
+    const closeCodes = new Map<number, number>();
     let drops = 0;
     let socketErrors = 0;
     let migrations = 0;
@@ -1285,6 +1307,7 @@ async function orchestrate(
       bytesIn += r.bytesIn;
       corrections += r.corrections;
       drops += r.closes;
+      for (const [code, n] of r.closeCodes) closeCodes.set(code, (closeCodes.get(code) ?? 0) + n);
       socketErrors += r.errors;
     }
     const joined = [...connected.values()].reduce((a, b) => a + b, 0);
@@ -1311,14 +1334,17 @@ async function orchestrate(
     // Big rooms get fewer snapshots per second (SNAPSHOT_GROUPS_AT).
     const intervalMs = 1000 / (snapshotHz || TICK_RATE);
     // With idle bots, long snapshot gaps are expected (nothing to send), so only judge them when all walk.
-    if (opts.movingRatio >= 1 && !(gapP99 <= 2 * intervalMs)) problems.push("snapshots late");
+    // (No snapshots at all, e.g. while everyone is gathered in orbit, is not lateness.)
+    if (opts.movingRatio >= 1 && gaps.total > 0 && !(gapP99 <= 2 * intervalMs)) problems.push("snapshots late");
     if (chat.total > 0 && chatP99 > 250) problems.push("chat slow");
     const voiceP99 = voice.percentile(0.99);
     // While bots are still joining, how much voice they should have had is unknown.
     const voiceShare = full && voiceExpected > 0 ? voiceRx / voiceExpected : NaN;
     if (voice.total > 0 && voiceP99 > 300) problems.push("voice slow");
     if (full && voiceShare < 0.97) problems.push("voice lost");
-    if (drops > 0) problems.push("disconnects");
+    // e.g. "1006x3 1001x1": dropped connections vs. the server (or a proxy) closing them.
+    const codes = [...closeCodes].sort((a, b) => b[1] - a[1]).map(([code, n]) => `${code}x${n}`).join(" ");
+    if (drops > 0) problems.push(`disconnects ${codes}`);
     if (socketErrors > 0) problems.push(`${socketErrors} socket errors`);
     if (loopP99 > 50) problems.push("event loop lag");
     const verdict = problems.length ? `FAIL (${problems.join(", ")})` : "ok";
@@ -1329,9 +1355,9 @@ async function orchestrate(
     const pct = (h: Histogram, p: number) => (h.total ? h.percentile(p) : NaN);
     const csvValues: (string | number)[] = [
       timeS, target, joined, rooms, snapshotHz || NaN, latest?.players ?? NaN, round(cpu, 3), round(load, 2), round(egress, 1),
-      round(loopP99, 1), round(tickP99, 2), round(gcPerSec, 1), round(gcMax, 1), latest?.rssMb ?? NaN, pct(move, 0.5),
+      round(loopP99, 1), round(tickP99, 2), round(gcPerSec, 1), round(gcMax, 1), latest?.rssMb ?? NaN, latest?.heapMb ?? NaN, pct(move, 0.5),
       pct(move, 0.99), pct(gaps, 0.5), pct(gaps, 0.99), pct(gaps, 1), pct(chat, 0.5), pct(chat, 0.99), pct(voice, 0.5),
-      pct(voice, 0.99), round(voiceShare * 100, 1), round(bytesIn / elapsed / 1e6, 1), corrections, drops, migrations, rejoins,
+      pct(voice, 0.99), round(voiceShare * 100, 1), round(bytesIn / elapsed / 1e6, 1), corrections, drops, codes, migrations, rejoins,
       verdict,
     ];
     const row = [
@@ -1348,8 +1374,9 @@ async function orchestrate(
       show(gcPerSec, () => gcPerSec.toFixed(1)).padStart(4),
       show(gcMax, () => gcMax.toFixed(1)).padStart(9),
       String(latest?.rssMb ?? "-").padStart(6),
+      String(latest?.heapMb ?? "-").padStart(7),
       (move.total ? `${move.percentile(0.5)}/${moveP99}` : "-").padStart(15),
-      `${gaps.percentile(0.5)}/${gapP99}/${gaps.percentile(1)}`.padStart(23),
+      (gaps.total ? `${gaps.percentile(0.5)}/${gapP99}/${gaps.percentile(1)}` : "-").padStart(23),
       (chat.total ? `${chat.percentile(0.5)}/${chatP99}` : "-").padStart(15),
       (voice.total ? `${voice.percentile(0.5)}/${voiceP99}` : "-").padStart(16),
       show(voiceShare, () => `${Math.min(100, voiceShare * 100).toFixed(1)}%`).padStart(8),
