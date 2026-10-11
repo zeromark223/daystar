@@ -57,6 +57,8 @@ const SPAWN_MIN_R = 700;
 const SPAWN_MAX_R = 2_800;
 /** A player may ask "who" this often. */
 const WHO_MIN_MS = 250;
+/** Fresh views sent per tick after a release (the rest follow on the next ticks). */
+const FRESH_VIEWS_PER_TICK = 250;
 /** Voice frames held for one tick at most (a tick normally carries 2-3 per speaker). */
 const MAX_PENDING_VOICE = 200;
 
@@ -237,6 +239,8 @@ export class Room {
   private readonly viewers = new Map<number, Set<Player>>();
   /** Every player (local or replica) by map cell, to find who is in view. */
   private readonly grid = new Map<number, Set<Player>>();
+  /** Local players still owed a fresh view after a release (sent a few ticks at a time). */
+  private readonly freshViewsDue = new Set<Player>();
   private localVoice: VoiceFrame[] = [];
   private localReactions: Reaction[] = [];
   /** The open poll, if any; counts are recounted every POLL_COUNT_MS. */
@@ -827,6 +831,8 @@ export class Room {
       if (p) homes.set(id, { x: p.x, y: p.y, dir: p.dir });
     }
     this.orbit = { start, slots, homes };
+    // Fresh views still owed from a release just before: the seats replace them.
+    this.freshViewsDue.clear();
     for (const g of this.pending) g.slots.clear();
     this.broadcast({ t: "orbit", active: true, seed: 0, ...this.orbitWire()! });
   }
@@ -865,16 +871,41 @@ export class Room {
       now: at % 0x1_0000_0000,
       slots: [],
     });
-    for (const p of this.players.values()) if (p.owner === null) this.sendFreshView(p);
+    // Everyone needs a whole new view. Sending them all at once stalled a room of
+    // 1,000 for ~100 ms; a few ticks apart they are done long before clients use
+    // them (the first players reappear about a second into the release).
+    for (const p of this.players.values()) if (p.owner === null) this.freshViewsDue.add(p);
+    this.sendFreshViews();
   }
 
-  /** Everyone in view of `p`'s cell (itself included), and the host and speakers wherever they are. */
-  private sendFreshView(p: Player): void {
-    const players: PlayerState[] = [];
-    for (const q of this.players.values()) {
-      if (q === p || q.role !== "guest" || inView(q.x, q.y, p.cell)) players.push(toState(q));
+  /**
+   * Up to FRESH_VIEWS_PER_TICK of the fresh views still due: for each cell,
+   * everyone in view of it and the host and speakers wherever they are, encoded
+   * once and sent to all the players due there (players in one cell get the same
+   * view, themselves included).
+   */
+  private sendFreshViews(): void {
+    if (this.freshViewsDue.size === 0) return;
+    const byCell = new Map<number, Player[]>();
+    let budget = FRESH_VIEWS_PER_TICK;
+    for (const p of this.freshViewsDue) {
+      if (budget-- === 0) break;
+      this.freshViewsDue.delete(p);
+      const list = byCell.get(p.cell);
+      if (list) list.push(p);
+      else byCell.set(p.cell, [p]);
     }
-    send(p.peer!, { t: "view", from: FRESH_VIEW, to: p.cell, players });
+    const stage = [...this.players.values()].filter((q) => q.role !== "guest");
+    for (const [cell, due] of byCell) {
+      const players: PlayerState[] = stage.map(toState);
+      for (const near of cellsInView(cell)) {
+        for (const q of this.grid.get(near) ?? []) {
+          if (q.role === "guest" && inView(q.x, q.y, cell)) players.push(toState(q));
+        }
+      }
+      const data = encodeServerMessage({ t: "view", from: FRESH_VIEW, to: cell, players });
+      for (const p of due) p.peer!.send(data);
+    }
   }
 
   /** Give a local player a seat (`slot`, or the best free one for its role) and tell everyone. */
@@ -1059,6 +1090,7 @@ export class Room {
     this.localCount--;
     this.groupSizes[player.group]--;
     this.removeViewer(player);
+    this.freshViewsDue.delete(player);
     this.forget(player);
     this.queueLeft(player.id);
     this.pollMovers.delete(player.id);
@@ -1219,6 +1251,7 @@ export class Room {
       this.tickChanged.clear();
     }
     this.recountPoll(now);
+    this.sendFreshViews();
     let sent: boolean;
     if (this.groups === 2) {
       sent = this.flush([this.ticks % 2], now);

@@ -1051,6 +1051,51 @@ test("release: everyone goes back to where they were, with a fresh view and a sh
 });
 
 
+test("release: a big room's fresh views go out a few ticks apart, one each", () => {
+  const { tick, join, everyone } = hostedRoom();
+  const host = join("Hana", HOST_KEY);
+  const guests = Array.from({ length: 600 }, (_, i) => join(`G${i}`));
+  const all = [host, ...guests];
+  everyone(...all.map((g) => g.s));
+  host.s.deliver({ t: "gather" });
+  everyone(...all.map((g) => g.s));
+  host.s.deliver({ t: "release" });
+  const fresh = (g: (typeof all)[number]) =>
+    g.s.take().filter((m) => m.t === "view" && m.from === FRESH_VIEW) as Extract<ServerMessage, { t: "view" }>[];
+  const views = new Map<number, Extract<ServerMessage, { t: "view" }>>();
+  const collect = () => {
+    let n = 0;
+    for (const g of all) {
+      for (const v of fresh(g)) {
+        assert.ok(!views.has(g.self.id), "one fresh view each");
+        views.set(g.self.id, v);
+        n++;
+      }
+    }
+    return n;
+  };
+  // Not all at once...
+  const first = collect();
+  assert.ok(first > 0 && first < all.length);
+  // ...but all within a few ticks.
+  for (let i = 0; i < 5 && views.size < all.length; i++) {
+    tick();
+    collect();
+  }
+  assert.equal(views.size, all.length);
+  // Each view holds its player and the host, and players in one cell get the same one.
+  for (const g of all) {
+    const ids = views.get(g.self.id)!.players.map((p) => p.id);
+    assert.ok(ids.includes(g.self.id) && ids.includes(host.self.id));
+  }
+  const byCell = new Map<number, string>();
+  for (const v of views.values()) {
+    const key = JSON.stringify(v.players);
+    assert.equal(byCell.get(v.to) ?? key, key);
+    byCell.set(v.to, key);
+  }
+});
+
 test("newcomers appear where the room is emptiest", () => {
   const room = new Room("spread", { onEmpty: () => {} });
   // A crowd of players (of another server) all in one spot.
