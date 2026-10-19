@@ -11,10 +11,13 @@
  *   SERVER_CAPACITY             players per server at 100% load, default 2000
  *   SERVER_PUBLIC_URL_TEMPLATE  client-facing URL, {id} and {port} are replaced,
  *                               default ws://localhost:{port}/ws
+ *   DEV_TOKEN                   unlocks developer chat commands (/dev <token>);
+ *                               generated (and printed) per container when unset
  */
 import { spawn, type Subprocess } from "bun";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { devTokenFromEnv } from "./http.ts";
 
 const here = (path: string) => fileURLToPath(new URL(path, import.meta.url));
 const PORT = Number(process.env.PORT ?? 3000);
@@ -63,6 +66,8 @@ function start(child: Child): void {
 }
 
 const children: Child[] = [];
+// Generated here when unset, so every game server gets the same one.
+devTokenFromEnv();
 
 if (SERVERS <= 0) {
   children.push({ name: "server", entry: here("./main.ts"), env: {}, restarts: 0 });

@@ -180,6 +180,7 @@ Set on the container (the supervisor derives the per-process ones):
 | `SERVER_BASE_PORT` | `PORT + 1` | first game server port |
 | `PORT` | `3000` | agent (or standalone server) port |
 | `HEALTH_TOKEN` | unset | protects `/api/health` |
+| `DEV_TOKEN` | random per container (printed at start) | unlocks developer chat commands: `/dev <token>` |
 
 Derived per process by the supervisor: `SERVER_ID`, `SERVER_PUBLIC_URL`,
 `SERVER_MESH_URL` (`ws://127.0.0.1:<port>/mesh`), `AGENT_URL`

@@ -48,6 +48,8 @@ export const OVERCHARGE_FORCE_AT = 2000;
 export const MAX_NAME_LENGTH = 20;
 export const MAX_CHAT_LENGTH = 280;
 export const CHAT_HISTORY_SIZE = 100;
+/** The server's notice answering /ping; the client times it for the round trip. */
+export const PONG = "Pong.";
 
 /** Rooms are addressed as /r/<room-id>. */
 export const ROOM_ID_PATTERN = /^[a-z0-9-]{1,32}$/;

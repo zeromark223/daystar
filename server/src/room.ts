@@ -7,6 +7,7 @@ import {
   MAX_VOICE_FRAME_BYTES,
   MOVE_SPEED,
   OVERCHARGE_FORCE_AT,
+  PONG,
   SNAPSHOT_GROUPS_AT,
   SNAPSHOT_GROUPS_OFF_BELOW,
   TICK_RATE,
@@ -175,6 +176,19 @@ interface Player {
   /** Voice rate limit: a byte budget refilled at VOICE_BYTES_PER_SEC. */
   voiceBudget: number;
   voiceAt: number;
+  /** Unlocked developer commands with /dev (this server only, until the socket closes). */
+  dev: boolean;
+}
+
+/** A chat command (a line starting with "/"); /help lists those the player may use. */
+interface Command {
+  /** Shown by /help; none keeps the command out of the list. */
+  help?: string;
+  allowed(p: Player): boolean;
+  /** The answer when not allowed; none answers as if the command did not exist. */
+  denied?: string;
+  /** The answer, or null when what happened speaks for itself (e.g. a role change). */
+  run(p: Player, args: string): string | null;
 }
 
 export interface RoomOptions {
@@ -196,6 +210,8 @@ export interface RoomOptions {
   keepChatHistory?: boolean;
   /** Whether a key presented on join is this room's host key. Without it nobody can be host. */
   isHostKey?(key: string): boolean;
+  /** Whether a /dev token unlocks developer commands. Without it /dev does nothing. */
+  isDevToken?(token: string): boolean;
   /** Where newcomers appear instead of the emptiest spot (tests that want players together). */
   spawn?(): { x: number; y: number };
   /**
@@ -206,6 +222,8 @@ export interface RoomOptions {
   schedule?: { tickHz: number; groups: 1 | 2 };
   /** Snapshots per second per player the server's overcharge allows (default TICK_RATE). */
   rate?: number;
+  /** The server's load in one line, for the host's /health. Without it /health is unavailable. */
+  health?(): string;
 }
 
 export class Room {
@@ -752,9 +770,9 @@ export class Room {
       // In orbit: the host goes to the sun, a new speaker to the stage, a guest to the rings.
       if (role === "host") this.unseat(p);
       else if (wasHost || (role === "speaker") !== (this.orbit.slots.get(p.id) ?? NO_SLOT) < STAGE_SLOTS) this.seat(p);
-    } else if (wasHost) {
-      // A former host leaves the sun for a spot near the others.
-      const spot = this.spawnFor(p.id);
+    } else if (wasHost || role === "host") {
+      // A former host leaves the sun for a spot near the others; a new one goes to it.
+      const spot = role === "host" ? WORLD_CENTER : this.spawnFor(p.id);
       p.x = spot.x;
       p.y = spot.y;
       p.lastMoveAt = p.movedAt = Date.now();
@@ -1199,6 +1217,10 @@ export class Room {
       return;
     }
     player.chatTimes.push(now);
+    if (text.startsWith("/")) {
+      this.handleCommand(player, text);
+      return;
+    }
 
     // Chat ids fit a UInt32: the server's base (serverId * 2^24 in cluster mode) plus a counter.
     const id = (this.opts.chatIdBase ?? 0) + (this.nextChatId++ % 0x1000000);
@@ -1209,6 +1231,56 @@ export class Room {
     }
     this.broadcast({ t: "chat", message });
     this.opts.sync?.chat(message);
+  }
+
+  private readonly commands: Record<string, Command> = {
+    help: {
+      help: "this list",
+      allowed: () => true,
+      run: (p) => {
+        const list = Object.entries(this.commands).filter(([, c]) => c.help && c.allowed(p));
+        return `Commands: ${list.map(([name, c]) => `/${name} (${c.help})`).join(", ")}.`;
+      },
+    },
+    ping: { help: "round trip to the server", allowed: () => true, run: () => PONG },
+    health: {
+      help: "server load",
+      allowed: (p) => p.role === "host" || p.dev,
+      denied: "Only the host can see the server's health.",
+      run: () => this.opts.health?.() ?? "Server health is not available here.",
+    },
+    // Developers: /dev <token> (DEV_TOKEN) unlocks the commands below.
+    dev: {
+      allowed: () => true,
+      run: (p, token) => {
+        if (p.dev) return "Developer commands are unlocked already.";
+        if (!this.opts.isDevToken?.(token)) return unknownCommand("dev");
+        p.dev = true;
+        return "Developer commands unlocked. Type /help for the list.";
+      },
+    },
+    host: {
+      help: "become the host",
+      allowed: (p) => p.dev,
+      run: (p) => {
+        if (p.role === "host") return "You are the host already.";
+        this.dethroneHosts(p.id);
+        // Everyone hears of the role change; this player sees "You are the host now."
+        this.applyRole(p, "host");
+        return null;
+      },
+    },
+  };
+
+  /** A chat line starting with "/": answered to the sender alone, never broadcast. */
+  private handleCommand(player: Player, text: string): void {
+    const [, name, args] = /^\/(\S*)\s*(.*)$/s.exec(text)!;
+    const command = Object.hasOwn(this.commands, name.toLowerCase()) ? this.commands[name.toLowerCase()] : undefined;
+    let answer: string | null;
+    if (!command) answer = unknownCommand(name);
+    else if (!command.allowed(player)) answer = command.denied ?? unknownCommand(name);
+    else answer = command.run(player, args);
+    if (answer !== null) send(player.peer!, { t: "notice", text: answer });
   }
 
   private startTicker(): void {
@@ -1420,8 +1492,11 @@ function fresh() {
     voiceAt: now,
     reactBudget: REACTION_BURST,
     reactAt: now,
+    dev: false,
   };
 }
+
+const unknownCommand = (name: string) => `Unknown command /${name}. Type /help for the list.`;
 
 function slotList(slots: Map<number, number>): SlotChange[] {
   return [...slots].map(([id, slot]) => ({ id, slot }));

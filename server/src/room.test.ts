@@ -8,6 +8,7 @@ import {
   type ClientMessage,
   type ServerMessage,
 } from "../../shared/src/protocol.ts";
+import { PONG, WORLD_CENTER } from "../../shared/src/constants.ts";
 import { POLL_COUNT_MS, pollZones } from "../../shared/src/poll.ts";
 import { STAGE_SLOTS } from "../../shared/src/orbit.ts";
 import { cellOf, inView } from "../../shared/src/aoi.ts";
@@ -407,6 +408,77 @@ test("only the host chooses speakers, and everyone hears about it", () => {
   // Nobody can take the host role away through set_role.
   host.s.deliver({ t: "set_role", id: host.self.id, role: "guest" });
   assert.deepEqual(a.s.take(), []);
+});
+
+test("chat commands answer the sender alone; /help lists only what the player may use", () => {
+  const room = new Room("cmd", {
+    onEmpty: () => {},
+    isHostKey: (k) => k === HOST_KEY,
+    isDevToken: (t) => t === "dev-token",
+    health: () => "Server: fine",
+    spawn: together,
+  });
+  const join = (name: string, hostKey = "") => {
+    const s = new FakeSocket();
+    s.events = room.accept(s);
+    s.deliver({ t: "join", name, appearance: 0, hostKey });
+    const welcome = s.received.find((m) => m.t === "welcome")!;
+    return { s, id: welcome.t === "welcome" ? welcome.selfId : -1 };
+  };
+  const host = join("Host", HOST_KEY).s;
+  const guest = join("Gus").s;
+  const tick = () => (room as unknown as { tick(): void }).tick();
+  tick();
+  host.take();
+  guest.take();
+  const notices = (s: FakeSocket) => s.take().flatMap((m) => (m.t === "notice" ? [m.text] : m.t === "chat" ? [`chat: ${m.message.text}`] : []));
+
+  host.deliver({ t: "chat", text: "/health" });
+  assert.deepEqual(notices(host), ["Server: fine"]);
+  assert.deepEqual(notices(guest), []);
+
+  guest.deliver({ t: "chat", text: "/HEALTH now" });
+  assert.deepEqual(notices(guest), ["Only the host can see the server's health."]);
+  guest.deliver({ t: "chat", text: "/help" });
+  assert.deepEqual(notices(guest), ["Commands: /help (this list), /ping (round trip to the server)."]);
+  host.deliver({ t: "chat", text: "/help" });
+  assert.deepEqual(notices(host), ["Commands: /help (this list), /ping (round trip to the server), /health (server load)."]);
+  guest.deliver({ t: "chat", text: "/ping" });
+  assert.deepEqual(notices(guest), [PONG]);
+  guest.deliver({ t: "chat", text: "/dance" });
+  assert.deepEqual(notices(guest), ["Unknown command /dance. Type /help for the list."]);
+
+  // (Commands count against the chat rate limit: a fresh player for the rest.)
+  const { s: dev, id: devId } = join("Dev");
+  tick();
+  for (const s of [host, guest, dev]) s.take();
+  // Developer commands look like unknown ones until /dev with the right token.
+  dev.deliver({ t: "chat", text: "/host" });
+  assert.deepEqual(notices(dev), ["Unknown command /host. Type /help for the list."]);
+  dev.deliver({ t: "chat", text: "/dev wrong" });
+  assert.deepEqual(notices(dev), ["Unknown command /dev. Type /help for the list."]);
+  dev.deliver({ t: "chat", text: "/dev dev-token" });
+  assert.deepEqual(notices(dev), ["Developer commands unlocked. Type /help for the list."]);
+  dev.deliver({ t: "chat", text: "/help" });
+  assert.deepEqual(notices(dev), [
+    "Commands: /help (this list), /ping (round trip to the server), /health (server load), /host (become the host).",
+  ]);
+  assert.deepEqual(notices(host), []);
+
+  // /host: the old host steps down, the developer goes to the sun.
+  dev.deliver({ t: "chat", text: "/host" });
+  const got = dev.take();
+  const roles = got.flatMap((m) => (m.t === "role" ? [`${m.id === devId ? "dev" : "old host"}: ${m.role}`] : []));
+  assert.deepEqual(roles.sort(), ["dev: host", "old host: guest"]);
+  assert.ok(!got.some((m) => m.t === "notice"), "no extra notice");
+  const me = (room as unknown as { players: Map<number, { x: number; y: number; chatTimes: number[] }> }).players.get(devId)!;
+  assert.deepEqual([me.x, me.y], [WORLD_CENTER.x, WORLD_CENTER.y]);
+  me.chatTimes = []; // past the rate limit by now
+  dev.deliver({ t: "chat", text: "/host" });
+  assert.deepEqual(notices(dev), ["You are the host already."]);
+  host.close();
+  guest.close();
+  dev.close();
 });
 
 test("voice from the host and speakers rides the next snapshot; guests are muted", () => {

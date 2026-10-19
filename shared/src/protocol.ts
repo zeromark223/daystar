@@ -114,6 +114,8 @@ export type ServerMessage =
   | { t: "chat"; message: ChatMessage }
   | { t: "correction"; x: number; y: number }
   | { t: "error"; message: string }
+  /** A line for the System tab, only to this player (e.g. a chat command's answer). */
+  | { t: "notice"; text: string }
   /**
    * Once per tick: players that changed, voice frames received since the last one,
    * and who joined (full info) or left the room meanwhile. Joins and leaves ride the
@@ -250,6 +252,7 @@ const Op = {
   release: 25,
   // server -> client
   orbit: 26,
+  notice: 27,
 } as const;
 
 /** `view.from` for a whole new view (after a release): anyone not listed is out of view. */
@@ -381,6 +384,7 @@ const Schemas: Record<number, Struct> = {
   [Op.gather]: {},
   [Op.release]: {},
   [Op.orbit]: { active: Type.UInt8, seed: Type.UInt32, ...OrbitStruct },
+  [Op.notice]: { text: Type.String },
 };
 
 // ------------------------------------------------------------------ wire <-> message
@@ -539,6 +543,8 @@ export function encodeServerMessage(msg: ServerMessage): Uint8Array<ArrayBuffer>
       return encode(Schemas[Op.correction], { x: toWire(msg.x), y: toWire(msg.y) }, Op.correction);
     case "error":
       return encode(Schemas[Op.error], msg, Op.error);
+    case "notice":
+      return encode(Schemas[Op.notice], msg, Op.notice);
     case "snapshot":
       return encode(
         Schemas[Op.snapshot],
@@ -602,6 +608,8 @@ export function decodeServerMessage(bytes: Uint8Array): ServerMessage | null {
       }
       case Op.error:
         return { t: "error", ...decode<{ message: string }>(schema, bytes, 1) };
+      case Op.notice:
+        return { t: "notice", ...decode<{ text: string }>(schema, bytes, 1) };
       case Op.snapshot: {
         const m = decode<Omit<SnapshotTail, "joined"> & { players: (WireState & { age: number })[]; joined: WireInfo[] }>(
           schema,

@@ -527,6 +527,8 @@ Build from the `Dockerfile` (Bun). The container listens on `PORT` (default 3000
 exposes `GET /healthz` (plain liveness) and `GET /api/health` (JSON load stats: rooms,
 players, CPU, event loop, memory, last 5 minutes of 1 s samples). Set `HEALTH_TOKEN`
 to require `Authorization: Bearer <token>` on `/api/health` in production. WebSockets go through the normal HTTP proxy on `/ws`.
+Set `DEV_TOKEN` to unlock developer chat commands with `/dev <token>` (e.g. `/host` takes the
+host); when unset, each start generates one and prints it in the log.
 Set `EGRESS_BUDGET_MBPS` to the outgoing bandwidth the server may use (e.g. a bit under
 the link's capacity) so the overcharge lowers snapshot rates before the link saturates.
 Set `ROOM_SECRET` (any long random string) so hosts keep their rooms across restarts

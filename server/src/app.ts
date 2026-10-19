@@ -2,11 +2,11 @@ import { ROOM_ID_PATTERN, WS_PATH } from "../../shared/src/constants.ts";
 import type { PlayerInfo } from "../../shared/src/protocol.ts";
 import { readServerClusterConfig } from "./cluster/config.ts";
 import { createRoom, hostKeySecret, isHostKey } from "./host-key.ts";
-import { readJoinRequest, rejectWithoutHealthToken, scheme } from "./http.ts";
+import { constantTimeEqual, devTokenFromEnv, readJoinRequest, rejectWithoutHealthToken, scheme } from "./http.ts";
 import { Overcharge } from "./overcharge.ts";
 import { CLIENT_DIR } from "./paths.ts";
 import { Room, type Peer, type PeerEvents, type Publish, type RoomSync } from "./room.ts";
-import { StatsSampler } from "./stats.ts";
+import { formatHealth, StatsSampler } from "./stats.ts";
 import { createStaticHandler } from "./static.ts";
 
 /**
@@ -41,6 +41,7 @@ function readSchedule(): { tickHz: number; groups: 1 | 2 } | undefined {
 }
 const schedule = readSchedule();
 const hostSecret = hostKeySecret(cluster?.secret);
+const devToken = devTokenFromEnv();
 
 const rooms = new Map<string, Room>();
 
@@ -135,8 +136,10 @@ export function connect(roomId: string, peer: Peer, playerId?: number, resume?: 
       chatIdBase: cluster ? cluster.server * 0x1000000 : 0,
       keepChatHistory: !cluster,
       isHostKey: (key) => isHostKey(roomId, key, hostSecret),
+      isDevToken: (token) => constantTimeEqual(token, devToken),
       schedule,
       rate: overcharge.rate,
+      health: () => formatHealth(stats.report(), cluster ? `Server ${cluster.server}` : "Server"),
     });
     rooms.set(roomId, room);
     clusterRooms?.roomOpened(roomId);

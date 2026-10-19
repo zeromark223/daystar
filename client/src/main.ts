@@ -1,5 +1,5 @@
 import "./style.css";
-import { ROOM_ID_PATTERN } from "../../shared/src/constants.ts";
+import { PONG, ROOM_ID_PATTERN } from "../../shared/src/constants.ts";
 import type { Poll } from "../../shared/src/poll.ts";
 import type { PlayerInfo, ServerMessage } from "../../shared/src/protocol.ts";
 import { canSpeak, ROLE_LABELS, type Role } from "../../shared/src/roles.ts";
@@ -108,6 +108,8 @@ async function main(): Promise<void> {
   let selfRole: Role = "guest";
   /** The socket we play on; replaced on migration and reconnect. */
   let conn: Connection | null = null;
+  /** When each /ping still unanswered went out (performance.now()), oldest first. */
+  let pings: number[] = [];
   let identity: LobbyChoice | null = null;
   let switching = false;
 
@@ -295,6 +297,8 @@ async function main(): Promise<void> {
         const formerSelf = rejoin && selfId !== msg.selfId ? selfId : -1;
         game.resetPlayers();
         missing.reset();
+        // Pings sent on a previous socket get no answer.
+        pings = [];
         people.clear();
         player.clear();
         selfId = msg.selfId;
@@ -395,6 +399,10 @@ async function main(): Promise<void> {
       case "migrate":
         void migrate();
         break;
+      case "notice":
+        if (msg.text === PONG && pings.length) chat.addSystem(`Pong: ${Math.round(performance.now() - pings.shift()!)} ms round trip.`);
+        else chat.addSystem(msg.text);
+        break;
       case "error":
         if (joined) chat.addSystem(msg.message);
         else showDisconnected(msg.message);
@@ -484,7 +492,11 @@ async function main(): Promise<void> {
     });
     game.setOrbitNames(orbitNames);
     game.setGatherStyle(gatherStyle);
-    chat = new ChatPanel((text) => conn?.send({ t: "chat", text }));
+    chat = new ChatPanel((text) => {
+      if (!conn) return;
+      if (/^\/ping(\s|$)/i.test(text)) pings.push(performance.now());
+      conn.send({ t: "chat", text });
+    });
     // Which answer planet we are on, for the poll card.
     setInterval(() => polls.setMine(game!.pollAnswer), 200);
     adopt(first);

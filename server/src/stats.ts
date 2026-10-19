@@ -124,6 +124,33 @@ export class StatsSampler {
   }
 }
 
+/** A report as one line for the chat's System tab (the host's /health). */
+export function formatHealth(report: ReturnType<StatsSampler["report"]>, label = "Server"): string {
+  const up = formatDuration(report.uptimeSec);
+  const s = report.latest;
+  if (!s) return `${label}: up ${up}, ${report.runtime}; no load sample yet.`;
+  const parts = [
+    `${s.rooms} ${s.rooms === 1 ? "room" : "rooms"}, ${s.players} ${s.players === 1 ? "player" : "players"}`,
+    `CPU ${Math.round(s.cpu * 100)}%`,
+    `loop p99 ${s.loopP99Ms} ms`,
+    `tick p99 ${s.tickP99Ms} ms`,
+    `memory ${s.rssMb} MB (heap ${s.heapMb} MB)`,
+    `egress ${s.egressMbps} Mbit/s`,
+  ];
+  if (s.snapshotHz !== undefined) parts.push(`${s.snapshotHz} snapshots/s${s.load !== undefined ? `, load ${s.load}` : ""}`);
+  return `${label}: up ${up}, ${report.runtime} · ${parts.join(" · ")}`;
+}
+
+/** 3725 -> "1h 2m"; under a minute, seconds. */
+function formatDuration(sec: number): string {
+  const d = Math.floor(sec / 86400);
+  const h = Math.floor((sec % 86400) / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  if (d) return `${d}d ${h}h`;
+  if (h) return `${h}h ${m}m`;
+  return m ? `${m}m` : `${sec}s`;
+}
+
 /** p-th percentile of an ascending array (0 when empty). */
 function percentile(sorted: number[], p: number): number {
   return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))] ?? 0;

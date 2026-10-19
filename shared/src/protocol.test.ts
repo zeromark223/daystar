@@ -50,6 +50,7 @@ test("server messages round-trip", () => {
     { t: "chat", message: chat },
     { t: "correction", x: 10, y: 20.5 },
     { t: "error", message: "nope" },
+    { t: "notice", text: "Server health: ok" },
     { t: "snapshot", players: [{ id: 1, x: 9999.75, y: 0, dir: "south", moving: true, age: 255 }], ...emptyTail },
     {
       t: "snapshot",

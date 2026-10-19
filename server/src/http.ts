@@ -1,7 +1,21 @@
 /** Small HTTP helpers shared by the game server and the agent. */
+import { randomBytes } from "node:crypto";
 
 // GET /api/health requires "Authorization: Bearer <HEALTH_TOKEN>" (or ?token=) when set.
 const HEALTH_TOKEN = process.env.HEALTH_TOKEN ?? "";
+
+/**
+ * The token that unlocks developer chat commands (/dev <token>): DEV_TOKEN, or
+ * when unset a random one for this run, printed so it can still be used. The
+ * supervisor sets it before starting the servers, so a cluster shares one.
+ */
+export function devTokenFromEnv(): string {
+  if (!process.env.DEV_TOKEN) {
+    process.env.DEV_TOKEN = randomBytes(24).toString("base64url"); // 32 characters
+    console.log(`DEV_TOKEN is not set; developer token for this run: ${process.env.DEV_TOKEN}`);
+  }
+  return process.env.DEV_TOKEN;
+}
 
 /** A 401 response when HEALTH_TOKEN is set and the request lacks it, else null. */
 export function rejectWithoutHealthToken(req: Request, url: URL): Response | null {
@@ -64,7 +78,7 @@ export async function readJoinRequest(req: Request, pattern: RegExp): Promise<st
   }
 }
 
-function constantTimeEqual(a: string, b: string): boolean {
+export function constantTimeEqual(a: string, b: string): boolean {
   const x = new TextEncoder().encode(a);
   const y = new TextEncoder().encode(b);
   let diff = x.length ^ y.length;
