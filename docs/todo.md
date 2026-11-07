@@ -77,3 +77,61 @@ server and other clients do not change.
 
 Rejected: MediaRecorder (container chunks of hundreds of ms, still needs a decoder),
 raw PCM (5x the bandwidth, two formats on the server), WebRTC just for Firefox.
+
+## Presenting files (idea, not planned)
+
+The host shows an image, a PDF or a slide deck to everyone and drives it: page,
+scroll and zoom, a laser pointer, highlights. Shelved because accepting uploads is
+a large attack surface for a feature nobody needs yet.
+
+Design sketched so far:
+
+- **Everything becomes a set of pages.** An image is 1 page, a PDF N pages, a PPTX
+  goes through LibreOffice headless to PDF. A conversion worker, outside the game
+  server's event loop, renders each page to WebP (two sizes, for zoom) and the text
+  lines' boxes to JSON (`pdftotext -bbox`). Clients then need one viewer, phones
+  render nothing heavy, and every screen shows the same pixels, so coordinates
+  match exactly.
+- **Files never ride the game WebSocket.** 2,800 guests x a 5 MB PDF is ~14 GB
+  through the loop that sends the 20 Hz snapshot. Upload with HTTP (host key only,
+  ~50 MB / 200 pages cap); serve pages over HTTP at immutable, content-hashed URLs
+  so Cloudflare caches them; guests fetch only the page in view and its
+  neighbours. Local disk is enough while every server is in one container; a
+  multi-machine cluster needs S3 or MinIO. Delete with the room (TTL).
+- **Sync what the host sees, not scroll pixels** (screens differ in width):
+  `view { file, page: u16, rect: x,y,w,h }` normalised to the page,
+  `pointer { x, y: u16, mode }`, `mark { page, rects[] }`. Each guest fits `rect`
+  to its own screen, which covers scroll, zoom and aspect ratio at once. Opening,
+  page changes and marks are events like `poll` and are in `welcome` for late
+  joiners; view and pointer ride the snapshot tail like `pollCounts`, only when
+  changed (a few bytes per tick), interpolated on the client. In cluster mode they
+  are mirrored over the mesh like roles and moves.
+- **Highlights:** a laser dot (any file), a dragged box, and snapping to a text
+  line: the host's client finds the nearest line box and sends its rect, so guests
+  need no text. Images have no text, so laser and box only.
+- **Guests follow the host** by default; they may browse on their own, with a
+  "back to the host" button.
+- **PPTX limits:** slides and speaker notes (host only) yes; animations, builds,
+  video, audio and transitions no; fonts ~90% right (install Carlito, Caladea,
+  Noto in the worker). Exporting to PDF from PowerPoint first is the faithful path.
+
+Security, the reason it waits:
+
+- Only the host uploads; check magic bytes, not extensions.
+- LibreOffice and poppler have a long CVE history: run them sandboxed (own
+  container, no network, time and memory limits).
+- Re-encode images (strip EXIF / GPS, cap at ~40 MP against decompression bombs).
+- Unguessable URLs (content hash) or URLs signed with the room.
+
+Cheaper ways in, if it comes back:
+
+- **Images only, converted in the host's browser:** the client downscales and
+  re-encodes to WebP before sending; the server only accepts size-capped WebP and
+  parses nothing complex. The sync design above stays the same.
+- **Screen sharing** (`getDisplayMedia`): no files on the server at all, but video
+  bandwidth and a different media path (see "Why not WebRTC" in docs/voice.md).
+
+Phases if built: (1) upload, images and PDF, page/rect sync, follow mode, laser,
+late joiners, cluster mirroring, a load-test column; (2) boxes, line snapping, pen
+strokes; (3) PPTX, speaker notes, thumbnails. Out of scope: PPTX animations and
+video, guest uploads, co-editing, the Rust server.

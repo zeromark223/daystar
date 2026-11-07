@@ -203,6 +203,21 @@ room over more cores.
   while the event loop hovered around its 50 ms limit at ~1.2 Gbps out. Test the
   server's own port: the Vite dev server's proxy capped the same run at ~5,000.
 
+### Long run: the demo server
+
+The public demo server, behind Cloudflare, after **19 days 21 hours** without a
+restart (Bun 1.4.2, one room, 301 players, as of November 2026):
+
+| CPU | Loop p99 | Tick p99 | Memory | Egress | Snapshots | Load |
+|---|---|---|---|---|---|---|
+| 20% | 2.5 ms | 3.39 ms | 76 MB (heap 10 MB) | 4.5 Mbit/s | 20/s | 0.21 |
+
+- No restart in that time, and memory stays small: a 10 MB heap after almost
+  three weeks.
+- The failures in its logs are mostly Cloudflare closing WebSockets (its edge
+  restarts and redeploys drop open connections); clients reconnect. A speaker who
+  reconnects comes back as a guest, though (see docs/todo.md, "Voice follow-ups").
+
 ### Operating system matters more than the chip
 
 Same build and command (one room, a host and two speakers, 20% walking), server and
