@@ -8,6 +8,7 @@
  * agents behind a load balancer (shared registry state) are future work.
  */
 import { ROOM_ID_PATTERN } from "../../../shared/src/constants.ts";
+import { authFromEnv } from "../auth/index.ts";
 import type { AgentToServer, ServerToAgent } from "../cluster/control.ts";
 import { sign, verifyPlayer, verifyServer } from "../cluster/ticket.ts";
 import { createRoom } from "../host-key.ts";
@@ -40,6 +41,8 @@ const ORDER_COOLDOWN_MS = 30_000;
 const lastOrder = new Map<number, number>();
 
 const registry = new Registry();
+/** Accounts live on the agent in a cluster: it is the origin the browser talks to. */
+const auth = await authFromEnv();
 /** Current control socket per server id. */
 const links = new Map<number, Bun.ServerWebSocket<LinkData>>();
 const serveStatic = createStaticHandler(CLIENT_DIR);
@@ -224,6 +227,7 @@ async function handleMigrate(req: Request): Promise<Response> {
 async function handleHttp(req: Request): Promise<Response> {
   const url = new URL(req.url);
   try {
+    if (url.pathname.startsWith("/api/auth/")) return auth ? await auth.handle(req) : new Response("Accounts are off", { status: 404 });
     switch (url.pathname) {
       case "/healthz":
         return new Response("ok", { headers: { "content-type": "text/plain" } });

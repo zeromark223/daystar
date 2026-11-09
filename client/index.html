@@ -17,8 +17,16 @@
 
     <section id="lobby" class="lobby">
       <div class="card">
-        <h1>Daystar</h1>
+        <div class="card-head">
+          <h1>Daystar</h1>
+          <div id="account" class="account" hidden>
+            <span id="account-who" class="account-who" hidden></span>
+            <button id="login-button" type="button" class="secondary">Log in <span class="experiment-badge">Experiment</span></button>
+            <button id="logout-button" type="button" class="secondary" hidden>Log out</button>
+          </div>
+        </div>
         <p class="tagline">Meet in orbit around a shared sun.</p>
+        <p id="account-error" class="error" role="alert" hidden></p>
         <p class="room-line" id="room-line">Room <code id="lobby-room"></code></p>
         <p id="lobby-note" class="note" hidden></p>
         <form id="join-form">

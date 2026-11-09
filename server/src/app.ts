@@ -1,5 +1,6 @@
 import { ROOM_ID_PATTERN, WS_PATH } from "../../shared/src/constants.ts";
 import type { PlayerInfo } from "../../shared/src/protocol.ts";
+import { authFromEnv } from "./auth/index.ts";
 import { readServerClusterConfig } from "./cluster/config.ts";
 import { createRoom, hostKeySecret, isHostKey } from "./host-key.ts";
 import { constantTimeEqual, devTokenFromEnv, readJoinRequest, rejectWithoutHealthToken, scheme } from "./http.ts";
@@ -42,6 +43,8 @@ function readSchedule(): { tickHz: number; groups: 1 | 2 } | undefined {
 const schedule = readSchedule();
 const hostSecret = hostKeySecret(cluster?.secret);
 const devToken = devTokenFromEnv();
+/** Standalone only; in a cluster the agent serves accounts. */
+export const auth = cluster ? null : await authFromEnv();
 
 const rooms = new Map<string, Room>();
 
@@ -166,6 +169,7 @@ export function localPlayers(): { room: string; player: number }[] {
 export async function handleHttp(req: Request): Promise<Response> {
   const url = new URL(req.url);
   try {
+    if (url.pathname.startsWith("/api/auth/")) return auth ? await auth.handle(req) : new Response("Accounts are off", { status: 404 });
     switch (url.pathname) {
       case "/healthz":
         return new Response("ok", { headers: { "content-type": "text/plain" } });

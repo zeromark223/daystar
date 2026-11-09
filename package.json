@@ -1,6 +1,6 @@
 {
   "name": "daystar",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A meeting space in orbit: each person is a glowing star or planet around a shared sun. Move freely, chat.",
   "license": "MIT",
   "private": true,
@@ -18,7 +18,8 @@
     "test": "bun test",
     "loadtest": "bun tools/loadtest.ts",
     "loadtest:web": "bun tools/loadtest-web/server.ts",
-    "cluster": "CLUSTER_SERVERS=4 bun server/src/supervisor.ts"
+    "cluster": "CLUSTER_SERVERS=4 bun server/src/supervisor.ts",
+    "db:migrate": "bun server/src/db/migrate.ts"
   },
   "devDependencies": {
     "@types/bun": "^1.4.2",

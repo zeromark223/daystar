@@ -10,6 +10,7 @@ import { AudienceBar } from "./ui/audience.ts";
 import { ChatPanel } from "./ui/chat.ts";
 import { HostTransfer, hostLink, takeHostKeyFromUrl } from "./ui/host-transfer.ts";
 import { inviteUrl, setupInviteQr } from "./ui/invite.ts";
+import { setupAccountBar } from "./ui/account.ts";
 import { runLobby, type LobbyChoice } from "./ui/lobby.ts";
 import { PeoplePanel } from "./ui/people.ts";
 import { PollPanel } from "./ui/poll.ts";
@@ -473,6 +474,7 @@ async function main(): Promise<void> {
     }
   }
 
+  void setupAccountBar(document.getElementById("name-input") as HTMLInputElement);
   await runLobby(roomId, hostKey !== "" && !handedOver, async (choice) => {
     // Still inside the click: the only moment browsers let audio start.
     unlockAudio();

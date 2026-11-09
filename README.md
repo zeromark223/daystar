@@ -104,6 +104,24 @@ tools/          load test
 - Voice works in Chrome and Safari on phones, and Chrome, Edge and Firefox on
   computers (not yet Firefox on Android). It needs HTTPS.
 
+## Accounts (in progress)
+
+Optional, and never needed by guests: log in with [Authentik](https://goauthentik.io)
+(OIDC code flow with PKCE), which handles passwords, social logins and SSO;
+Daystar keeps its own sessions in Postgres. Off unless `OIDC_ISSUER` is set; the
+variables are in [.env.example](.env.example), and the server applies the
+database migrations (`server/src/db/migrations/`) at startup, or
+`bun run db:migrate`. In a cluster the agent serves accounts.
+
+- **Sessions:** a short-lived access JWT (`ds_at`, 15 min) and a refresh token
+  (`ds_rt`, 30 days, only its hash stored), both HttpOnly cookies.
+  `POST /api/auth/refresh` swaps both; a refresh token used twice (outside 10 s,
+  for tabs racing) revokes every token of that login. `POST /api/auth/logout`
+  revokes them and returns Authentik's end-session URL.
+- **Tests** run against a fake OIDC provider (`server/src/auth/fake-oidc.ts`) and
+  the database in `.env`, each in a throwaway schema; without `PGHOST` the
+  database tests are skipped.
+
 ## Audience
 
 - **Reactions:** 👏 ❤️ 😂 😮 🎉 👍 (buttons, or keys 1-6) float up from the player and
