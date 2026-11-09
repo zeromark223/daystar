@@ -109,7 +109,7 @@ tools/          load test
 Optional, and never needed by guests: log in with [Authentik](https://goauthentik.io)
 (OIDC code flow with PKCE), which handles passwords, social logins and SSO;
 Daystar keeps its own sessions in Postgres. Off unless `OIDC_ISSUER` is set; the
-variables are in [.env.example](.env.example), and the server applies the
+variables are in [example.env](example.env), and the server applies the
 database migrations (`server/src/db/migrations/`) at startup, or
 `bun run db:migrate`. In a cluster the agent serves accounts.
 

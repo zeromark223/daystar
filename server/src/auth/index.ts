@@ -17,7 +17,7 @@ const PRUNE_EVERY_MS = 60 * 60 * 1000;
 export async function authFromEnv(): Promise<Auth | null> {
   const config = authConfigFromEnv();
   if (!config) {
-    console.log("accounts: off (set OIDC_ISSUER and PGHOST to turn them on, see .env.example)");
+    console.log("accounts: off (set OIDC_ISSUER and PGHOST to turn them on, see example.env)");
     return null;
   }
   const sql = openDb()!;

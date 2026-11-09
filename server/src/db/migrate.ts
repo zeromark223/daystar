@@ -54,7 +54,7 @@ export async function migrate(sql: SQL, dir = MIGRATIONS_DIR): Promise<string[]>
 if (import.meta.main) {
   const sql = openDb({ max: 1 });
   if (!sql) {
-    console.error("PGHOST is not set; nothing to migrate (see .env.example)");
+    console.error("PGHOST is not set; nothing to migrate (see example.env)");
     process.exit(1);
   }
   try {

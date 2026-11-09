@@ -4,6 +4,14 @@ Notable changes to Daystar. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/). Earlier history is in `git log`.
 
+## [Unreleased]
+
+### Changed
+
+- `.env.example` is now `example.env` and documents every variable the server
+  reads (server, capacity, cluster, Postgres, accounts). Every line is commented
+  out with an explanation, its default and an example: uncomment what you need.
+
 ## [0.2.0] - 2026-11-08
 
 ### Added

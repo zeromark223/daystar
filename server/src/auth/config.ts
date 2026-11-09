@@ -1,4 +1,4 @@
-/** Accounts configuration from the environment (see .env.example). */
+/** Accounts configuration from the environment (see example.env). */
 
 export interface AuthConfig {
   /** Authentik's issuer for the Daystar provider, with its trailing slash. */
@@ -30,7 +30,7 @@ export function authConfigFromEnv(env: Record<string, string | undefined> = proc
   if (!env.OIDC_ISSUER) return null;
   const missing = ACCOUNT_VARS.filter((name) => !env[name]);
   if (!env.PGHOST) missing.push("PGHOST");
-  if (missing.length) throw new Error(`accounts need ${missing.join(", ")} (see .env.example)`);
+  if (missing.length) throw new Error(`accounts need ${missing.join(", ")} (see example.env)`);
   const jwtSecret = env.AUTH_JWT_SECRET!;
   if (jwtSecret.length < 32) throw new Error("AUTH_JWT_SECRET must be at least 32 characters (openssl rand -base64 48)");
   const publicUrl = new URL(env.PUBLIC_URL!).origin;
