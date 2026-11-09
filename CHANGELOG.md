@@ -35,6 +35,13 @@ Notable changes to Daystar. The format follows
 - docs/todo.md: rooms limited to an email domain (deferred), and the
   `email_verified` question to settle first.
 
+### Fixed
+
+- Load test: a bot worker crashed (`InvalidStateError` in `promoteSpeakers`) when
+  a room's host bot lost its socket under heavy load (seen at ~30,000 bots on a
+  4-server cluster) and a speaker rejoined; the host now promotes only while its
+  socket is open.
+
 ### Changed
 
 - `.env.example` is now `example.env` and documents every variable the server

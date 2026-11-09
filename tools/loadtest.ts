@@ -534,11 +534,15 @@ function runWorker(): void {
     else c.talkers.push(bot);
   }
 
-  /** The room's host promotes its speakers (again, after one of them rejoined). */
+  /**
+   * The room's host promotes its speakers (again, after one of them rejoined).
+   * The host's socket may have just closed (an overloaded server dropping it):
+   * sending on it would throw and take the whole worker down.
+   */
   function promoteSpeakers(room: string): void {
     const c = conversations.get(room);
     const host = c?.talkers.find((b) => b.part === "host" && b.joined && b.role === "host");
-    if (!c || !host) return;
+    if (!c || !host || host.ws.readyState !== WebSocket.OPEN) return;
     for (const b of c.talkers) {
       if (b.part !== "speaker" || !b.joined || b.role === "speaker") continue;
       host.ws.send(encodeClientMessage({ t: "set_role", id: b.id, role: "speaker" }));
