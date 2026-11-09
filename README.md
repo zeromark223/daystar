@@ -465,6 +465,19 @@ Both modes also write the rows to `loadtest-logs/<time>-<host>.csv` (git-ignored
 `--log <file>` to choose, `--no-log` to skip), headed by the command, the target and
 the start time, so runs can be compared in a spreadsheet.
 
+With a database configured (`PGHOST`..., see [example.env](example.env)) every run
+is also logged to Postgres, from the command line and the web UI alike: the run
+(command, target, server runtime, the machine running the bots, status, summary,
+highest passing and first failing bot count) in `loadtest_runs`, and each row in
+`loadtest_rows` (the CSV's columns in a `metrics` JSON column). `--no-db` skips it;
+an unreachable database only prints a warning. Ctrl+C stops a run cleanly (it is
+saved as `stopped`); a second Ctrl+C quits at once.
+
+```bash
+bun run loadtest:runs        # the 25 latest runs
+bun run loadtest:runs 12     # the rows of run 12
+```
+
 To test a deployed server from this machine, point it at the public URL. Server
 columns come from its `/api/health`; if the server sets `HEALTH_TOKEN`, pass it:
 

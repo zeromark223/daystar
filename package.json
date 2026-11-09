@@ -18,6 +18,7 @@
     "test": "bun test",
     "loadtest": "bun tools/loadtest.ts",
     "loadtest:web": "bun tools/loadtest-web/server.ts",
+    "loadtest:runs": "bun tools/loadtest-db.ts",
     "cluster": "CLUSTER_SERVERS=4 bun server/src/supervisor.ts",
     "db:migrate": "bun server/src/db/migrate.ts"
   },

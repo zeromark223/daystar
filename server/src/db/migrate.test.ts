@@ -28,7 +28,7 @@ describe("migrations", { skip: !dbConfigured() && "PGHOST is not set" }, () => {
     const tables = await sql`SELECT table_name FROM information_schema.tables WHERE table_schema = ${db.schema}`;
     assert.deepEqual(
       tables.map((t: { table_name: string }) => t.table_name).sort(),
-      ["refresh_tokens", "room_members", "rooms", "schema_migrations", "users"],
+      ["loadtest_rows", "loadtest_runs", "refresh_tokens", "room_members", "rooms", "schema_migrations", "users"],
     );
   });
 

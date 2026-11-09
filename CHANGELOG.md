@@ -23,6 +23,12 @@ Notable changes to Daystar. The format follows
 - **"Rejoin?" on another device:** signed in on the home page while holding a
   seat in a live room, the lobby offers to go back (`GET /api/rooms/mine`); on
   the room's own page the button reads "Rejoin as host / speaker".
+- **Load test runs in Postgres:** every run (command line and web UI) is logged
+  to `loadtest_runs` and its rows to `loadtest_rows` (migration 002), next to
+  the CSV; on when `PGHOST` is set, `--no-db` to skip, never blocking a run.
+  `bun run loadtest:runs [id]` lists runs or shows one.
+- Load test: Ctrl+C stops a run cleanly (summary written, run saved as
+  `stopped`); a second Ctrl+C quits at once.
 - WebSocket upgrades from another site's page are refused (`Origin` must be the
   server's own host or `PUBLIC_URL`; no `Origin` passes).
 - docs/todo.md: seats by account across a cluster (they work per server today).

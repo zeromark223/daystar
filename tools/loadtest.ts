@@ -36,6 +36,8 @@ import { roleFromIndex, type Role } from "../shared/src/roles.ts";
 import { DEFAULT_MODEL, Director, SceneSource } from "./loadtest-ai.ts";
 import { chatLine, personName } from "./loadtest-crowd.ts";
 import { readOpusPackets } from "./voice/ogg.ts";
+import { dbConfigured } from "../server/src/db/db.ts";
+import { RunLog } from "./loadtest-db.ts";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const HIST_MAX_MS = 5000;
@@ -764,6 +766,7 @@ export const OPTION_SPECS: OptionSpec[] = [
   { name: "port", type: "string", default: "3300", arg: "<n>", group: "Server", help: "port for the spawned server or agent" },
   { name: "log", type: "string", arg: "<file>", group: "Output", cliOnly: true, help: "also write the rows as CSV (default loadtest-logs/<time>-<host>.csv)" },
   { name: "no-log", type: "boolean", default: false, group: "Output", help: "do not write a CSV file" },
+  { name: "no-db", type: "boolean", default: false, group: "Output", help: "do not log the run to Postgres (on when PGHOST is set; see bun run loadtest:runs)" },
   { name: "last", type: "boolean", default: false, group: "Output", cliOnly: true, help: "reuse the options of the previous run; options given with it override them, e.g. --last --hold 60" },
 ];
 
@@ -806,6 +809,10 @@ export interface Options {
   reportEvery: number;
   /** CSV log path, or null. */
   log: string | null;
+  /** Log the run to Postgres too (tools/loadtest-db.ts), when PGHOST is set. */
+  db: boolean;
+  /** A name for the run in the database (the web UI's); null from the command line. */
+  name: string | null;
   roomSize: number;
   hold: number;
   ramp: number;
@@ -875,7 +882,7 @@ export function parseOptions(input: string[], cli = false): Options {
     string
   > &
     Partial<Record<"max" | "log" | "target" | "room", string>> &
-    Record<"no-log" | "keep-going" | "help", boolean>;
+    Record<"no-log" | "no-db" | "keep-going" | "help", boolean>;
   let values: Values;
   let tokens;
   try {
@@ -975,6 +982,8 @@ export function parseOptions(input: string[], cli = false): Options {
     max: values.max === undefined ? null : int("max", values.max, 1),
     reportEvery: int("report-every", values["report-every"], 1),
     log: values["no-log"] ? null : (values.log ?? defaultLogPath(values.target)),
+    db: !values["no-db"],
+    name: null,
     healthToken: values["health-token"],
     target: values.target === undefined || values.target === "" ? null : parseTarget(values.target),
     argv,
@@ -1113,8 +1122,20 @@ export async function runOrchestrator(opts: Options, out: Reporter = consoleRepo
   const workers: ChildProcess[] = [];
   const cleanups: (() => void)[] = [];
   let server: ChildProcess | null = null;
+  let runLog: RunLog | null = null;
   try {
-    return await orchestrate(opts, out, signal ?? new AbortController().signal, workers, (s) => (server = s), (fn) => cleanups.push(fn));
+    return await orchestrate(
+      opts,
+      out,
+      signal ?? new AbortController().signal,
+      workers,
+      (s) => (server = s),
+      (fn) => cleanups.push(fn),
+      (log) => (runLog = log),
+    );
+  } catch (err) {
+    await (runLog as RunLog | null)?.end("failed", (err as Error).message);
+    throw err;
   } finally {
     for (const fn of cleanups) fn();
     for (const w of workers) w.kill();
@@ -1129,6 +1150,7 @@ async function orchestrate(
   workers: ChildProcess[],
   spawned: (server: ChildProcess) => void,
   onCleanup: (fn: () => void) => void,
+  logging: (log: RunLog) => void,
 ): Promise<RunResult> {
   const { steps, roomSize, hold, ramp, chatEveryMs, roomPrefix, speakers } = opts;
   const maxBots = opts.max ?? steps.at(-1)!;
@@ -1284,6 +1306,17 @@ async function orchestrate(
     );
     out.log(`Log: ${opts.log}`);
   }
+  const runLog =
+    opts.db && dbConfigured()
+      ? await RunLog.open(
+          { name: opts.name, command: `bun tools/loadtest.ts ${describe(opts.argv)}`.trim(), target: wsUrl, runtime: runtimeLabel },
+          (text) => out.warn(text),
+        )
+      : null;
+  if (runLog) {
+    logging(runLog);
+    out.log(`Database: run ${runLog.id} (bun run loadtest:runs ${runLog.id})`);
+  }
   const csvLine = (values: (string | number)[]) =>
     values.map((v) => (typeof v === "number" ? (Number.isNaN(v) ? "" : String(v)) : `"${v.replace(/"/g, "'")}"`)).join(",");
 
@@ -1438,7 +1471,9 @@ async function orchestrate(
       String(rejoins).padStart(6),
       verdict,
     ].join(" | ");
-    out.row(row, Object.fromEntries(CSV_COLUMNS.map((c, i) => [c, csvValues[i]])));
+    const values = Object.fromEntries(CSV_COLUMNS.map((c, i) => [c, csvValues[i]]));
+    out.row(row, values);
+    runLog?.row(values);
     if (perServer?.length) {
       const parts = perServer
         .sort((a, b) => a.server - b.server)
@@ -1557,13 +1592,21 @@ async function orchestrate(
       : `Summary: last row meeting every target at ${bestOk} bots; first failing row at ${firstFail} bots`);
   out.log(summary);
   if (opts.log) appendFileSync(opts.log, `# ${summary}\n`);
+  await runLog?.end(stopped ? "stopped" : "done", summary, { maxOk: bestOk || null, firstFail });
   return { summary, log: opts.log, stopped };
 }
 
 if (process.argv.includes("--worker")) runWorker();
 else if (import.meta.main) {
   try {
-    await runOrchestrator(parseOptions(process.argv.slice(2), true));
+    // Ctrl+C stops the run cleanly (summary, CSV and database closed); a second one quits at once.
+    const stop = new AbortController();
+    process.on("SIGINT", () => {
+      if (stop.signal.aborted) process.exit(130);
+      console.log("\nStopping… (Ctrl+C again to quit now)");
+      stop.abort();
+    });
+    await runOrchestrator(parseOptions(process.argv.slice(2), true), undefined, stop.signal);
     process.exit(0);
   } catch (err) {
     if (err instanceof UsageError) console.error(`loadtest: ${err.message}\n\n${usage()}`);

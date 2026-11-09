@@ -105,7 +105,7 @@ function toArgv(options: unknown): string[] {
 }
 
 function startRun(name: string, argv: string[], resumedFrom: number | null = null): Run {
-  const opts = parseOptions(argv);
+  const opts = { ...parseOptions(argv), name };
   const endless = opts.max !== null && opts.hold === 0;
   const run: Run = {
     id: nextId++,
