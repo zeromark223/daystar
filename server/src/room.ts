@@ -19,6 +19,7 @@ import type { Direction } from "../../shared/src/direction.ts";
 import { cellFullyInView, cellOf, cellSetInView, cellsInView, inView } from "../../shared/src/aoi.ts";
 import { canSpeak, type Role } from "../../shared/src/roles.ts";
 import { canBeAt, spawnPoint } from "../../shared/src/space.ts";
+import type { TicketUser } from "./cluster/ticket.ts";
 import { recordEgress, recordTick } from "./stats.ts";
 import {
   handTicket,
@@ -178,6 +179,11 @@ interface Player {
   voiceAt: number;
   /** Unlocked developer commands with /dev (this server only, until the socket closes). */
   dev: boolean;
+  /**
+   * The signed-in account behind a local player (from its ticket), else null.
+   * Known only to the server holding the socket: never sent to clients or peers.
+   */
+  account: TicketUser | null;
 }
 
 /** A chat command (a line starting with "/"); /help lists those the player may use. */
@@ -323,6 +329,11 @@ export class Room {
   }
 
   /** Full state of the local players, for a peer that starts mirroring this room. */
+  /** The account behind a local player, or null (a guest, a replica, or unknown id). */
+  accountOf(id: number): TicketUser | null {
+    return this.players.get(id)?.account ?? null;
+  }
+
   localState(): PlayerInfo[] {
     return [...this.players.values()].filter((p) => p.owner === null).map(toInfo);
   }
@@ -331,9 +342,10 @@ export class Room {
    * Add a freshly upgraded connection; it becomes a player once it sends "join".
    * `playerId` is the id from the agent's ticket in cluster mode. `resume`, for a
    * migrating player, resolves to its state on the previous server (or null).
+   * `account` is the signed-in user from the player's ticket.
    * The runtime adapter must call the returned handlers for binary messages and on close.
    */
-  accept(peer: Peer, playerId?: number, resume?: Promise<PlayerInfo | null>): PeerEvents {
+  accept(peer: Peer, playerId?: number, resume?: Promise<PlayerInfo | null>, account: TicketUser | null = null): PeerEvents {
     let player: Player | null = null;
     let joining = false;
     this.connections++;
@@ -348,12 +360,12 @@ export class Room {
           this.handleMove(player, msg);
         } else if (msg.t === "join" && !player && !joining) {
           if (!resume) {
-            player = this.join(peer, msg, playerId);
+            player = this.join(peer, msg, playerId, null, account);
             return;
           }
           joining = true;
           void resume.then((state) => {
-            if (joining) player = this.join(peer, msg, playerId, state);
+            if (joining) player = this.join(peer, msg, playerId, state, account);
           });
         } else if (msg.t === "voice" && player) {
           this.handleVoice(player, msg.seq, msg.data);
@@ -394,7 +406,7 @@ export class Room {
   remoteJoined(owner: number, info: PlayerInfo): void {
     const existing = this.players.get(info.id);
     if (existing?.owner === null) return; // ours; a stale message
-    const player: Player = { ...info, owner, peer: null, group: -1, cell: -1, gridCell: -1, ...fresh() };
+    const player: Player = { ...info, owner, peer: null, group: -1, cell: -1, gridCell: -1, ...fresh(), account: null };
     if (existing) this.unfile(existing);
     this.players.set(info.id, player);
     this.file(player);
@@ -558,6 +570,7 @@ export class Room {
     request: { name: unknown; appearance: unknown; hostKey: string },
     assignedId?: number,
     resume?: PlayerInfo | null,
+    account: TicketUser | null = null,
   ): Player | null {
     const { name: rawName, appearance, hostKey } = request;
     const name = typeof rawName === "string" ? rawName.trim().slice(0, MAX_NAME_LENGTH) : "";
@@ -604,6 +617,7 @@ export class Room {
       role,
       hand: role === "guest" ? (resume?.hand ?? 0) : 0,
       ...fresh(),
+      account,
     };
 
     // Arriving during an orbit: straight to a seat.

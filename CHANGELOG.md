@@ -6,6 +6,19 @@ Notable changes to Daystar. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **The account reaches the room:** `/api/join` signs the signed-in account into
+  the WebSocket ticket (the agent's player ticket in a cluster, a new 30 s join
+  ticket standalone), migration tickets carry it over, and the game server keeps
+  it on the player, server-side only. Guests join exactly as before.
+- The client refreshes the session before joining or reconnecting when it is
+  about to expire, so the ticket carries the account.
+- WebSocket upgrades from another site's page are refused (`Origin` must be the
+  server's own host or `PUBLIC_URL`; no `Origin` passes).
+- docs/todo.md: rooms limited to an email domain (deferred), and the
+  `email_verified` question to settle first.
+
 ### Changed
 
 - `.env.example` is now `example.env` and documents every variable the server

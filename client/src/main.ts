@@ -10,6 +10,7 @@ import { AudienceBar } from "./ui/audience.ts";
 import { ChatPanel } from "./ui/chat.ts";
 import { HostTransfer, hostLink, takeHostKeyFromUrl } from "./ui/host-transfer.ts";
 import { inviteUrl, setupInviteQr } from "./ui/invite.ts";
+import { freshSession } from "./account.ts";
 import { setupAccountBar } from "./ui/account.ts";
 import { runLobby, type LobbyChoice } from "./ui/lobby.ts";
 import { PeoplePanel } from "./ui/people.ts";
@@ -429,6 +430,7 @@ async function main(): Promise<void> {
     saveHandedOver(roomId, false);
     hostTransfer.update(false, false);
     try {
+      await freshSession();
       adopt(await Connection.open(roomId, handlers));
     } catch {
       chat?.addSystem("Could not reach the room; try again.");
@@ -461,6 +463,7 @@ async function main(): Promise<void> {
     try {
       for (let attempt = 1; attempt <= RECONNECT_ATTEMPTS; attempt++) {
         try {
+          await freshSession();
           adopt(await Connection.open(roomId!, handlers));
           chat?.addSystem("Reconnected.");
           return;
@@ -485,6 +488,7 @@ async function main(): Promise<void> {
       saveHostKey(roomId, hostKey);
       history.replaceState(null, "", `/r/${roomId}${location.search}`);
     }
+    await freshSession();
     const first = await Connection.open(roomId, handlers);
     identity = choice;
     game ??= await Game.create(document.getElementById("stage")!, {

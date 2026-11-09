@@ -17,6 +17,25 @@ export function devTokenFromEnv(): string {
   return process.env.DEV_TOKEN;
 }
 
+/**
+ * WebSocket upgrades from another site's page (cross-site WebSocket hijacking):
+ * browsers always send Origin, so a page may connect only from this server's own
+ * host or from PUBLIC_URL (the site, when game servers live on other hosts, as in
+ * a cluster). No Origin (bots, tools) is not a browser and passes.
+ */
+export function isForeignOrigin(req: Request, publicUrl = process.env.PUBLIC_URL): boolean {
+  const origin = req.headers.get("origin");
+  if (!origin) return false;
+  let host: string;
+  try {
+    host = new URL(origin).host;
+  } catch {
+    return true;
+  }
+  if (host === req.headers.get("host")) return false;
+  return !publicUrl || new URL(publicUrl).origin !== origin;
+}
+
 /** A 401 response when HEALTH_TOKEN is set and the request lacks it, else null. */
 export function rejectWithoutHealthToken(req: Request, url: URL): Response | null {
   if (!HEALTH_TOKEN) return null;

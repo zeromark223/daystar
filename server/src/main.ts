@@ -7,6 +7,7 @@ import {
   handleHttp,
   hostedRooms,
   HOST,
+  joinAccount,
   IDLE_TIMEOUT_SEC,
   localPlayers,
   MAX_FRAME_BYTES,
@@ -20,8 +21,8 @@ import {
 } from "./app.ts";
 import { AgentLink } from "./cluster/agent-link.ts";
 import { Mesh } from "./cluster/mesh.ts";
-import { verifyPlayer, verifyServer } from "./cluster/ticket.ts";
-import { tlsFromEnv } from "./http.ts";
+import { verifyPlayer, verifyServer, type TicketUser } from "./cluster/ticket.ts";
+import { isForeignOrigin, tlsFromEnv } from "./http.ts";
 import { CLIENT_DIR } from "./paths.ts";
 import type { PeerEvents } from "./room.ts";
 import { warnIfClientMissing } from "./static.ts";
@@ -35,6 +36,8 @@ type SocketData =
       playerId?: number;
       /** Migration ticket: the server the player is leaving. */
       from?: number;
+      /** The signed-in account, from the ticket. */
+      account?: TicketUser;
       events?: PeerEvents;
     }
   | { kind: "mesh"; server: number; events?: { message(data: Uint8Array): void; close(): void } };
@@ -49,14 +52,21 @@ if (mesh) useClusterRooms(mesh);
 /** Bun topic of a room channel: room-wide events, or one snapshot group. */
 const topic = (roomId: string, channel: string) => (channel ? `room:${roomId}:${channel}` : `room:${roomId}`);
 
-/** In cluster mode a client must present a ticket the agent signed for this server and room. */
+/**
+ * In cluster mode a client must present a ticket the agent signed for this server
+ * and room. Standalone, guests connect without one; a signed-in client brings a
+ * join ticket, which must then be valid.
+ */
 function admit(url: URL, roomId: string): SocketData | Response {
-  if (!cluster) return { kind: "client", roomId };
-  const ticket = verifyPlayer(url.searchParams.get("ticket") ?? "", cluster.secret);
-  if (!ticket || ticket.server !== cluster.server || ticket.room !== roomId) {
-    return new Response("Invalid or expired ticket", { status: 401 });
+  const invalid = () => new Response("Invalid or expired ticket", { status: 401 });
+  if (!cluster) {
+    const account = joinAccount(url, roomId);
+    if (account === null) return invalid();
+    return { kind: "client", roomId, account };
   }
-  return { kind: "client", roomId, playerId: ticket.player, from: ticket.from };
+  const ticket = verifyPlayer(url.searchParams.get("ticket") ?? "", cluster.secret);
+  if (!ticket || ticket.server !== cluster.server || ticket.room !== roomId) return invalid();
+  return { kind: "client", roomId, playerId: ticket.player, from: ticket.from, account: ticket.user };
 }
 
 const server = Bun.serve<SocketData>({
@@ -73,6 +83,7 @@ const server = Bun.serve<SocketData>({
       return undefined;
     }
     if (url.pathname !== WS_PATH) return handleHttp(req);
+    if (isForeignOrigin(req)) return new Response("Forbidden", { status: 403 });
     const roomId = roomIdFor(url);
     if (!roomId) return new Response("Bad request", { status: 400 });
     const data = admit(url, roomId);
@@ -109,6 +120,7 @@ const server = Bun.serve<SocketData>({
         },
         data.playerId,
         resume,
+        data.account ?? null,
       );
     },
     message(ws, message) {

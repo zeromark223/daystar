@@ -96,6 +96,20 @@ export async function loadAccount(): Promise<AccountState> {
 
 export const account = (): AccountState => state;
 
+/**
+ * Before joining a room: make sure the access token outlives the join, since
+ * /api/join reads it to put the account in the ticket. Never throws; a failed
+ * refresh simply joins as a guest.
+ */
+export async function freshSession(): Promise<void> {
+  if (state.kind !== "signed_in" || state.expiresAt - Date.now() > FRESH_ENOUGH_MS) return;
+  try {
+    set(await refreshOnce());
+  } catch {
+    // Offline or the server is restarting: join as whoever the cookie says.
+  }
+}
+
 export function onAccountChange(listener: Listener): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);

@@ -3,11 +3,24 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 /**
  * Signed tokens: base64url(JSON payload) + "." + base64url(HMAC-SHA256(payload)).
  * The agent issues player tickets; servers mint server tokens to authenticate to
- * the agent and to each other. All share CLUSTER_SECRET.
+ * the agent and to each other. All share CLUSTER_SECRET. A standalone server
+ * signs join tickets with ROOM_SECRET for signed-in players.
  *
  * Future (docs/cluster.md): tickets are not single-use, replay is only bounded
  * by `exp`; add a nonce cache on servers if that ever matters.
  */
+
+/**
+ * The account behind a connection, read from the access cookie by /api/join (on
+ * the site's own origin) and carried here, so game servers on other hosts never
+ * need the cookie or the database.
+ */
+export interface TicketUser {
+  /** users.id */
+  id: string;
+  /** Authentik vouches for the account's email. */
+  ev: boolean;
+}
 
 /** Lets a client connect to one server as one player of one room. */
 export interface PlayerTicket {
@@ -20,6 +33,16 @@ export interface PlayerTicket {
   exp: number;
   /** Set on migration tickets: the server the player is leaving. */
   from?: number;
+  /** Signed-in players only. */
+  user?: TicketUser;
+}
+
+/** Standalone: lets a signed-in client join a room as its account. */
+export interface JoinTicket {
+  kind: "join";
+  room: string;
+  user: TicketUser;
+  exp: number;
 }
 
 /** Proves a connection comes from a cluster server (agent link, mesh). */
@@ -29,7 +52,7 @@ export interface ServerToken {
   exp: number;
 }
 
-export type Token = PlayerTicket | ServerToken;
+export type Token = PlayerTicket | ServerToken | JoinTicket;
 
 const b64url = (data: string | Buffer) => Buffer.from(data).toString("base64url");
 
@@ -67,6 +90,11 @@ export function verify(value: string, secret: string, opts: { now?: number; allo
 export function verifyPlayer(value: string, secret: string, opts?: { now?: number; allowExpired?: boolean }): PlayerTicket | null {
   const token = verify(value, secret, opts);
   return token?.kind === "player" ? token : null;
+}
+
+export function verifyJoin(value: string, secret: string, opts?: { now?: number }): JoinTicket | null {
+  const token = verify(value, secret, opts);
+  return token?.kind === "join" ? token : null;
 }
 
 export function verifyServer(value: string, secret: string, opts?: { now?: number }): ServerToken | null {

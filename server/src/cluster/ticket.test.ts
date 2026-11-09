@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { serverToken, sign, verify, verifyPlayer, verifyServer, type PlayerTicket } from "./ticket.ts";
+import { serverToken, sign, verify, verifyJoin, verifyPlayer, verifyServer, type JoinTicket, type PlayerTicket } from "./ticket.ts";
 
 const secret = "s3cret";
 const ticket: PlayerTicket = { kind: "player", room: "cozy-den-1", server: 2, player: 17, exp: Date.now() + 30_000 };
@@ -31,4 +31,22 @@ test("player tickets and server tokens are not interchangeable", () => {
   const token = serverToken(3, secret);
   assert.equal(verifyPlayer(token, secret), null);
   assert.equal(verifyServer(token, secret)?.server, 3);
+});
+
+test("tickets carry the signed-in account, and it cannot be swapped", () => {
+  const withUser: PlayerTicket = { ...ticket, user: { id: "42", ev: true } };
+  const token = sign(withUser, secret);
+  assert.deepEqual(verifyPlayer(token, secret)?.user, { id: "42", ev: true });
+  const [, mac] = token.split(".");
+  const forged = Buffer.from(JSON.stringify({ ...withUser, user: { id: "1", ev: true } })).toString("base64url");
+  assert.equal(verify(`${forged}.${mac}`, secret), null);
+});
+
+test("join tickets (standalone) are their own kind", () => {
+  const join: JoinTicket = { kind: "join", room: "cozy-den-1", user: { id: "7", ev: false }, exp: Date.now() + 30_000 };
+  const token = sign(join, secret);
+  assert.deepEqual(verifyJoin(token, secret), join);
+  assert.equal(verifyPlayer(token, secret), null);
+  assert.equal(verifyJoin(sign(ticket, secret), secret), null);
+  assert.equal(verifyJoin(sign({ ...join, exp: 1000 }, secret), secret), null);
 });

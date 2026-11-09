@@ -1182,3 +1182,27 @@ test("newcomers appear where the room is emptiest", () => {
     assert.equal(inView(6260, 5040, cellOf(me.x, me.y)), false, `spawned at ${me.x},${me.y}`);
   }
 });
+
+test("a signed-in player's account stays on this server", () => {
+  const room = new Room("test", { onEmpty: () => {}, publish: null, spawn: together });
+  const signedIn = new FakeSocket();
+  signedIn.events = room.accept(signedIn, undefined, undefined, { id: "42", ev: true });
+  signedIn.deliver({ t: "join", name: "Ana", appearance: 0, hostKey: "" });
+  const guest = new FakeSocket();
+  guest.events = room.accept(guest);
+  guest.deliver({ t: "join", name: "Bo", appearance: 0, hostKey: "" });
+  const welcome = guest.received.find((m) => m.t === "welcome");
+  assert.ok(welcome?.t === "welcome");
+  const ana = welcome.players.find((p) => p.name === "Ana")!;
+  const bo = welcome.players.find((p) => p.name === "Bo")!;
+  assert.deepEqual(room.accountOf(ana.id), { id: "42", ev: true });
+  assert.equal(room.accountOf(bo.id), null);
+  // Others, and peers mirroring the room, never see it.
+  assert.ok(!JSON.stringify(welcome).includes("\"42\""));
+  assert.ok(room.localState().every((p) => !("account" in p)));
+  // A replica from another server has no account here.
+  room.remoteJoined(2, { ...bo, id: 900 });
+  assert.equal(room.accountOf(900), null);
+  signedIn.close();
+  guest.close();
+});

@@ -1,7 +1,8 @@
 import { ROOM_ID_PATTERN, WS_PATH } from "../../shared/src/constants.ts";
 import type { PlayerInfo } from "../../shared/src/protocol.ts";
-import { authFromEnv } from "./auth/index.ts";
+import { authFromEnv, ticketUser } from "./auth/index.ts";
 import { readServerClusterConfig } from "./cluster/config.ts";
+import { sign, verifyJoin, type TicketUser } from "./cluster/ticket.ts";
 import { createRoom, hostKeySecret, isHostKey } from "./host-key.ts";
 import { constantTimeEqual, devTokenFromEnv, readJoinRequest, rejectWithoutHealthToken, scheme } from "./http.ts";
 import { Overcharge } from "./overcharge.ts";
@@ -124,7 +125,13 @@ export function roomIdFor(url: URL): string | null {
  * Attach an upgraded connection to its room; `playerId` comes from a cluster
  * ticket, `resume` from the previous server when the player is migrating.
  */
-export function connect(roomId: string, peer: Peer, playerId?: number, resume?: Promise<PlayerInfo | null>): PeerEvents {
+export function connect(
+  roomId: string,
+  peer: Peer,
+  playerId?: number,
+  resume?: Promise<PlayerInfo | null>,
+  account: TicketUser | null = null,
+): PeerEvents {
   let room = rooms.get(roomId);
   if (!room) {
     room = new Room(roomId, {
@@ -148,7 +155,7 @@ export function connect(roomId: string, peer: Peer, playerId?: number, resume?: 
     clusterRooms?.roomOpened(roomId);
   }
   sockets++;
-  const events = room.accept(peer, playerId, resume);
+  const events = room.accept(peer, playerId, resume, account);
   return {
     message: events.message,
     close: () => {
@@ -196,14 +203,32 @@ export async function handleHttp(req: Request): Promise<Response> {
   }
 }
 
+/** How long a join ticket lets a signed-in client connect. */
+const JOIN_TICKET_TTL_MS = 30_000;
+
 /**
  * Standalone only: clients always ask /api/join first; alone, the answer is
- * "this server". In a cluster the agent answers it instead.
+ * "this server". A signed-in client also gets a join ticket carrying its account
+ * (guests connect without one). In a cluster the agent answers instead.
  */
 async function handleJoin(req: Request): Promise<Response> {
   if (cluster) return new Response("Ask the agent", { status: 404 });
   if (req.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
   const room = await readJoinRequest(req, ROOM_ID_PATTERN);
   if (!room) return new Response("Invalid room", { status: 400 });
-  return Response.json({ serverId: 0, wsUrl: `${WS_PATH}?room=${room}` });
+  const user = ticketUser(auth, req);
+  if (!user) return Response.json({ serverId: 0, wsUrl: `${WS_PATH}?room=${room}` }, { headers: { "cache-control": "no-store" } });
+  const ticket = sign({ kind: "join", room, user, exp: Date.now() + JOIN_TICKET_TTL_MS }, hostSecret);
+  return Response.json({ serverId: 0, wsUrl: `${WS_PATH}?room=${room}&ticket=${ticket}` }, { headers: { "cache-control": "no-store" } });
+}
+
+/**
+ * Standalone: the account a WebSocket upgrade joins as. Undefined for a guest
+ * (no ticket), null for a ticket that is invalid, expired or for another room.
+ */
+export function joinAccount(url: URL, roomId: string): TicketUser | null | undefined {
+  const value = url.searchParams.get("ticket");
+  if (!value) return undefined;
+  const ticket = verifyJoin(value, hostSecret);
+  return ticket && ticket.room === roomId ? ticket.user : null;
 }

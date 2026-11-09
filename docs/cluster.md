@@ -115,9 +115,14 @@ client has a single code path.
   > snapshot bandwidth) or ids minted by servers under a shared rule, so the agent
   > is not on the id path. Kept simple for now.
 - **Ticket** = `base64url(payload) + "." + base64url(HMAC-SHA256(payload, CLUSTER_SECRET))`,
-  payload `{ v: 1, room, server, player, exp, from? }`:
+  payload `{ kind: "player", room, server, player, exp, from?, user? }`:
   - `exp`: 30 s after issue.
   - `from`: set on migration tickets, the server the player is leaving.
+  - `user`: `{ id, ev }`, the signed-in account (accounts on, README "Accounts").
+    The agent reads it from the access cookie on `/api/join`, which is on the
+    site's own origin; game servers on other hosts never see the cookie or the
+    database. Migration tickets copy it from the old ticket. The game server keeps
+    it on the player and never sends it to clients or peers.
   > Future: tickets are not single-use; replay is only limited by `exp`. Add a nonce
   > cache on servers if that ever matters.
 

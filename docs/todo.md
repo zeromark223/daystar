@@ -135,3 +135,16 @@ Phases if built: (1) upload, images and PDF, page/rect sync, follow mode, laser,
 late joiners, cluster mirroring, a load-test column; (2) boxes, line snapping, pen
 strokes; (3) PPTX, speaker notes, thumbnails. Out of scope: PPTX animations and
 video, guest uploads, co-editing, the Rust server.
+
+## Rooms limited to an email domain (deferred)
+
+The schema already has `rooms.access = 'domain'` and `allowed_domain`, and tickets
+carry `ev` (Authentik vouches for the email). Shelved: testing it needs company
+mailboxes, which a dev setup does not have; the accounts work is a proof of
+concept of SSO for now.
+
+Before building it, check what Authentik sends as `email_verified`. A
+self-registered test account without email verification came back with
+`ev: true`; if the default OpenID `email` scope mapping always says true, anyone
+could sign up as someone@company.com and enter that company's rooms. Fix the
+mapping (or add an email verification stage to enrollment) first.

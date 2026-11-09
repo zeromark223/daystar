@@ -8,7 +8,7 @@
  * agents behind a load balancer (shared registry state) are future work.
  */
 import { ROOM_ID_PATTERN } from "../../../shared/src/constants.ts";
-import { authFromEnv } from "../auth/index.ts";
+import { authFromEnv, ticketUser } from "../auth/index.ts";
 import type { AgentToServer, ServerToAgent } from "../cluster/control.ts";
 import { sign, verifyPlayer, verifyServer } from "../cluster/ticket.ts";
 import { createRoom } from "../host-key.ts";
@@ -183,7 +183,8 @@ async function handleJoin(req: Request): Promise<Response> {
   // The seat is held a little longer than the ticket so a late connect still counts.
   const seat = registry.seat(room, { reservedUntil: exp + 5000, allowSpan: ALLOW_SPAN });
   if (!seat) return new Response("No game server available", { status: 503 });
-  const ticket = sign({ kind: "player", room, server: seat.server.server, player: seat.player, exp }, SECRET);
+  const user = ticketUser(auth, req);
+  const ticket = sign({ kind: "player", room, server: seat.server.server, player: seat.player, exp, user }, SECRET);
   return Response.json({ serverId: seat.server.server, wsUrl: `${seat.server.publicUrl}?room=${room}&ticket=${ticket}`, ticket });
 }
 
@@ -214,7 +215,8 @@ async function handleMigrate(req: Request): Promise<Response> {
   });
   if (!seat) return new Response("No other game server available", { status: 503 });
   const ticket = sign(
-    { kind: "player", room: current.room, server: seat.server.server, player: current.player, exp, from: current.server },
+    // The account comes along: the old ticket was signed by us, expired or not.
+    { kind: "player", room: current.room, server: seat.server.server, player: current.player, exp, from: current.server, user: current.user },
     SECRET,
   );
   return Response.json({

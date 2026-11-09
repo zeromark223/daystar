@@ -118,6 +118,14 @@ database migrations (`server/src/db/migrations/`) at startup, or
   `POST /api/auth/refresh` swaps both; a refresh token used twice (outside 10 s,
   for tabs racing) revokes every token of that login. `POST /api/auth/logout`
   revokes them and returns Authentik's end-session URL.
+- **In the room:** `/api/join` reads the access cookie and signs the account
+  (`{ id, ev }`) into a 30 s ticket for the WebSocket: the agent's player ticket
+  in a cluster, a join ticket signed with `ROOM_SECRET` standalone (guests get
+  none and connect as before). The server keeps it on the player, never sending
+  it to anyone; the client refreshes the session first when it is about to expire.
+- **WebSocket Origin check:** an upgrade whose `Origin` is neither the server's
+  own host nor `PUBLIC_URL` is refused (403), so another site's page cannot open
+  a socket as its visitor. No `Origin` (bots, tools) passes.
 - **Tests** run against a fake OIDC provider (`server/src/auth/fake-oidc.ts`) and
   the database in `.env`, each in a throwaway schema; without `PGHOST` the
   database tests are skipped.
