@@ -131,6 +131,7 @@ export function connect(
   playerId?: number,
   resume?: Promise<PlayerInfo | null>,
   account: TicketUser | null = null,
+  reconnect = false,
 ): PeerEvents {
   let room = rooms.get(roomId);
   if (!room) {
@@ -155,7 +156,7 @@ export function connect(
     clusterRooms?.roomOpened(roomId);
   }
   sockets++;
-  const events = room.accept(peer, playerId, resume, account);
+  const events = room.accept(peer, playerId, resume, account, reconnect);
   return {
     message: events.message,
     close: () => {
@@ -189,6 +190,8 @@ export async function handleHttp(req: Request): Promise<Response> {
       }
       case "/api/join":
         return await handleJoin(req);
+      case "/api/rooms/mine":
+        return myRoom(req);
       case "/api/rooms":
         // In a cluster the agent creates rooms (the same secret makes the same keys).
         return cluster ? new Response("Ask the agent", { status: 404 }) : createRoom(req, hostSecret);
@@ -203,6 +206,24 @@ export async function handleHttp(req: Request): Promise<Response> {
   }
 }
 
+/**
+ * GET /api/rooms/mine: the live room where the signed-in account holds a seat
+ * (host or speaker, connected or within the grace), the latest one taken:
+ * `{ room, role }`, or `{ room: null }`. For "rejoin?" on another device.
+ */
+function myRoom(req: Request): Response {
+  const headers = { "cache-control": "no-store" };
+  if (req.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET" } });
+  const user = auth?.userFrom(req);
+  if (!user) return new Response("Signed out", { status: 401, headers });
+  let best: { room: string; role: "host" | "speaker"; since: number } | null = null;
+  for (const [id, room] of rooms) {
+    const seat = room.seatOf(user.sub);
+    if (seat && (!best || seat.since > best.since)) best = { room: id, role: seat.role, since: seat.since };
+  }
+  return Response.json(best ? { room: best.room, role: best.role } : { room: null }, { headers });
+}
+
 /** How long a join ticket lets a signed-in client connect. */
 const JOIN_TICKET_TTL_MS = 30_000;
 
@@ -214,11 +235,12 @@ const JOIN_TICKET_TTL_MS = 30_000;
 async function handleJoin(req: Request): Promise<Response> {
   if (cluster) return new Response("Ask the agent", { status: 404 });
   if (req.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
-  const room = await readJoinRequest(req, ROOM_ID_PATTERN);
-  if (!room) return new Response("Invalid room", { status: 400 });
+  const join = await readJoinRequest(req, ROOM_ID_PATTERN);
+  if (!join) return new Response("Invalid room", { status: 400 });
+  const { room, reconnect } = join;
   const user = ticketUser(auth, req);
   if (!user) return Response.json({ serverId: 0, wsUrl: `${WS_PATH}?room=${room}` }, { headers: { "cache-control": "no-store" } });
-  const ticket = sign({ kind: "join", room, user, exp: Date.now() + JOIN_TICKET_TTL_MS }, hostSecret);
+  const ticket = sign({ kind: "join", room, user, exp: Date.now() + JOIN_TICKET_TTL_MS, reconnect: reconnect || undefined }, hostSecret);
   return Response.json({ serverId: 0, wsUrl: `${WS_PATH}?room=${room}&ticket=${ticket}` }, { headers: { "cache-control": "no-store" } });
 }
 
@@ -226,9 +248,9 @@ async function handleJoin(req: Request): Promise<Response> {
  * Standalone: the account a WebSocket upgrade joins as. Undefined for a guest
  * (no ticket), null for a ticket that is invalid, expired or for another room.
  */
-export function joinAccount(url: URL, roomId: string): TicketUser | null | undefined {
+export function joinAccount(url: URL, roomId: string): { user: TicketUser; reconnect: boolean } | null | undefined {
   const value = url.searchParams.get("ticket");
   if (!value) return undefined;
   const ticket = verifyJoin(value, hostSecret);
-  return ticket && ticket.room === roomId ? ticket.user : null;
+  return ticket && ticket.room === roomId ? { user: ticket.user, reconnect: ticket.reconnect === true } : null;
 }

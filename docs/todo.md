@@ -148,3 +148,13 @@ self-registered test account without email verification came back with
 `ev: true`; if the default OpenID `email` scope mapping always says true, anyone
 could sign up as someone@company.com and enter that company's rooms. Fix the
 mapping (or add an email verification stage to enrollment) first.
+
+## Seats by account in a cluster
+
+Seats (README "Accounts": hosts and speakers keep their role by account) live in
+the room on the game server that holds the player. A reconnect normally lands on
+the room's home server, so it works there; but a room spanning servers can seat
+the account on another server, which knows nothing of the seat, and the agent's
+`GET /api/rooms/mine` always answers `{ room: null }`. Plan: mirror seats over
+the mesh with the room's other events (keyed by account id, which the mesh does
+not carry today), and have servers report seats to the agent for `/api/rooms/mine`.

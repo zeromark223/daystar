@@ -230,12 +230,34 @@ export interface RoomOptions {
   rate?: number;
   /** The server's load in one line, for the host's /health. Without it /health is unavailable. */
   health?(): string;
+  /** How long a seat outlives its holder's connection (default SEAT_GRACE_MS). */
+  seatGraceMs?: number;
+}
+
+/**
+ * How long a signed-in host or speaker who left keeps the role for their account:
+ * a dropped connection (Cloudflare restarting an edge), a reload, another device.
+ */
+export const SEAT_GRACE_MS = 10 * 60_000;
+
+/**
+ * A role an account holds in this room. `holder` is the local player holding it
+ * now, or null once it left (then the seat lasts until `until`).
+ */
+interface Seat {
+  role: "host" | "speaker";
+  holder: number | null;
+  until: number;
+  /** When the account took the seat, to find its latest room. */
+  since: number;
 }
 
 export class Room {
   readonly id: string;
   /** Local players and replicas of players connected to other servers. */
   private readonly players = new Map<number, Player>();
+  /** Roles held by signed-in accounts (key: users.id), on this server only. */
+  private readonly seats = new Map<string, Seat>();
   private localCount = 0;
   private readonly chat: ChatMessage[] = [];
   /** Open sockets, including ones that have not joined yet. */
@@ -345,7 +367,13 @@ export class Room {
    * `account` is the signed-in user from the player's ticket.
    * The runtime adapter must call the returned handlers for binary messages and on close.
    */
-  accept(peer: Peer, playerId?: number, resume?: Promise<PlayerInfo | null>, account: TicketUser | null = null): PeerEvents {
+  accept(
+    peer: Peer,
+    playerId?: number,
+    resume?: Promise<PlayerInfo | null>,
+    account: TicketUser | null = null,
+    reconnect = false,
+  ): PeerEvents {
     let player: Player | null = null;
     let joining = false;
     this.connections++;
@@ -360,12 +388,12 @@ export class Room {
           this.handleMove(player, msg);
         } else if (msg.t === "join" && !player && !joining) {
           if (!resume) {
-            player = this.join(peer, msg, playerId, null, account);
+            player = this.join(peer, msg, playerId, null, account, reconnect);
             return;
           }
           joining = true;
           void resume.then((state) => {
-            if (joining) player = this.join(peer, msg, playerId, state, account);
+            if (joining) player = this.join(peer, msg, playerId, state, account, reconnect);
           });
         } else if (msg.t === "voice" && player) {
           this.handleVoice(player, msg.seq, msg.data);
@@ -455,6 +483,7 @@ export class Room {
     const p = this.players.get(id);
     if (!p || p.owner !== owner || p.role === role) return;
     p.role = role;
+    if (role === "host") this.forgetHostSeats(null);
     this.broadcast({ t: "role", id, role });
   }
 
@@ -571,6 +600,7 @@ export class Room {
     assignedId?: number,
     resume?: PlayerInfo | null,
     account: TicketUser | null = null,
+    reconnect = false,
   ): Player | null {
     const { name: rawName, appearance, hostKey } = request;
     const name = typeof rawName === "string" ? rawName.trim().slice(0, MAX_NAME_LENGTH) : "";
@@ -586,14 +616,25 @@ export class Room {
     }
     const id = assignedId ?? this.nextLocalId();
 
-    // The host key makes this player the host (the sun); a migrating speaker stays one.
+    // The host key makes this player the host (the sun); a migrating speaker stays
+    // one; a signed-in account gets back the seat it held here (another device, a
+    // reconnect), and its other connection gives the role up, as with the host key.
     const isHost = hostKey !== "" && (this.opts.isHostKey?.(hostKey) ?? false);
-    const role: Role = isHost ? "host" : resume?.role === "speaker" ? "speaker" : "guest";
-    if (isHost) this.dethroneHosts(id);
+    let role: Role = isHost ? "host" : resume?.role === "speaker" ? "speaker" : "guest";
+    // A client rejoining by itself (a laptop waking up) leaves alone a seat its
+    // account now holds on another device; the person joining asks for it.
+    const found = account && role === "guest" ? this.seatOf(account.id) : null;
+    const seat = found && !(reconnect && found.holder !== null) ? found : null;
+    if (seat && account) {
+      this.releaseAccount(account.id);
+      if (seat.role === "host") role = "host";
+      else if (this.speakerCount() < MAX_SPEAKERS) role = "speaker";
+    }
+    if (role === "host") this.dethroneHosts(id);
 
     // The host sits in the sun; a migrating player continues where it was; others
     // appear near someone in the room.
-    const start = isHost
+    const start = role === "host"
       ? { ...WORLD_CENTER, dir: "south" as const }
       : resume && canBeAt(resume.x, resume.y)
         ? resume
@@ -649,6 +690,7 @@ export class Room {
     this.localCount++;
     this.groupSizes[group]++;
     this.viewersIn(player.cell).add(player);
+    this.remember(player);
     if (wasReplica) this.markChanged(player);
     this.startTicker();
     this.opts.onJoined?.(player.id);
@@ -745,6 +787,43 @@ export class Room {
     return best ?? spawnPoint([...this.players.values()].filter((p) => p.id !== id && p.role !== "host"));
   }
 
+  /** The seat an account holds here (held now, or left within the grace), or null. */
+  seatOf(accountId: string, now = Date.now()): Readonly<Seat> | null {
+    const seat = this.seats.get(accountId);
+    if (!seat) return null;
+    if (seat.holder !== null || seat.until > now) return seat;
+    this.seats.delete(accountId);
+    return null;
+  }
+
+  /** Records a local player's role as its account's seat (or drops it, for a guest). */
+  private remember(p: Player): void {
+    if (p.role === "host") this.forgetHostSeats(p.account?.id ?? null);
+    if (!p.account) return;
+    const id = p.account.id;
+    if (p.role === "guest") {
+      if (this.seats.get(id)?.holder === p.id) this.seats.delete(id);
+      return;
+    }
+    this.seats.set(id, { role: p.role, holder: p.id, until: Infinity, since: Date.now() });
+  }
+
+  /** Someone else is the host now: no other account may come back as host. */
+  private forgetHostSeats(except: string | null): void {
+    for (const [id, seat] of this.seats) if (seat.role === "host" && id !== except) this.seats.delete(id);
+  }
+
+  /** The account joins from another connection: this one gives its role up. */
+  private releaseAccount(accountId: string): void {
+    for (const p of [...this.players.values()]) {
+      if (p.owner !== null || p.account?.id !== accountId || p.role === "guest") continue;
+      const wasSpeaker = p.role === "speaker";
+      this.applyRole(p, "guest");
+      // A former host's client explains it already ("The host moved to another device").
+      if (wasSpeaker) send(p.peer!, { t: "error", message: "You are speaking from another device now; this one is a guest." });
+    }
+  }
+
   /** Only one host at a time: whoever presented the key last wins (e.g. a second tab). */
   private dethroneHosts(newHost: number): void {
     for (const p of [...this.players.values()]) {
@@ -780,6 +859,7 @@ export class Room {
     if (p.role === role) return;
     const wasHost = p.role === "host";
     p.role = role;
+    this.remember(p);
     if (this.orbit) {
       // In orbit: the host goes to the sun, a new speaker to the stage, a guest to the rings.
       if (role === "host") this.unseat(p);
@@ -1117,6 +1197,12 @@ export class Room {
 
   private leave(player: Player): void {
     if (this.players.get(player.id) !== player) return;
+    // The seat waits a while for its account to come back.
+    const seat = player.account && this.seats.get(player.account.id);
+    if (seat && seat.holder === player.id) {
+      seat.holder = null;
+      seat.until = Date.now() + (this.opts.seatGraceMs ?? SEAT_GRACE_MS);
+    }
     this.players.delete(player.id);
     this.unfile(player);
     this.localCount--;

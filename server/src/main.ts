@@ -38,6 +38,8 @@ type SocketData =
       from?: number;
       /** The signed-in account, from the ticket. */
       account?: TicketUser;
+      /** The client rejoins by itself after losing its connection. */
+      reconnect?: boolean;
       events?: PeerEvents;
     }
   | { kind: "mesh"; server: number; events?: { message(data: Uint8Array): void; close(): void } };
@@ -60,13 +62,13 @@ const topic = (roomId: string, channel: string) => (channel ? `room:${roomId}:${
 function admit(url: URL, roomId: string): SocketData | Response {
   const invalid = () => new Response("Invalid or expired ticket", { status: 401 });
   if (!cluster) {
-    const account = joinAccount(url, roomId);
-    if (account === null) return invalid();
-    return { kind: "client", roomId, account };
+    const join = joinAccount(url, roomId);
+    if (join === null) return invalid();
+    return { kind: "client", roomId, account: join?.user, reconnect: join?.reconnect };
   }
   const ticket = verifyPlayer(url.searchParams.get("ticket") ?? "", cluster.secret);
   if (!ticket || ticket.server !== cluster.server || ticket.room !== roomId) return invalid();
-  return { kind: "client", roomId, playerId: ticket.player, from: ticket.from, account: ticket.user };
+  return { kind: "client", roomId, playerId: ticket.player, from: ticket.from, account: ticket.user, reconnect: ticket.reconnect };
 }
 
 const server = Bun.serve<SocketData>({
@@ -121,6 +123,7 @@ const server = Bun.serve<SocketData>({
         data.playerId,
         resume,
         data.account ?? null,
+        data.reconnect === true,
       );
     },
     message(ws, message) {

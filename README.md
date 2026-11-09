@@ -123,6 +123,16 @@ database migrations (`server/src/db/migrations/`) at startup, or
   in a cluster, a join ticket signed with `ROOM_SECRET` standalone (guests get
   none and connect as before). The server keeps it on the player, never sending
   it to anyone; the client refreshes the session first when it is about to expire.
+- **Hosts and speakers keep their seat:** a room remembers the role each
+  signed-in account holds (host or speaker) while it is connected and for 10
+  minutes after it leaves. The account gets it back when it rejoins: after a
+  dropped connection, a reload, or from another device, whose old connection
+  then steps down to guest (as with the host key). A client that reconnects by
+  itself does not take a seat its account holds live on another device. The seat
+  is gone once the host demotes them or someone else becomes the host.
+- **"Rejoin?"** On the home page, a signed-in account that holds a seat in a live
+  room is offered to go back (`GET /api/rooms/mine`); opening the room's link
+  asks nothing, and its join button reads "Rejoin as host" or "as speaker".
 - **WebSocket Origin check:** an upgrade whose `Origin` is neither the server's
   own host nor `PUBLIC_URL` is refused (403), so another site's page cannot open
   a socket as its visitor. No `Origin` (bots, tools) passes.

@@ -66,10 +66,12 @@ export class Connection {
 
   /**
    * Ask where to connect (the agent in a cluster, the server itself when
-   * standalone), then resolve once the socket is open.
+   * standalone), then resolve once the socket is open. `reconnect`: we lost the
+   * connection and rejoin by ourselves, so the server leaves alone a role our
+   * account now holds on another device.
    */
-  static async open(roomId: string, handlers: ConnectionHandlers): Promise<Connection> {
-    return Connection.connect(await post("/api/join", { room: roomId }), handlers);
+  static async open(roomId: string, handlers: ConnectionHandlers, reconnect = false): Promise<Connection> {
+    return Connection.connect(await post("/api/join", { room: roomId, reconnect }), handlers);
   }
 
   /** Cluster: our server asked us to move; get a ticket for another server. */

@@ -177,14 +177,18 @@ setInterval(() => {
 
 async function handleJoin(req: Request): Promise<Response> {
   if (req.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
-  const room = await readJoinRequest(req, ROOM_ID_PATTERN);
-  if (!room) return new Response("Invalid room", { status: 400 });
+  const join = await readJoinRequest(req, ROOM_ID_PATTERN);
+  if (!join) return new Response("Invalid room", { status: 400 });
+  const { room, reconnect } = join;
   const exp = Date.now() + TICKET_TTL_MS;
   // The seat is held a little longer than the ticket so a late connect still counts.
   const seat = registry.seat(room, { reservedUntil: exp + 5000, allowSpan: ALLOW_SPAN });
   if (!seat) return new Response("No game server available", { status: 503 });
   const user = ticketUser(auth, req);
-  const ticket = sign({ kind: "player", room, server: seat.server.server, player: seat.player, exp, user }, SECRET);
+  const ticket = sign(
+    { kind: "player", room, server: seat.server.server, player: seat.player, exp, user, reconnect: reconnect || undefined },
+    SECRET,
+  );
   return Response.json({ serverId: seat.server.server, wsUrl: `${seat.server.publicUrl}?room=${room}&ticket=${ticket}`, ticket });
 }
 
@@ -243,6 +247,9 @@ async function handleHttp(req: Request): Promise<Response> {
         return await handleMigrate(req);
       case "/api/rooms":
         return createRoom(req, SECRET);
+      case "/api/rooms/mine":
+        // Seats live on the game servers; the agent does not know them yet.
+        return Response.json({ room: null }, { headers: { "cache-control": "no-store" } });
       default:
         return await serveStatic(req);
     }

@@ -126,6 +126,19 @@ export async function logOut(): Promise<void> {
   set({ kind: "signed_out" });
 }
 
+/** Where the signed-in account is a host or speaker right now (or was, minutes ago). */
+export async function myLiveRoom(): Promise<{ room: string; role: "host" | "speaker" } | null> {
+  if (state.kind !== "signed_in") return null;
+  try {
+    const res = await fetch("/api/rooms/mine", { cache: "no-store" });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { room: string | null; role?: "host" | "speaker" };
+    return body.room && body.role ? { room: body.room, role: body.role } : null;
+  } catch {
+    return null;
+  }
+}
+
 const LOGIN_ERRORS: Record<string, string> = {
   access_denied: "Login was cancelled.",
   expired: "The login took too long; please try again.",

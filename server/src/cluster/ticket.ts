@@ -35,6 +35,8 @@ export interface PlayerTicket {
   from?: number;
   /** Signed-in players only. */
   user?: TicketUser;
+  /** The client rejoins by itself (lost connection): it must not take a seat held live elsewhere. */
+  reconnect?: boolean;
 }
 
 /** Standalone: lets a signed-in client join a room as its account. */
@@ -43,6 +45,8 @@ export interface JoinTicket {
   room: string;
   user: TicketUser;
   exp: number;
+  /** See PlayerTicket.reconnect. */
+  reconnect?: boolean;
 }
 
 /** Proves a connection comes from a cluster server (agent link, mesh). */

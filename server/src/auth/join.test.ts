@@ -62,16 +62,17 @@ describe("joining as an account", { skip: !dbConfigured() && "PGHOST is not set"
 
   const signedIn = () => `ds_at=${signAccess({ sub: "42", name: "Ana", email: null, ev: true }, SECRET, 60).token}`;
 
-  /** Opens the socket and joins: "welcome", or why it failed. */
-  function connect(wsUrl: string, headers: Record<string, string> = {}): Promise<string> {
+  /** Opens the socket and joins: "welcome", or why it failed. `stay` keeps it open. */
+  function connect(wsUrl: string, headers: Record<string, string> = {}, opts: { hostKey?: string; stay?: WebSocket[] } = {}): Promise<string> {
     const ws = new WebSocket(`${base.replace("http", "ws")}${wsUrl}`, { headers } as unknown as string[]);
     ws.binaryType = "arraybuffer";
     return new Promise((resolve) => {
-      ws.onopen = () => ws.send(encodeClientMessage({ t: "join", name: "Ana", appearance: 0, hostKey: "" }));
+      ws.onopen = () => ws.send(encodeClientMessage({ t: "join", name: "Ana", appearance: 0, hostKey: opts.hostKey ?? "" }));
       ws.onmessage = (e) => {
         const msg = decodeServerMessage(new Uint8Array(e.data as ArrayBuffer));
         if (msg?.t === "welcome") {
-          ws.close();
+          if (opts.stay) opts.stay.push(ws);
+          else ws.close();
           resolve("welcome");
         }
       };
@@ -109,6 +110,26 @@ describe("joining as an account", { skip: !dbConfigured() && "PGHOST is not set"
     // A ticket for one room does not open another.
     const other = newRoomId();
     assert.equal(await connect(wsUrl.replace(`room=${room}`, `room=${other}`)), "refused");
+  });
+
+  test("the account's live room, for 'rejoin?' on another device", async () => {
+    const mine = async (cookie?: string) => {
+      const res = await fetch(`${base}/api/rooms/mine`, { headers: cookie ? { cookie } : {} });
+      return res.ok ? await res.json() : res.status;
+    };
+    assert.equal(await mine(), 401);
+    assert.deepEqual(await mine(signedIn()), { room: null });
+    const created = (await (await fetch(`${base}/api/rooms`, { method: "POST" })).json()) as { room: string; hostKey: string };
+    const res = await fetch(`${base}/api/join`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: signedIn() },
+      body: JSON.stringify({ room: created.room }),
+    });
+    const { wsUrl } = (await res.json()) as { wsUrl: string };
+    const open: WebSocket[] = [];
+    assert.equal(await connect(wsUrl, {}, { hostKey: created.hostKey, stay: open }), "welcome");
+    assert.deepEqual(await mine(signedIn()), { room: created.room, role: "host" });
+    open.forEach((ws) => ws.close());
   });
 
   test("pages from other sites cannot open a socket", async () => {

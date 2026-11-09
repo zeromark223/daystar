@@ -464,7 +464,7 @@ async function main(): Promise<void> {
       for (let attempt = 1; attempt <= RECONNECT_ATTEMPTS; attempt++) {
         try {
           await freshSession();
-          adopt(await Connection.open(roomId!, handlers));
+          adopt(await Connection.open(roomId!, handlers, true));
           chat?.addSystem("Reconnected.");
           return;
         } catch {
@@ -477,7 +477,7 @@ async function main(): Promise<void> {
     }
   }
 
-  void setupAccountBar(document.getElementById("name-input") as HTMLInputElement);
+  void setupAccountBar(document.getElementById("name-input") as HTMLInputElement, roomId);
   await runLobby(roomId, hostKey !== "" && !handedOver, async (choice) => {
     // Still inside the click: the only moment browsers let audio start.
     unlockAudio();

@@ -14,8 +14,18 @@ Notable changes to Daystar. The format follows
   it on the player, server-side only. Guests join exactly as before.
 - The client refreshes the session before joining or reconnecting when it is
   about to expire, so the ticket carries the account.
+- **Hosts and speakers keep their seat by account:** for 10 minutes after
+  leaving, a signed-in host or speaker gets the role back on rejoining, after a
+  dropped connection, a reload or from another device (the old one steps down to
+  guest; a demoted speaker is told why). Automatic reconnects (`reconnect` in
+  `/api/join`) never take a seat held live on another device. Lost when the host
+  demotes them or someone else becomes the host.
+- **"Rejoin?" on another device:** signed in on the home page while holding a
+  seat in a live room, the lobby offers to go back (`GET /api/rooms/mine`); on
+  the room's own page the button reads "Rejoin as host / speaker".
 - WebSocket upgrades from another site's page are refused (`Origin` must be the
   server's own host or `PUBLIC_URL`; no `Origin` passes).
+- docs/todo.md: seats by account across a cluster (they work per server today).
 - docs/todo.md: rooms limited to an email domain (deferred), and the
   `email_verified` question to settle first.
 

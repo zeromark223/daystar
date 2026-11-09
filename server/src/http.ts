@@ -85,13 +85,17 @@ export async function readLimited(req: Request, limit: number): Promise<string |
   return new TextDecoder().decode(all);
 }
 
-/** JSON body `{ room }` of /api/join, validated, or null. */
-export async function readJoinRequest(req: Request, pattern: RegExp): Promise<string | null> {
+/**
+ * JSON body `{ room, reconnect? }` of /api/join, validated, or null. `reconnect`:
+ * the client is rejoining on its own after losing its connection, not because
+ * the person asked to.
+ */
+export async function readJoinRequest(req: Request, pattern: RegExp): Promise<{ room: string; reconnect: boolean } | null> {
   const body = await readLimited(req, 1024);
   if (body === null) return null;
   try {
-    const { room } = JSON.parse(body) as { room?: unknown };
-    return typeof room === "string" && pattern.test(room) ? room : null;
+    const { room, reconnect } = JSON.parse(body) as { room?: unknown; reconnect?: unknown };
+    return typeof room === "string" && pattern.test(room) ? { room, reconnect: reconnect === true } : null;
   } catch {
     return null;
   }

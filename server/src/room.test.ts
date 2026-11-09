@@ -1206,3 +1206,121 @@ test("a signed-in player's account stays on this server", () => {
   signedIn.close();
   guest.close();
 });
+
+// ---------------------------------------------------------------- seats by account
+
+function seatRoom(seatGraceMs?: number) {
+  const room = new Room("test", { onEmpty: () => {}, publish: null, spawn: together, isHostKey: (k) => k === "key", seatGraceMs });
+  /** Joins and returns the socket and its own role from the welcome. */
+  const join = (name: string, account: { id: string; ev: boolean } | null, opts: { hostKey?: string; reconnect?: boolean } = {}) => {
+    const s = new FakeSocket();
+    s.events = room.accept(s, undefined, undefined, account, opts.reconnect ?? false);
+    s.deliver({ t: "join", name, appearance: 0, hostKey: opts.hostKey ?? "" });
+    const w = s.received.find((m) => m.t === "welcome");
+    assert.ok(w?.t === "welcome");
+    const self = w.players.find((p) => p.id === w.selfId)!;
+    return { s, id: w.selfId, role: self.role };
+  };
+  /** The latest role a socket heard for a player. */
+  const roleSeen = (s: FakeSocket, id: number) =>
+    s.received.filter((m) => m.t === "role" && m.id === id).map((m) => (m.t === "role" ? m.role : null)).at(-1);
+  return { room, join, roleSeen };
+}
+
+const ana = { id: "1", ev: true };
+const bo = { id: "2", ev: true };
+
+test("seats: a speaker who drops comes back a speaker", () => {
+  const { join } = seatRoom();
+  const host = join("Host", null, { hostKey: "key" });
+  const first = join("Ana", ana);
+  host.s.deliver({ t: "set_role", id: first.id, role: "speaker" });
+  first.s.close();
+  assert.equal(join("Ana", ana, { reconnect: true }).role, "speaker");
+  // A guest account, or nobody signed in, gets nothing.
+  assert.equal(join("Bo", bo).role, "guest");
+  assert.equal(join("Anon", null).role, "guest");
+});
+
+test("seats: the host account is the host on any device, and the old one steps down", () => {
+  const { join, roleSeen } = seatRoom();
+  const laptop = join("Ana", ana, { hostKey: "key" });
+  assert.equal(laptop.role, "host");
+  const phone = join("Ana", ana); // no host key on the phone
+  assert.equal(phone.role, "host");
+  assert.equal(roleSeen(laptop.s, laptop.id), "guest");
+});
+
+test("seats: a speaker moving to another device is told on the old one", () => {
+  const { join, roleSeen } = seatRoom();
+  const host = join("Host", null, { hostKey: "key" });
+  const laptop = join("Ana", ana);
+  host.s.deliver({ t: "set_role", id: laptop.id, role: "speaker" });
+  assert.equal(join("Ana", ana).role, "speaker");
+  assert.equal(roleSeen(laptop.s, laptop.id), "guest");
+  assert.ok(laptop.s.received.some((m) => m.t === "error" && /another device/.test(m.message)));
+});
+
+test("seats: a reconnect does not take a seat held live on another device", () => {
+  const { join, roleSeen } = seatRoom();
+  const laptop = join("Ana", ana, { hostKey: "key" });
+  const phone = join("Ana", ana);
+  // The laptop wakes up and rejoins by itself: the phone stays the host.
+  laptop.s.close();
+  assert.equal(join("Ana", ana, { reconnect: true }).role, "guest");
+  assert.equal(roleSeen(phone.s, phone.id), undefined);
+  // But when the phone drops, the next reconnect gets the seat.
+  phone.s.close();
+  assert.equal(join("Ana", ana, { reconnect: true }).role, "host");
+});
+
+test("seats: lost when the host demotes them, when someone else hosts, or after the grace", () => {
+  {
+    const { join } = seatRoom();
+    const host = join("Host", null, { hostKey: "key" });
+    const a = join("Ana", ana);
+    host.s.deliver({ t: "set_role", id: a.id, role: "speaker" });
+    host.s.deliver({ t: "set_role", id: a.id, role: "guest" });
+    a.s.close();
+    assert.equal(join("Ana", ana).role, "guest");
+  }
+  {
+    const { join } = seatRoom();
+    const a = join("Ana", ana, { hostKey: "key" });
+    a.s.close();
+    join("Bo", bo, { hostKey: "key" }); // the key moved on while Ana was away
+    assert.equal(join("Ana", ana).role, "guest");
+  }
+  {
+    const { join } = seatRoom(0);
+    const host = join("Host", null, { hostKey: "key" });
+    const a = join("Ana", ana);
+    host.s.deliver({ t: "set_role", id: a.id, role: "speaker" });
+    a.s.close();
+    assert.equal(join("Ana", ana).role, "guest");
+  }
+});
+
+test("seats: a returning speaker waits for a free stage", () => {
+  const { join } = seatRoom();
+  const host = join("Host", null, { hostKey: "key" });
+  const a = join("Ana", ana);
+  host.s.deliver({ t: "set_role", id: a.id, role: "speaker" });
+  a.s.close();
+  // Meanwhile the host fills every speaker slot.
+  for (let i = 0; i < 8; i++) {
+    const g = join(`G${i}`, null);
+    host.s.deliver({ t: "set_role", id: g.id, role: "speaker" });
+  }
+  assert.equal(join("Ana", ana).role, "guest");
+});
+
+test("seats: the room says where an account holds one", () => {
+  const { room, join } = seatRoom();
+  assert.equal(room.seatOf("1"), null);
+  const a = join("Ana", ana, { hostKey: "key" });
+  assert.equal(room.seatOf("1")?.role, "host");
+  a.s.close();
+  assert.equal(room.seatOf("1")?.role, "host"); // within the grace
+  assert.equal(room.seatOf("1")?.holder, null);
+});
