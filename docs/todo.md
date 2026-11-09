@@ -158,3 +158,68 @@ the account on another server, which knows nothing of the seat, and the agent's
 `GET /api/rooms/mine` always answers `{ room: null }`. Plan: mirror seats over
 the mesh with the room's other events (keyed by account id, which the mesh does
 not carry today), and have servers report seats to the agent for `/api/rooms/mine`.
+
+## Cluster v2: shards (under consideration)
+
+Measurements (README, Capacity, "Many rooms, and the cluster") say rooms that fit
+on one server scale, and a room spanning servers does not: 4 servers hold one
+room of ~12,000 (each pays ~half a core to take in the whole room over the mesh)
+but ~20,000-32,000 players in rooms that each stay on one server.
+
+Idea: drop the mesh cluster for shards. A shard is today's standalone server (one
+Bun process, one core, its capacity measured with the load test) plus ticket
+checks and a heartbeat; scaling out is adding shards.
+
+```
+browser ──► front (stateless, several copies)   client, /api/auth, /api/join → { shard wsUrl, ticket }
+              │  Postgres: shards (heartbeat, load), live_rooms (room → shard), seats
+              ▼
+   shard 1..N  (wss://talk-sN.ptnn.dev/ws?ticket=…)
+```
+
+- Placement: a new room goes to the least-loaded shard under a soft limit (headroom
+  for rooms that grow); joining a room always goes to its shard; full → "Room is
+  full". Place by measured load (CPU, loop p99), not only player counts: many
+  small rooms cost more than fewer big ones.
+- Front = today's agent without mesh or migration, its state in Postgres: no
+  single point of failure. Seats move to Postgres too, which also fixes "Seats
+  by account in a cluster" below and `/api/rooms/mine` everywhere.
+- Removes: `mesh.ts`, migration (`/api/migrate`, the client's migrate path,
+  `pickMigrants`/`takeover`), the `remote*` half of `room.ts`. Tag the old cluster
+  (`cluster-mesh-v1`) before deleting it.
+- Trade-offs to accept: a room never outgrows one shard (cap rooms, e.g. 2,000);
+  no live rebalancing (a whole-room move could come later); a shard that dies
+  loses its rooms' state (clients rejoin elsewhere); adding a shard on Coolify is
+  configuration (a compose service, a `talk-sN` domain, a DNS record).
+- Variant weighed and set aside: each shard a mesh cluster, for rooms bigger than
+  one core. The mesh measured at ~1.7x for 4 servers, with migration churn and a
+  collapse under overload (below).
+- Shard capacity measured so far, at 10 snapshots/s: ~7,000 (rooms of 100) to
+  ~8,000 (rooms of 1,000) on one i7-13700K P-core; ~5,000 on the laptop.
+- Rough scope: 8-12 days (design doc, Postgres registry and heartbeat, front and
+  placement, removing the mesh, multi-shard load test, Coolify recipe).
+
+Open questions: the room cap; one shard per container (one process, one vCPU) or
+several per container; a subdomain per shard or one domain routed by Traefik;
+whether losing a room's state when its shard dies is acceptable.
+
+## One clock for all the rooms of a server
+
+Each room runs its own `setInterval`: 480 rooms of 100 make ~9,600 ticks per
+second that may line up, against ~960 for 48 rooms of 1,000, and small rooms run
+below `SNAPSHOT_GROUPS_AT` (200), so a whole room bursts at once. Measured: rooms
+of 1,000 needed ~80% of a core less than rooms of 100 at 28,000 players, and ran
+without the transient failures. Try one server-wide clock that spreads the rooms
+over the tick period (snapshot groups at the server level), then rerun the
+rooms-of-100 scenario on the desktop.
+
+## Cluster overload behaviour (if the mesh cluster stays)
+
+- When every server is above its hard limit the agent still orders migrations
+  between them (300+ in a run at 14,000-16,000): skip orders when no server has room.
+- A server whose event loop stalls for 3 s is taken for dead and its players are
+  dropped, which cascades (all four servers "down" at 20,000 while their
+  processes lived): tell a slow server from a dead one (e.g. a longer timeout
+  while its socket is open).
+- The load test's cluster verdict uses the worst server's loop p99 each second:
+  also report and judge it per server.

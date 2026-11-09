@@ -35,6 +35,12 @@ Notable changes to Daystar. The format follows
 - docs/todo.md: rooms limited to an email domain (deferred), and the
   `email_verified` question to settle first.
 
+- README, Capacity: many rooms and the cluster (one core with rooms of 100; a
+  4-server cluster with one spanning room, and with rooms of 100 and 1,000, on the
+  laptop and an i7-13700K desktop).
+- docs/todo.md: cluster v2 with shards (under consideration), one clock for all
+  of a server's rooms, and the mesh cluster's overload behaviour.
+
 ### Fixed
 
 - Load test: a bot worker crashed (`InvalidStateError` in `promoteSpeakers`) when

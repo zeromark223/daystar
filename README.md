@@ -63,7 +63,9 @@ clients ask the agent where to connect, rooms can span servers, and overloaded
 servers hand players over. Design, configuration and Coolify setup:
 [docs/cluster.md](docs/cluster.md). A one-page overview for non-developers:
 [docs/architecture/index.html](docs/architecture/index.html) (open it in a browser). The Docker image runs standalone unless
-`CLUSTER_SERVERS` is set.
+`CLUSTER_SERVERS` is set. Measured: rooms that fit on one server scale well; a
+room spanning servers pays heavily for the mesh (Capacity, "Many rooms, and the
+cluster"). A shard-based replacement is under consideration (docs/todo.md).
 
 ## Layout
 
@@ -253,6 +255,63 @@ restart (Bun 1.4.2, one room, 301 players, as of November 2026):
 - The failures in its logs are mostly Cloudflare closing WebSockets (its edge
   restarts and redeploys drop open connections); clients reconnect. A speaker who
   reconnects comes back as a guest, though (see docs/todo.md, "Voice follow-ups").
+
+### Many rooms, and the cluster (November 2026)
+
+Rooms of a fixed size instead of one room, then the same on a local 4-server
+cluster, each server pinned to its own core (its SMT sibling left idle), bots on
+other cores, over loopback. Scenario as above (20% walking, no chat), with real
+Opus voice in every room. Runs 3-5 are in the load test database
+(`bun run loadtest:runs`).
+
+**One server, one core** (laptop, Ryzen AI 7 350, Linux; rooms of 100, a host and
+a speaker talking in turns; steps of 30 s):
+
+| CCU | Snapshots | Server CPU | Loop p99 | Move p99 | Voice p99 | |
+|---|---|---|---|---|---|---|
+| 6,000 | 20/s | 72% | 27 ms | 58 ms | 79 ms | **highest meeting every target** |
+| 7,000-9,000 | 18 → 10/s | 73-75% | 63-96 ms | 76-91 ms | 120-149 ms | fail (event loop only) |
+| 10,000 | 10/s | 75% | 45 ms | 106 ms | 164 ms | ok once the rate settles |
+| 12,000 | 10/s | 74% | 101 ms | 148 ms | 215 ms | fail |
+
+**Four servers, one room spanning them** (laptop; a host and two speakers;
+`SERVER_CAPACITY=4000`): **12,000 CCU** (~3,000 per server), about 1.7x one server
+alone (~7,000) on 4x the cores. Every server must take in the moves and voice of
+the whole room over the mesh, which costs about half a core however few players
+it serves. Past that it goes badly: from 14,000 every server is above its hard
+limit and the agent keeps moving players between full servers (300+
+migrations), and at 20,000 the servers' event loops stall for over 3 s, the agent
+takes them for dead and the cluster collapses.
+
+**Four servers, rooms that each fit on one server** (no mesh traffic):
+
+| Machine | Room size | 20/s | ~14/s | 10/s (peak) | Per server at peak |
+|---|---|---|---|---|---|
+| Laptop (Ryzen AI 7 350) | 100 | 12,000 | - | ~20,000 (24,000 borderline) | ~5,000 |
+| Desktop (i7-13700K, Ubuntu 26, P-cores, RPS on) | 100 (host talking) | 14,000 | 18,000 | **28,000** | ~7,000 |
+| Desktop | 1,000 (host talking) | 14,000 | 20,000 | **32,000** | ~8,000 |
+
+- **Rooms that fit on one server are what scale.** The same 4 cores serve
+  ~20,000-28,000 players in many rooms against 12,000 in one shared room, and
+  degrade gradually instead of collapsing.
+- **Not quite 4x one core.** The laptop drops from 4.74 to 4.22 GHz with four cores
+  busy, and the cluster's loop p99 is the worst of the four servers each second,
+  so one hiccup fails a row (each server alone stayed at 23-38 ms at 16,000).
+- **On the desktop the process gets the whole core:** total server CPU reaches
+  ~410% (laptop: ~73% per core), most likely because Receive Packet Steering moves
+  loopback's network processing off the servers' cores (not verified with
+  `/proc/softirqs`). Past the peak CPU stays flat and only latency grows: the
+  limit is plain CPU.
+- **Many small rooms cost more than fewer big ones.** At 28,000 the 1,000-player
+  rooms used ~80% of a core less than the 100-player rooms (330% against 408%,
+  loop p99 15 ms against 40 ms), and ran without transient failures. Likely
+  causes: a ticker per room (480 rooms x 20 Hz against 48), a snapshot encoded
+  per area-of-interest cell serving few sockets in a sparse room, snapshot groups
+  (alternate halves of the room per tick) only from 200 players, and ten times
+  more talkers sending voice. One server-wide clock spreading the rooms over the
+  tick period is the obvious next step (docs/todo.md).
+- Transient failures while the rate steps down (20 → 14 → 10/s) show up in every
+  run with small rooms: the overcharge changing the rate, not a lack of capacity.
 
 ### Operating system matters more than the chip
 
