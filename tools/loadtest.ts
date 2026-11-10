@@ -19,6 +19,7 @@ import { createInterface } from "node:readline";
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { dirname, resolve } from "node:path";
+import { RawWebSocket, type BotSocket } from "./rawws.ts";
 import { APPEARANCE_COUNT, type AppearanceId } from "../shared/src/appearance.ts";
 import type { Direction } from "../shared/src/direction.ts";
 import { canBeAt, moveInSpace } from "../shared/src/space.ts";
@@ -123,7 +124,7 @@ const DIRS: { dx: number; dy: number; dir: Direction }[] = [
 ];
 
 interface Bot {
-  ws: WebSocket;
+  ws: BotSocket;
   room: string;
   /** Cluster ticket for /api/migrate (null standalone). */
   ticket: string | null;
@@ -255,6 +256,8 @@ function runWorker(): void {
   let chatEveryMs = 30_000;
   let movingRatio = 1;
   let measureEvery = 10;
+  /** --bot-socket raw: bots that only count frames use RawWebSocket. */
+  let rawSockets = true;
   /**
    * Shared clock for voice (Date.now() at the start of the test): frame k covers
    * [epoch + 20k, epoch + 20(k+1)) ms and is sent with seq = k & 0xffff, like the
@@ -373,33 +376,33 @@ function runWorker(): void {
 
   /** Open a socket for the bot and make it the current one (join, then drop the old socket). */
   function connect(bot: Bot, url: string): void {
-    const old = bot.ws as WebSocket | null;
-    const ws = new WebSocket(url);
-    ws.binaryType = "arraybuffer";
-    bot.ws = ws;
+    const old = bot.ws as BotSocket | null;
     bot.pending = [];
     // Like the client: a handshake (or join) that stalls is given up and retried,
     // instead of hanging until the network gives up minutes later.
     let timedOut = false;
-    const joinTimer = setTimeout(() => {
-      if (bot.ws !== ws || bot.joined) return;
-      timedOut = true;
-      ws.close();
-    }, JOIN_TIMEOUT_MS);
-    ws.addEventListener("open", () => {
+    let ws: BotSocket;
+    const opened = () => {
       ws.send(encodeClientMessage({ t: "join", name: bot.name, appearance: bot.appearance, hostKey: bot.hostKey }));
       if (old && old !== ws) old.close();
-    });
-    ws.addEventListener("message", (event) => {
-      if (bot.ws !== ws || !(event.data instanceof ArrayBuffer)) return;
-      const bytes = new Uint8Array(event.data);
+    };
+    const closed = (code: number) => {
+      if (bot.ws !== ws) return; // replaced on purpose
+      bot.joined = false;
+      counters.closes++;
+      const key = timedOut ? "timeout" : String(code);
+      closeCodes.set(key, (closeCodes.get(key) ?? 0) + 1);
+      void rejoin(bot);
+    };
+    /** One server message (its own copy). */
+    const handle = (bytes: Uint8Array) => {
       counters.bytesIn += bytes.byteLength;
       const op = bytes[0];
       // Snapshots are only scanned, never decoded, to keep bots cheap; most bots
       // only count them, the measured share also times them.
       if (op === SNAPSHOT_OPCODE) {
         counters.snapshots++;
-        const data = new DataView(event.data);
+        const data = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
         counters.voiceRx += data.getUint8(3 + data.getUint16(1, true) * SNAPSHOT_ENTRY + VOICE_COUNT_AFTER_PLAYERS);
         if (!bot.measured) return;
         const now = performance.now();
@@ -456,16 +459,51 @@ function runWorker(): void {
       } else if (msg?.t === "migrate") {
         void migrate(bot);
       }
-    });
-    ws.addEventListener("close", (event) => {
-      if (bot.ws !== ws) return; // replaced on purpose
-      bot.joined = false;
-      counters.closes++;
-      const code = timedOut ? "timeout" : String(event.code);
-      closeCodes.set(code, (closeCodes.get(code) ?? 0) + 1);
-      void rejoin(bot);
-    });
-    ws.addEventListener("error", () => counters.errors++);
+    };
+    // Bots that only count frames use the raw client (see tools/rawws.ts); measured
+    // bots keep Bun's WebSocket so their timings are taken as before.
+    if (rawSockets && !bot.measured && url.startsWith("ws:")) {
+      const raw = new RawWebSocket(url);
+      ws = raw;
+      raw.onopen = opened;
+      raw.onclose = closed;
+      raw.onerror = () => counters.errors++;
+      raw.onframe = (chunk, start, end) => {
+        if (bot.ws !== raw) return;
+        const op = chunk[start];
+        // The hot path: count in place, no copy and no decode.
+        if (op === SNAPSHOT_OPCODE) {
+          counters.bytesIn += end - start;
+          counters.snapshots++;
+          counters.voiceRx += chunk[start + 3 + (chunk[start + 1] | (chunk[start + 2] << 8)) * SNAPSHOT_ENTRY + VOICE_COUNT_AFTER_PLAYERS];
+          return;
+        }
+        if (op === SERVER_OPCODES.view || op === SERVER_OPCODES.playerJoined || op === SERVER_OPCODES.playerLeft) {
+          counters.bytesIn += end - start;
+          return;
+        }
+        const bytes = new Uint8Array(end - start);
+        bytes.set(chunk.subarray(start, end));
+        handle(bytes);
+      };
+    } else {
+      const socket = new WebSocket(url);
+      socket.binaryType = "arraybuffer";
+      ws = socket;
+      socket.addEventListener("open", opened);
+      socket.addEventListener("message", (event) => {
+        if (bot.ws !== socket || !(event.data instanceof ArrayBuffer)) return;
+        handle(new Uint8Array(event.data));
+      });
+      socket.addEventListener("close", (event) => closed(event.code));
+      socket.addEventListener("error", () => counters.errors++);
+    }
+    bot.ws = ws;
+    const joinTimer = setTimeout(() => {
+      if (bot.ws !== ws || bot.joined) return;
+      timedOut = true;
+      ws.close();
+    }, JOIN_TIMEOUT_MS);
   }
 
   /** The server shed load: like the client, get a ticket elsewhere and switch. */
@@ -671,7 +709,7 @@ function runWorker(): void {
   }, 1000);
 
   type Command =
-    | { cmd: "config"; baseUrl: string; chatEveryMs: number; movingRatio: number; voiceEpoch: number; measureEvery: number }
+    | { cmd: "config"; baseUrl: string; chatEveryMs: number; movingRatio: number; voiceEpoch: number; measureEvery: number; rawSockets: boolean }
     | { cmd: "add"; index: number; room: string; name: string; part?: Bot["part"]; hostKey?: string; voice?: number }
     /** --chat-source ai: the director's line for this bot. */
     | { cmd: "say"; index: number; text: string }
@@ -688,6 +726,7 @@ function runWorker(): void {
       movingRatio = msg.movingRatio;
       voiceEpoch = msg.voiceEpoch;
       measureEvery = msg.measureEvery;
+      rawSockets = msg.rawSockets;
     } else if (msg.cmd === "talkers") {
       ourTalkers = new Set(msg.ids);
     } else if (msg.cmd === "say") {
@@ -758,6 +797,7 @@ export const OPTION_SPECS: OptionSpec[] = [
   { name: "chat-language", type: "string", default: "English", arg: "<language>", group: "Bots", help: "with --chat-source ai: the language bots chat in" },
   { name: "chat-every", type: "string", default: "30", arg: "<s>", group: "Bots", help: "seconds between chat messages per bot; 0 = no chat" },
   { name: "measure-share", type: "string", default: "0.1", arg: "<s>", group: "Bots", help: "share of bots that time moves, snapshot gaps and voice; the rest only count frames, which keeps bots cheap" },
+  { name: "bot-socket", type: "string", default: "raw", arg: "<raw|ws>", group: "Bots", help: "socket of the bots that only count frames: raw (a minimal WebSocket client on Bun.connect, much cheaper) or ws (Bun's WebSocket); measured bots always use ws" },
   { name: "workers", type: "string", default: "6", arg: "<n>", group: "Bots", help: "bot processes" },
   { name: "room-size", type: "string", default: "0", arg: "<n>", group: "Rooms", help: "bots per room; 0 = everyone in one room" },
   { name: "speakers", type: "string", default: "0", arg: "<n>", group: "Rooms", help: "talkers per room: a host plus n-1 speakers holding a conversation (real Opus frames); rooms are created with POST /api/rooms and printed as invite links" },
@@ -826,6 +866,8 @@ export interface Options {
   speakers: number;
   /** Every n-th bot measures latencies (1 / --measure-share). */
   measureEvery: number;
+  /** --bot-socket: the counting bots' WebSocket client. */
+  botSocket: "raw" | "ws";
   port: number;
   /** Game servers in a spawned local cluster; 0 = one standalone server. */
   cluster: number;
@@ -881,7 +923,7 @@ export function parseOptions(input: string[], cli = false): Options {
 
   /** Parsed values: options with a default are always there. */
   type Values = Record<
-    "steps" | "report-every" | "room-size" | "hold" | "names" | "chat-source" | "theme" | "chat-language" | "ramp" | "workers" | "chat-every" | "speakers" | "measure-share" | "moving" |
+    "steps" | "report-every" | "room-size" | "hold" | "names" | "chat-source" | "theme" | "chat-language" | "ramp" | "workers" | "chat-every" | "speakers" | "measure-share" | "bot-socket" | "moving" |
       "health-token" | "port" | "cluster" | "capacity" | "room-prefix",
     string
   > &
@@ -965,6 +1007,7 @@ export function parseOptions(input: string[], cli = false): Options {
     movingRatio: ratio("moving", values.moving),
     speakers: int("speakers", values.speakers, 0),
     measureEvery: Math.max(1, Math.round(1 / Math.max(0.001, ratio("measure-share", values["measure-share"])))),
+    botSocket: values["bot-socket"] === "ws" ? "ws" : values["bot-socket"] === "raw" ? "raw" : fail("--bot-socket is raw or ws"),
     port: int("port", values.port, 1),
     cluster: int("cluster", values.cluster, 0),
     capacity: int("capacity", values.capacity, 1),
@@ -1256,7 +1299,7 @@ async function orchestrate(
   const voiceEpoch = Date.now();
   for (const w of workers) {
     // With AI chat the director says who talks when; bots do not chat on their own.
-    tell(w, { cmd: "config", baseUrl: httpUrl, chatEveryMs: opts.ai ? 0 : chatEveryMs, movingRatio: opts.movingRatio, voiceEpoch, measureEvery: opts.measureEvery });
+    tell(w, { cmd: "config", baseUrl: httpUrl, chatEveryMs: opts.ai ? 0 : chatEveryMs, movingRatio: opts.movingRatio, voiceEpoch, measureEvery: opts.measureEvery, rawSockets: opts.botSocket === "raw" });
   }
 
   const roomIndex = (i: number) => (roomSize > 0 ? Math.floor(i / roomSize) : 0);
