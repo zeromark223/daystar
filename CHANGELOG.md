@@ -27,6 +27,11 @@ Notable changes to Daystar. The format follows
   to `loadtest_runs` and its rows to `loadtest_rows` (migration 002), next to
   the CSV; on when `PGHOST` is set, `--no-db` to skip, never blocking a run.
   `bun run loadtest:runs [id]` lists runs or shows one.
+- Load test: bots that only count frames use a raw WebSocket client over
+  `Bun.connect` (`tools/rawws.ts`), handing each frame over in place without a
+  `MessageEvent` and `ArrayBuffer` per frame; measured bots keep Bun's WebSocket
+  (`--bot-socket ws` for all of them). At 12,000 bots in one room of 1,000: the
+  bots' JavaScript time -28%, their total CPU -11%.
 - Load test: Ctrl+C stops a run cleanly (summary written, run saved as
   `stopped`); a second Ctrl+C quits at once.
 - WebSocket upgrades from another site's page are refused (`Origin` must be the
